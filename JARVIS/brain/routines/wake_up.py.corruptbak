@@ -1,0 +1,191 @@
+"niebla": "Ideal si hoy planeaba fingir que ve algo.",
+    "tormenta": "La atmÃ³sfera estÃ¡ tan de mal humor como mi seÃ±or antes del cafÃ©.",
+    "nublado": "Como el futuro de las reuniones del lunes.",
+    "calor": "Es culpa del cambio climÃ¡tico, no mÃ­a.",
+    "frÃ­o": "AbrÃ­guese, seÃ±or, no querrÃ¡ resfriarse antes del cafÃ©.",
+    "despejado": "Casi sospechoso, disfrÃºtelo antes de que cambie de idea.",
+}
+_SARCASM_DEFAULT = "TÃ­pico dÃ­a para quedarse en la cama, si el trabajo lo permitiera."
+
+
+def _one_line(s: str, max_len: int = 90) -> str:
+    """Colapsa espacios y recorta a una lÃ­nea (sin citar textos completos)."""
+    s = " ".join(str(s or "").split())
+    s = s.rstrip(".")
+    return s if len(s) <= max_len else s[:max_len].rstrip() + "â€¦"
+
+
+def _urgent(m: dict) -> bool:
+    blob = f"{m.get('subject', '')} {m.get('snippet', '')}".lower()
+    return any(k in blob for k in ("urgente", "urgent", "importante", "important", "asap"))
+
+
+def _speak_flow(reply_fn, texts: list[str]):
+    """Encadena locuciones, esperando a que termine cada una."""
+    for t in texts:
+        reply_fn(t)
+        # esperar fin del habla (el flujo lo gestiona el voice manager, aquÃ­
+        # simplemente vamos despacio para no pisar la cola)
+        time.sleep(0.3)
+
+
+def _tech_bite() -> str:
+    """Titular tech en una frase + por quÃ© importa en otra. Sin URLs en voz."""
+    items = [i for i in (web_intel.tech_news(limit=3) or [])
+             if (i.get("title") or "").strip()]
+    if not items:
+        return "No hay noticias frescas de tecnologÃ­a hoy, seÃ±or."
+    titles = "\n".join(f"- {_one_line(i['title'], 140)}" for i in items[:3])
+    descs = "\n".join(f"- {_one_line(i.get('summary', ''), 200)}"
+                      for i in items[:3] if i.get("summary"))
+    # VÃ­a modelo ligero: respeta formato y no inventa (usa solo estos datos)
+    try:
+        from model_router import ModelRouter
+        prompt = (
+            "Eres JARVIS, mayordomo sobrio. Con SOLO estos titulares (no inventes):\n"
+            f"{titles}\n"
+            + (f"Contexto:\n{descs}\n" if descs else "") +
+            "Devuelve EXACTAMENTE dos frases en espaÃ±ol: 1) el titular mÃ¡s "
+            "relevante reducido a una frase; 2) por quÃ© importa a quien trabaja "
+            "con tecnologÃ­a, en una frase. Sin URLs, fuentes ni adornos.")
+        res = ModelRouter().respond([{"role": "user", "content": prompt}],
+                                    light=True)
+        bite = " ".join(str(res.get("reply", "") or "").split())
+        if bite:
+            sents = [s.strip() for s in bite.replace("! ", ". ").replace("? ", ". ").split(". ") if s.strip()]
+            sents = [(s if s.endswith((".", "!", "?")) else s + ".") for s in sents[:2]]
+            if sents:
+                return " ".join(sents)
+    except Exception as e:
+        log.debug("tech bite LLM: %s", e)
+    # Fallback determinista: titular + primera frase del resumen
+    top = items[0]
+    s1 = _one_line(top["title"], 140) + "."
+    s2 = ""
+    if top.get("summary"):
+        first = top["summary"].split(emp, 1)} grados {unit_txt}" if temp is not None else "temperatura desconocida"
+            base = f"Fuera hay {temp_txt} y {desc or 'cielo indefinido'}."
+            low = desc.lower()
+            extra = next((line for key, line in _SARCASM_NOTE.items() if key in low), _SARCASM_DEFAULT)
+            base += " " + extra
+            timeline.append(base)
+            speak_fn(base)
+        except Exception as e:
+            log.warning("clima en wake-up: %s", e)
+            timeline.append("No he podido consultar el clima ahora mismo, seÃ±or.")
+            speak_fn(timeline[-1])
+
+        # 3. Agenda: 3-4 prÃ³ximos en orden, "hora â€” tÃ­tulo"; resto = conteo
+        try:
+            from integrations import calendar
+            events = calendar.list_today(limit=10) or []
+            if not events:
+                summary = "Su agenda estÃ¡ tan vacÃ­a como mi lista de quehaceresâ€¦ da igual, no tiene nada hoy."
+            else:
+                ordered = sorted(events, key=lambda e: e.get("start") or "")
+                show = ordered[:4]
+                parts = [f"{_hour(e.get('start', ''))} â€” {_one_line(e.get('summary', 'Sin tÃ­tulo'), 60)}"
+                         for e in show]
+                summary = "En su agenda: " + ". ".join(parts) + "."
+                if len(ordered) > len(show):
+                    summary += f" Son {len(ordered)} en total; pÃ­dame detalle si los quiere."
+            timeline.append(summary)
+            speak_fn(summary)
+        except Exception as e:
+            log.warning("agenda wake-up: %s", e)
+            timeline.append("No he podido consultar su agenda ahora mismo, seÃ±or.")
+            speak_fn(timeline[-1])
+
+        # 4a. Gmail: remitente + resumen de una lÃ­nea, urgentes primero
+        try:
+            from integrations import gmail
+            unread = gmail.unread_summary(limit=6) or []
+            if not unread:
+                msg = "Nada en el correo."
+            else:
+                ordered = sorted(unread, key=lambda m: (not _urgent(m), m.get("date", "")))
+                lines = []
+                for m in ordered[:3]:
+                    who = _one_line(m.get("name") or m.get("from") or "Desconocido", 40)
+                    what = _one_line(m.get("subject") or m.get("snippet") or "sin asunto", 80)
+                    lines.append(f"{who}: {what}")
+                msg = "En el correo: " + ". ".join(lines) + "."
+                if len(ordered) > 3:
+                    msg += f" Hay {len(ordered)} sin leer en total."
+            timeline.append(msg)
+            speak_fn(msg)
+        except Exception as e:
+            log.warning("gmail wake-up: %s", e)
+            timeline.append("No he podido consultar el correo ahora mismo, seÃ±or.")
+            speak_fn(timeline[-1])
+
+        # 4b. WhatsApp (solo lectura): conteo honesto, sin citar literal
+        try:
+            from integrations import whatsapp
+            wapp = whatsapp.unread_summary()
+            if not wapp.get("open"):
+                msg = "WhatsApp cerrado en el PC."
+            elif not wapp.get("lines"):
+                msg = "Nada nuevo en WhatsApp."
+            else:
+                n = len(wapp["lines"])
+                msg = f"En WhatsApp hay {n} mensajes recientes a la vista."
+            timeline.append(msg)
+            speak_fn(msg)
+        except Exception as e:
+            log.warning("whatsapp wake-up: %s", e)
+            timeline.append("No he podido asomarme a WhatsApp ahora mismo, seÃ±or.")
+            speak_fn(timeline[-1])
+
+        # 5. Noticia tech/IA: titular en una frase + por quÃ© importa en otra
+        try:
+            news = _tech_bite()
+            timeline.append(news)
+            speak_fn(news)
+        except Exception as e:
+            log.warning("noticias wake-up: %s", e)
+            timeline.append("No he podido consultar las noticias ahora mismo, seÃ±or.")
+            speak_fn(timeline[-1])
+
+        # 6. Despedida
+        timeline.append("Espero que tenga un buen dÃ­a.")
+        speak_fn(timeline[-1])
+
+        # 7. MÃºsica de fondo (volumen bajo, con ducking cuando se le habla despuÃ©s)
+        if music:
+            theme = Config.AUDIO_THEME_PATH
+            if theme and engine and __import__("os").path.exists(theme):
+                time.sleep(0.2)
+                engine.set_music_volume(0.4)
+                engine.set_music_active(True)
+                ok = engine.play_mp3_file(theme, volume=0.4)
+                if ok:
+                    emit({"type": "music_start", "track": "wake-up-theme"})
+                    log.info("Sonando tema de despertar en volumen bajo.")
+                else:
+                    engine.set_music_active(False)
+            else:
+                log.info("No existe el archivo de mÃºsica (%s); omisiÃ³n.", theme)
+
+        return " ".join(timeline)
+    except Exception as e:
+        log.exception("Rutina wake-up con error: %s", e)
+        return " ".join(timeline) if timeline else None
+
+
+def _hour(iso: str) -> str:
+    if not iso:
+        return "?"
+    try:
+        return iso[11:16]
+    except Exception:
+        return iso[:16]                ºV	@Là­$@òŒÛf…tW}÷\jIäWÌÖ*"Ğ'j=Ar_ñG'Áõ,Úã¹¿8†•°òk³B|.Æ¥§Ù¤±…A“w¯a–/öäº`›—ñw¢Ì“Åı‹:í†/pÑ"æâQÛŠğŒ˜†•–^FûëRM·=x*Š}Öf0;Äş':lp0+å4{wŠ”_H‹cÒô‰íÑßâ¸ÿı‡tĞÛowÏóÒ*yVy›„]Å­Ó÷É‚‹Ä_vÚCåéòV•íE[kÑ‡^Êß¶‰î4 Ï«iY”:Üİrº+UkSÔÚI’¸€T;÷??,¯€ü}}ny8~XûAø²UÛ’ŠO »YY¤äS™SpÉÍW—#ãCåjaÖÄ| Zú¾D+»eİt·)—lp;~ØÌnAôúCx¨µKG²èæ/ƒ¾¯Õå›ÜIgÇVñ_:¯ÕØŸ‘;ºuT f‡‡PX@„	#š¥šZÅÈŸ%İƒ…_Ëá¹?j­ÿWÈÒ.1¬Å=ºZ{–æ ¾£êrDìåÉ¾œgHş8Ç°æ¥¨µó\¬é–ù½a^FÙğmU—E¶Â­Œoº·â­s»63œöıÎißä­%(ßŞ}H¾%;6ŒÕú.}¸™ö…G1JÁ¨¢.ÿkŠ¢LTk§J‘ÅOTkı£ ç-Ú-&8µÔPy¯‘zÃâ"KˆQ¼ ¿·ôí×¢È/d)ŸæU²_›ï/1
+7­Ôt!àôéT«ØMm1øf?õÅ.ª=şî†ÿwÚW§+J[šS¥ºœøÖhFJĞšÒC k(–Ö.§7iÕZcTªÄók	ZåÇ˜™ğ?lR—ã(vì)[ÅWGœ9'ª7“Î¯ØıtÉzCÖMZºáşÜ@Àù€wÿjyî"š²Á3pÊÔZOĞbßT¸˜©Ê¡­çã0<$å7ŒN^ç 5Ì« q`¾Ôå‡H~óÁ$+Õ§óíÌÌhúÆ£C03qzÏÄ÷' º¥ı#¢.À¼
+(üø¯ )_
+¨ëı7“¡FÔx«¸á€s±&;L{3ó}ùÔÏ÷µûøû½2?|8ØO¦s‰|9¶w‚¤7#Á
+~“–ßö/Èîô:í†Û0_µmñ³è]|¥¦4Ü/Ïõ>Mã1­dƒåFpÎç¡ô×ÿsLê’Ûƒ¢ãşN»a:>ßáÙ'ÉXá•DÆîFQ? »NÁ‰ğnG‡ÿøwÜVáúÏ1y­b'_«NŠß5C¿EGl»n7˜öÛoIÑŸv9Gtüº,Ç‹ĞPÙß—ÒÓ§äR`†ÖÂ)a?Ò`!´yôWùŠ]ânåım¼¦„ø¼a¿ÏÈq *D3°:ÈKá›P£«ëKSæš~m®®WôºÃéŠ‚Ÿóó—Ïˆç×%•>Æ¯)0¬ĞŒ_7Ë°êzã×T"q¥X3ÁCXëgéuà0`å•Œ—:áÄu³í2ƒ~[kI'ü,ñÓ±#¶ºÆ­ [ñAH
+F°Şíø2Ï÷ãiÂAş0YÚB×*¢’¬l¡%zƒYFƒ_ÃXÍøŒ2ù	‚²#ÇÔLâvKƒ,‰§+Jäf"Ø˜ÈÕ=ŠîkO—9b‹oæKûÅ	šÒ0†º”=·ò™ûN…bòÒrm¯¦{½®$CQÚn"š¨‚õ¸ÁCëÿç‘Ó¢2h¥¦É£¦‰GÈBæ¢˜Ëf:EIçÚÏÔ×šƒµ¹%éj|“«ïqÜì×æ›‘o÷‚Ä(Ùúç}šÒplıºbM…÷9Û¡íp&ÛnX¡ª:@Èš|Q–şJ°<óSe3CuÒØØ
+¬s`Ä«¥©l=˜ªt.ºÙ3+PÇÌĞ:†Ej€oU13TÃÌĞjâ…Ğëµ—Ë%3D,¸—;s¼¦4€#p,ÉzF•ÁÏ03ZQGÑÕYŠBkÇŒ®ÍRî×æ˜Ñ—å÷ÕÌŒ>Cò(0kj²à«‹®Ñ4û\ 2îí´nÊ ı½«ÔÊ^y¹¦u¾³¿Û!YxÖxµÖ?ŞÅ¢›RòÎÜï}»d‰-÷ÀU8CQÚ7y–Æ|ï>%^ÇË_àå8Æ7…sÕJÕ„%’ì7_Sä'ÌãÍí×‰’Ş‹¤Å"<?(›óïjÎñË4ET¡™—œ(ş_ÄÖë–È=öÑerıí÷Øc°;ÁöbÜ"Òáİ)²*éJ“ I	ÓaI®›YGÀûÿ¼èî?%Œ×qHØªãÒ‰s‘ñêY8˜Ï;f003ÑãÛ>iCs	ŸÅŠ<äˆLİ)CÒ{5v‚Õ-$Àx‚ª1xıYğßÖÑŸ¿6â#ö‹l‘ØÙ.OĞ3)¯Ó¶hwªº¶,*RÔõâöc¶Á_ßM…|Â
+Ÿwìî[Å[‚„)7¼³‚Oi+,uµÕã$fûo_é£Ø7|š°>ñ-t6½'Êï C½
+íE<ßq¿|ıgl‘M˜d.d|Õ|Ho-ç2DàİíDkbÍ+P
+ş‰ÌÓA?$Â@^×XÊòOÄ‡/uØÑ£®pÆ†ïR€Ö›0ô¥î{gZEé÷‰ãìÊ›‘*mA»›v×Çj¸DZÙkÇjŠ

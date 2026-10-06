@@ -1,0 +1,642 @@
+me)s %(message)s"))
+        for name in ("discord.voice", "discord.voice.receive", "discord.gateway",
+                     "discord.voice.receive.router", "discord.client"):
+            lg = logging.getLogger(name)
+            lg.setLevel(logging.DEBUG)
+            if not any(isinstance(x, logging.FileHandler) and
+                       getattr(x, "baseFilename", "") == p for x in lg.handlers):
+                lg.addHandler(h)
+    except Exception:
+        pass
+
+
+_wire_pycord_logs()
+
+
+def _vlog(**kw):
+    """Traza de voz en fichero para diagnÃ³stico (una lÃ­nea JSON por evento)."""
+    try:
+        import json as _js
+        from config import DATA_DIR as _DD
+        p = os.path.join(str(_DD), "voice_debug.log")
+        kw.setdefault("t", round(time.time(), 2))
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(_js.dumps(kw, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+FRAME_BYTES = 960 * 2 * 2  # 20 ms PCM s16le 48 kHz estÃ©reo
+VAD_RMS = int(os.environ.get("JARVIS_VAD_RMS", "400"))
+MIN_SPEECH_SEC = 0.4
+END_SILENCE_SEC = 0.5
+MAX_UTTER_SEC = 10.0
+ECHO_COOLDOWN_SEC = 0.6
+BARGE_SEC = 0.3  # voz sostenida del owner mientras habla el bot -> interrumpir
+
+
+def ensure_opus() -> bool:
+    """Carga libopus (DLL incluida en pyogg) en discord.opus."""
+    try:
+        from discord import opus
+        if opus.is_loaded():
+            return True
+        import glob
+        cands = []
+        for base in sys.path:
+            cands += glob.glob(os.path.join(base, "pyogg", "opus.dll"))
+            cands += glob.glob(os.path.join(base, "pyogg", "libopus*.dll"))
+        for dll in cands:
+            try:
+                opus.load_opus(dll)
+                if opus.is_loaded():
+                    log.info("Opus cargado desde %s", dll)
+                    return True
+            except Exception:
+                continue
+        log.warning("Opus no encontrado: la voz de Discord no funcionarÃ¡.")
+        return False
+    except Exception as e:
+        log.warning("Opus no disponible: %s", e)
+        return False
+
+
+def ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def pcm48stereo_to_float16k(pcm: bytes) -> np.ndarray:
+    """PCM s16le 48 kHz estÃ©reo â†’ float32 mono 16 kHz (para Whisper)."""
+    a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    if a.size % 2:
+        a = a[:-1]
+    mono = a.reshape(-1, 2).mean(axis=1)
+    kernel = np.ones(3, dtype=np.float32) / 3.0
+    smooth = np.convolve(mono, kernel, mode="same")
+    return smooth[::3].astype(np.float32)
+
+
+def frame_rms(pcm: bytes) -> float:
+    a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    if a.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(a * a)))
+
+
+class VadSink(_SinkBase):
+    """Sink con VAD: acumula voz del owner y emite utterances.
+
+    Hereda de discord.sinks.Sink (pycord exige isinstance). write() corre en
+    el hilo router de voz â†’ thread-safe con lock; la utterance completa sale
+    por `emit(user_id, pcm_bytes)`.
+
+    NOTA DAVE: con el cifrado E2E de voz de Discord la recepciÃ³n puede venir
+    vacÃ­a (roto upstream, pycord#3139). El resto del pipeline (unirse, hablar,
+    transcribir, responder) funciona igual y la escucha se activa sola cuando
+    la librerÃ­a lo repare.
+    """
+
+    # pycord 2.8 exige estos atributos a todo sink (ni su WaveSink los trae:
+    # recepciÃ³n rota a ese nivel). Sin ellos start_recording ni arranca.
+    __sink_listeners__ = []
+
+    def walk_children(self):
+        return []
+
+    def is_opus(self):
+        # Queremos PCM decodificado, no paquetes opus crudos.
+        return False
+
+    def __init__(self, owner_id: int, emit, rms_threshold: int = VAD_RMS,
+                 on_barge=None):
+        try:
+            _SinkBase.__init__(self)
+        except Exception:
+            pass
+        self.owner_id = int(owner_id)
+        self.emit = emit
+        self.on_barge = on_barge
+        self.rms_threshold = rms_threshold
+        self.vc = None
+        self._lock = threading.Lock()
+        self._buf = bytearray()
+        self._speech_sec = 0.0
+        self._silence_sec = 0.0
+        self._in_speech = False
+        self.drop_until = 0.0  # half-duplex: ignorar mientras habla el bot
+        self.frames_total = 0
+        self.frames_owner = 0
+        self.bytes_owner = 0
+        self.uids_seen = {}
+        self.last_write_ts = 0.0
+        self.rms_max = 0
+        self.rms_over = 0
+        self._barge_sec = 0.0
+        self.noise_floor = 200.0
+        self.vad_thr = float(VAD_RMS)
+
+    def init(self, vc):
+        self.vc = vc
+
+    def cleanup(self):
+        self.flush()
+
+    def flush(self):
+        with self._lock:
+            if self._in_speech and self._speech_sec >= MIN_SPEECH_SEC:
+                pcm = bytes(self._buf)
+            else:
+                pcm = b""
+            self._buf = bytearray()
+            self._speech_sec = 0.0
+            self._silence_sec = 0.0
+            self._in_speech = False
+        if pcm:
+            try:
+                self.emit(self.owner_id, pcm)
+            except Exception as e:
+                log.debug("vad emit: %s", e)
+
+    def write(self, data, user):
+        # pycord entrega VoiceData(pcm, source); se aceptan bytes crudos tambiÃ©n.
+        pcm = b""
+        src = user
+        if data is not None and hasattr(data, "pcm"):
+            pcm = bytes(data.pcm or b"")
+            if src is None:
+                src = getattr(data, "source", None)
+        elif isinstance(data, (bytes, bytearray)):
+            pcm = bytes(data)
+        try:
+            uid = int(getattr(src, "id", src) or 0)
+        except Exception:
+            return
+        self.frames_total += 1
+        self.last_write_ts = time.monotonic()
+        try:
+            self.uids_seen[uid] = self.uids_seen.get(uid, 0) + 1
+        except Exception:
+            pass
+        if uid != self.owner_id or len(pcm) < 2:
+            return
+        self.frames_owner += 1
+        self.bytes_owner += len(pcm)
+        try:
+            _r = frame_rms(pcm[:FRAME_BYTES] if len(pcm) >= FRAME_BYTES else pcm)
+            if _r > self.rms_max:
+                self.rms_max = _r
+            if _r >= self.rms_threshold:
+                self.rms_over += 1
+        except Exception:
+            pass
+        if time.monotonic() < self.drop_until:
+            # Posible barge-in: el owner habla mientras suena el bot.
+            if _r >= self.rms_threshold:
+                self._barge_sec += len(pcm) / 192000.0
+                if self._barge_sec >= BARGE_SEC and self.on_barge:
+                    self._barge_sec = 0.0
+                    try:
+                        self.on_barge()
+                    except Exception as e:
+                        log.debug("barge cb: %s", e)
+            else:
+                self._barge_sec = 0.0
+            return
+        self._barge_sec = 0.0
+        # Umbral adaptativo: sigue al ruido de fondo (suave: 0.4s, fuerte: x3).
+        _thr = max(300.0, min(self.noise_floor * 3.0, self.rms_threshold * 2.0))
+        self.vad_thr = _thr
+        # DuraciÃ³n real del fragmento (PCM s16le 48 kHz estÃ©reo).
+        secs = len(pcm) / 192000.0
+        rms = frame_rms(pcm[:FRAME_BYTES] if len(pcm) >= FRAME_BYTES else pcm)
+        if not self._in_speech and rms < _thr:
+            self.noise_floor = 0.95 * self.noise_floor + 0.05 * rms
+        emit_now = None
+        with self._lock:
+            if rms >= _thr:
+                self._buf += pcm
+                self._speech_sec += secs
+                self._silence_sec = 0.0
+                self._in_speech = True
+                if self._speech_sec >= MAX_UTTER_SEC:
+                    emit_now = bytes(self._buf)
+                    self._buf = bytearray()
+                    self._speech_sec = 0.0
+                    self._in_speech = False
+            else:
+                if self._in_speech:
+                    self._silence_sec += secs
+                    self._buf += pcm
+                    if self._silence_sec >= END_SILENCE_SEC:
+                        if self._speech_sec >= MIN_SPEECH_SEC:
+                            emit_now = bytes(self._buf)
+                        self._buf = bytearray()
+                        self._speech_sec = 0.0
+                        self._silence_sec = 0.0
+                        self._in_speech = False
+        if emit_now:
+            try:
+                _vlog(event="emit", sec=round(self._speech_sec, 2),
+                      bytes=len(emit_now))
+            except Exception:
+                pass
+            try:
+                self.emit(self.owner_id, emit_now)
+            except Exception as e:
+                _vlog(event="emit_fail", err=f"{type(e).__name__}: {e}"[:200])
+                log.debug("vad emit: %s", e)
+
+
+class VoiceCall:
+    """Una llamada activa: graba con VAD, procesa y reproduce."""
+
+    def __init__(self, vc, owner_id: int, loop, origin_channel,
+                 handle_fn=None, transcribe_fn=None, tts_fn=None):
+        self.vc = vc
+        self.owner_id = int(owner_id)
+        self.loop = loop
+        self.origin = origin_channel
+        self.handle_fn = handle_fn
+        self.transcribe_fn = transcribe_fn
+        self.tts_fn = tts_fn
+        self.sink = VadSink(owner_id, self._on_utterance_threadsafe,
+                            on_barge=self._on_barge_threadsafe)
+        self.speaking = False
+        self._busy = False
+        self._music = False
+        self.active = False
+        self.utterances = 0
+        self.last_transcript = ""
+        self.last_reply = ""
+        self.last_error = None
+        self._think_task = None
+        self._play_epoch = 0
+        self._speak_started = 0.0
+
+    def _on_barge_threadsafe(self):
+        try:
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._do_barge()))
+        except Exception as e:
+            log.debug("barge schedule: %s", e)
+
+    async def _do_barge(self):
+        """El owner hablÃ³ mientras sonaba yo: corto, callo y escucho."""
+        try:
+            # Anti-eco: si acabo de empezar a hablar (<1.2s), es mi propia
+            # voz volviendo por los altavoces; no es una interrupciÃ³n real.
+            _started = getattr(self, "_speak_started", 0.0) or 0.0
+            if _started and (time.monotonic() - _started) < 1.2:
+                return
+            self._play_epoch += 1
+            t = self._think_task
+            self._think_task = None
+            if t is not None and not t.done():
+                t.cancel()
+            try:
+                if self.vc.is_playing():
+                    self.vc.stop()
+            except Exception:
+                pass
+            self.speaking = False
+            self._busy = False
+            self.sink.drop_until = time.monotonic() + 0.25
+            _vlog(event="barge")
+        except Exception as e:
+            log.debug("barge: %s", e)
+
+    # ---------------- API ----------------
+    async def start(self):
+        # pycord no llama a sink.init() en esta ruta; sin vc el router muere
+        # en `assert self.sink.client` al primer paquete (sin audio jamÃ¡s).
+        try:
+            self.sink.init(self.vc)
+        except Exception:
+            pass
+        try:
+            if getattr(self.sink, "vc", None) is None:
+                self.sink.vc = self.vc
+        except Exception:
+            pass
+        self.vc.start_recording(self.sink, lambda *a: None)
+        self.active = True
+        log.info("Llamada: grabando al owner %s.", self.owner_id)
+
+    async def stop(self):
+        self.active = False
+        _vlog(event="call_stop")
+        try:
+            self.sink.flush()
+        except Exception:
+            pass
+        try:
+            self.vc.stop_recording()
+        except Exception:
+            pass
+        try:
+            if self.vc.is_playing():
+                self.vc.stop()
+        except Exception:
+            pass
+        try:
+            await self.vc.disconnect(force=True)
+        except Exception as e:
+            log.debug("voice disconnect: %s", e)
+
+    # ---------------- pipeline ----------------
+    def _on_utterance_threadsafe(self, user_id: int, pcm: bytes):
+        try:
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._handle_utterance(pcm)))
+        except Exception as e:
+            log.debug("utterance schedule: %s", e)
+
+    def _is_wakeup(self, text: str) -> bool:
+        try:
+            from main import _WAKE_UP_RE
+            return bool(_WAKE_UP_RE.search(text or ""))
+        except Exception:
+            return False
+
+    async def run_ritual_in_call(self):
+        """Ritual Despertar hablado EN la llamada + constancia escrita + mÃºsica."""
+        from routines import wake_up
+        loop = self.loop
+        origin = self.origin
+
+        def say_blocking(line: str):
+            try:
+                f1 = asyncio.run_coroutine_threadsafe(self.speak(line), loop)
+                f1.result(timeout=180)
+            except Exception as e:
+                log.debug("ritual speak: %s", e)
+            if origin is not None:
+                try:
+                    f2 = asyncio.run_coroutine_threadsafe(origin.send(line), loop)
+                    f2.result(timeout=60)
+                except Exception:
+                    pass
+
+        await asyncio.to_thread(wake_up.run, lambda m: None, say_blocking,
+                                None, False)
+        try:
+            from config import Config
+            import os as _os
+            theme = str(getattr(Config, "AUDIO_THEME_PATH", "") or "")
+            if theme and _os.path.exists(theme):
+                await self.play_file_low(theme, volume=0.35)
+        except Exception as e:
+            log.debug("ritual music: %s", e)
+        try:
+            from main import brain as _brain
+            _brain.emit({"type": "action_status", "label": "Protocolo matutino",
+                         "state": "done"})
+        except Exception:
+            pass
+
+    async def play_file_low(self, path: str, volume: float = 0.35) -> bool:
+        """MÃºsica de fondo en la llamada (una vez, bajo). Se corta al hablarle."""
+        try:
+            from discord import FFmpegPCMAudio, PCMVolumeTransformer
+            src = PCMVolumeTransformer(
+                FFmpegPCMAudio(path, executable=ffmpeg_exe(),
+                               options="-vn -ar 48000 -ac 2 -f s16le"),
+                volume=volume)
+        except Exception as e:
+            log.debug("music src: %s", e)
+            return False
+        try:
+            self._music = True
+            self.vc.play(src, after=lambda err=None: setattr(self, "_music", False))
+            return True
+        except Exception as e:
+            self._music = False
+            log.debug("music play: %s", e)
+            return False
+
+    async def _handle_utterance(self, pcm: bytes):
+        # Si suena la mÃºsica del ritual y el seÃ±or habla: cortarla y atender.
+        if getattr(self, "_music", False):
+            try:
+                if self.vc.is_playing():
+                    self.vc.stop()
+            except Exception:
+                pass
+            self._music = False
+        if not self.active or self._busy or self.speaking:
+            return
+        self._busy = True
+        try:
+            audio16k = await asyncio.to_thread(pcm48stereo_to_float16k, pcm)
+            if audio16k.size < 16000 * 0.4:
+                return
+            text = ""
+            if self.transcribe_fn:
+                try:
+                    text = await asyncio.to_thread(self.transcribe_fn, audio16k) or ""
+                    _vlog(event="transcript", text=text[:200])
+                except Exception as e:
+                    self.last_error = f"stt: {type(e).__name__}: {e}"[:200]
+                    _vlog(event="transcript_fail",
+                          err=f"{type(e).__name__}: {e}"[:200])
+                    log.debug("voice stt: %s", e)
+            text = (text or "").strip()
+            if not text:
+                return
+            self.utterances += 1
+            self.last_transcript = text[:200]
+            # Ritual Despertar en llamada: acuse + narraciÃ³n hablada + mÃºsica.
+            if self._is_wakeup(text):
+                ack = ""
+                if self.handle_fn:
+                    try:
+                        ack = await asyncio.to_thread(self.handle_fn, text) or ""
+                    except Exception as e:
+                        log.debug("voice brain: %s", e)
+                ack = (ack or "").strip()
+                if ack:
+                    await self._say_origin(ack)
+                    await self.speak(ack)
+                await self.run_ritual_in_call()
+                return
+            await self._say_origin(f"(voz) {text}")
+            # BarÃ³metro en llamada: <4s directo; si piensa, lo dice por voz
+            # y cada 25s informa, hasta responder.
+            try:
+                from main import VOICE_ACK as _V_ACK, PROGRESS_MSG as _PROG
+            except Exception:
+                _V_ACK, _PROG = ("Voy a consultarlo, seÃ±or.",
+                                 "Sigo en proceso, seÃ±or.")
+            think = asyncio.create_task(self._think_and_talk(text))
+            self._think_task = think
+            try:
+                await asyncio.wait_for(asyncio.shield(think), timeout=4.0)
+            except asyncio.TimeoutError:
+                await self.speak(_V_ACK)
+                try:
+                    # Sonido de "estoy pensando": una vez, a los ~8s.
+                    await asyncio.wait_for(asyncio.shield(think), timeout=4.0)
+                except asyncio.TimeoutError:
+                    await self.speak("Mmmâ€¦")
+                while True:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(think), timeout=25.0)
+                        break
+                    except asyncio.TimeoutError:
+                        await self.speak(_PROG)
+        finally:
+            self._busy = False
+            try:
+                if self._think_task is think:
+                    self._think_task = None
+            except Exception:
+                pass
+
+    @staticmethod
+    def _speakable(text: str, limit: int = 600) -> str:
+        """Recorta a frases completas para que la voz sea rÃ¡pida."""
+        t = (text or "").strip()
+        if len(t) <= limit:
+            return t
+        parts = re.split(r"(?<=[.!?])\s+", t)
+        out = ""
+        for p in parts:
+            if out and len(out) + len(p) + 1 > limit:
+                break
+            out = (out + " " + p).strip()
+        return out or t[:limit]
+
+    async def _think_and_talk(self, text: str):
+        reply = ""
+        if self.handle_fn:
+            try:
+                reply = await asyncio.to_thread(self.handle_fn, text) or ""
+            except Exception as e:
+                self.last_error = f"brain: {type(e).__name__}: {e}"[:200]
+                log.debug("voice brain: %s", e)
+        reply = (reply or "").strip() or "Disculpe, seÃ±or, ahora mismo no alcanzo al cerebro."
+        self.last_reply = reply[:200]
+        _vlog(event="reply", text=reply[:200])
+        # Texto al canal y voz EN PARALELO (no en serie). En llamada la voz
+        # lleva forma corta (280 chars): el detalle completo va por texto.
+        await asyncio.gather(self._say_origin(reply),
+                             self._play_tts(self._speakable(reply, 280)))
+        _vlog(event="spoken")
+
+    async def _say_origin(self, text: str):
+        try:
+            if self.origin and text:
+                from integrations.discord_bridge import chunk_text
+                for part in chunk_text(text):
+                    await self.origin.send(part)
+        except Exception as e:
+            log.debug("voice say: %s", e)
+
+    async def speak(self, text: str) -> bool:
+        """Dice un texto en el canal (TTS). Devuelve True si sonÃ³."""
+        if not self.tts_fn or not text.strip():
+            return False
+        try:
+            ogg = await asyncio.to_thread(self.tts_fn, text[:1200])
+        except Exception as e:
+            log.debug("voice tts: %s", e)
+            return False
+        if not ogg:
+            return False
+        return await self._play_ogg(ogg)
+
+    async def _play_tts(self, text: str):
+        """Sintetiza por frases en pipeline: suena la actual mientras se
+        genera la siguiente (ahorra segundos en respuestas largas)."""
+        if not self.tts_fn:
+            return
+        sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+",
+                                             (text or "").strip()) if s.strip()]
+        if not sents:
+            return
+        try:
+            nxt = await asyncio.to_thread(self.tts_fn, sents[0][:1200])
+        except Exception as e:
+            log.debug("voice tts: %s", e)
+            return
+        loop = asyncio.get_event_loop()
+        _ep = self._play_epoch
+        for s in sents[1:] + [None]:
+            if _ep != self._play_epoch:
+                return  # barge-in: una interrupciÃ³n manda; callo el resto
+            task = loop.run_in_executor(None, self.tts_fn, s[:1200]) \
+                if s is not None else None
+            if nxt:
+                await self._play_ogg(nxt)
+            nxt = None
+            if task is not None:
+                try:
+                    nxt = await task
+                except Exception as e:
+                    log.debug("voice tts: %s", e)
+
+    async def _play_ogg(self, ogg: bytes) -> bool:
+        import tempfile as _tf
+        fd, tmp = _tf.mkstemp(suffix=".ogg", prefix="jarvis-tts-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(ogg)
+            from discord import FFmpegOpusAudio
+            src = FFmpegOpusAudio(tmp, executable=ffmpeg_exe())
+            self.speaking = True
+            self._speak_started = time.monotonic()
+            self.sink.drop_until = time.monotonic() + 3600  # se libera en after
+            done = asyncio.Event()
+
+            def _after(err=None):
+                if err:
+                    log.debug("play after: %s", err)
+                try:
+                    self.loop.call_soon_threadsafe(done.set)
+                except Exception:
+                    pass
+
+            self.vc.play(src, after=_after)
+            _vlog(event="play_start", bytes=len(ogg))
+            await done.wait()
+            _vlog(event="play_done")
+            return True
+        except Exception as e:
+            log.debug("voice play: %s", e)
+            return False
+        finally:
+            self.speaking = False
+            self.sink.drop_until = time.monotonic() + ECHO_COOLDOWN_SEC
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+
+def time_greeting() -> str:
+    """Saludo segÃºn la hora local: dÃ­as (6-12) / tardes (12-21) / noches."""
+    import datetime
+    h = datetime.datetime.now().hour
+    if 6 <= h < 12:
+        part = "Buenos dÃ­as"
+    elif 12 <= h < 21:
+        part = "Buenas tardes"
+    else:
+        part = "Buenas noches"
+    return f"{part}, seÃ±or. En el canal y operativo."
+
+
+def write_wav_48k_stereo(path: str, pcm_bytes: bytes):
+    """Guarda PCM s16le 48 kHz estÃ©reo como .wav (debug/tests)."""
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(48000)
+        wf.writeframes(pcm_bytes)
+                                                                                                       ÙhÓigŞ	gİúLÚÔåÌ;ï¬Û~~~]jøu©´i³3oÚÊvg^:òNgŞqt”GœyçĞ–¹×‘á×‘á×¥†_—ò/±O,´ç–Øí´i—3o:ëy£#ÿŸ3¯åWÎ¼3èÌp¯#Ã¯#Ã¯K¿.µk‹uÙ/;»ºÀ9ç´ï³–½ª'sŸµ³	TÖ©Éàk®Ú ¾çª:ğEW­‡ß´|ÓfğM›Á7mi¿˜6ÏµO¤Íà›6ƒoÚ¼Ä~İ}ÖÎ{SİQh]
+²F~Jş=–ü[ÈüÛ2éü)6úÿ©û°6®3Ñ)dDŠìµ¹•SÑÄ)Š_8µ‘ğQ:ò£ñ#NìØ$ÄvÁâ‡Ô ˆ a2W§©7íİf›ìnvÛn³·š¤u£cüä!ÛØØ1ø)L°ÀÈæ£¹ßF#Â‰ã6{÷ò}œ™Ñœÿyşÿüÿ9gæÌœe©æ9kÒÌsš>@Û³uæ99æ9Ûçšç<ŸiS¾¹7åĞ~Q±Éòõú>ß¨æ—køµIf~©ÖÌ/O5ókÓÌüÆé´c©ÎÌ?—aæísÍüL3ïX„\röšèj4*I=dûåÕz~½^Œ<«×ğ«ôIah!ÃH…#2ŒéÄ#tff$ãA2~§~]§¾‡®K\OªŒÍ5æ{%$*éF®ÿÒC.Î
+åÍ¬ğ|;+lïd…¶÷!á©!äºïs’ğ[ÎÇ­|x7Œ:«Wh)
+UY’ª,pø—ßŒƒŸ>… ÉĞéí^êË¡íq}åûóv]ß·/ş99:Ôúè€ù ÜµÇæ/‡¶Ïğ]$pPßNêÛIı`¸¾ÛóõIäË¡ƒbíoÏ¡3©Orè`[íßŸCÛ»rèÂ–Ôº0”C÷Œ¬vfbµ©P-A®–ßº,‡ÎoZ˜Cçw¼şUa°/´JûèêE’$åĞA=Hd†eGÎSáòÚ~ß mß®Í¡ıÚ£Ë¡ı‡à—ŒU{shÿéÚ‘0@;–khÇZİ íØ˜!ìe]ıFP’z†ô5i»ØŒî%t:~	]—¤¶¹L*ã¾%5æ	IûK.2´ÚŞPê³ºfN0»/´/Tùé¯Cöós°Ÿ_[ètænİg¡ÓW¶[èôu¾3m{í"C˜'ZUòşóÄ:æ=tA¶®‡áh¡íÍ

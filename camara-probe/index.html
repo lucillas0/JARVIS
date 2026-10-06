@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="es">
+<head><meta charset="utf-8"><title>Sondeo de cámara</title>
+<style>body{background:#101418;color:#e6edf3;font:13px system-ui;margin:0;padding:10px}
+canvas{border:1px solid #2b333b;width:160px;height:120px}pre{white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="log">sondeando…</pre>
+<canvas id="lienzo" width="640" height="480"></canvas>
+<script>
+const MJPEG_CEREBRO = 'http://127.0.0.1:8000/api/camara/mjpeg';
+const out = [];
+const say = (m) => { out.push(m); document.getElementById('log').textContent = out.join('\n'); console.log(m); };
+
+(async () => {
+  say('origen: ' + location.origin + '  |  secure: ' + window.isSecureContext);
+  say('mediaDevices: ' + (navigator.mediaDevices ? 'presente' : 'AUSENTE'));
+
+  // ---- 0) ¿Dice el Cerebro que la cámara está sana? ----
+  let estado = null;
+  try {
+    const r = await fetch('http://127.0.0.1:8000/api/camara/estado');
+    estado = await r.json();
+    say('estado Cerebro: ' + JSON.stringify(estado));
+  } catch (e) { say('estado Cerebro: ERROR ' + e.name + ' ' + e.message); }
+
+  // ---- 1) Ruta del CEREBRO, calcada de acquireBrainStream() ----
+  const lienzo = document.createElement('canvas');
+  lienzo.width = 640; lienzo.height = 480;
+  const ctx = lienzo.getContext('2d');
+  const control = { cancel: false, listo: false, cuadros: 0, errores: 0 };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  let pista = null;
+  const stream = (typeof lienzo.captureStream === 'function') ? lienzo.captureStream(0) : null;
+  if (stream) pista = stream.getVideoTracks()[0] || null;
+  say('canvas.captureStream(0): ' + (stream ? 'ok, pista=' + !!pista : 'NO EXISTE'));
+
+  const img = document.createElement('img');
+  img.muted = true;
+  img.setAttribute('aria-hidden', 'true');
+  img.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;'
+    + 'opacity:0.01;pointer-events:none;z-index:-1';
+  img.addEventListener('load', () => {
+    try {
+      ctx.drawImage(img, 0, 0, 640, 480);
+      control.listo = true; control.cuadros += 1;
+      if (pista && typeof pista.requestFrame === 'function') pista.requestFrame();
+      if (control.cuadros === 1) say('1er fotograma MJPEG recibido');
+    } catch (e) { say('drawImage falló: ' + e.message); }
+  });
+  img.addEventListener('error', () => { control.errores += 1; say('img error MJPEG'); });
+  img.src = MJPEG_CEREBRO;
+  document.body.appendChild(img);
+
+  // Con el margen que usa el renderer: 60 intentos x 150 ms = 9 s.
+  for (let i = 0; i < 60; i += 1) {
+    if (control.cancel || control.cuadros >= 3) break;
+    await wait(150);
+  }
+  say('tras 9 s de margen -> cuadros: ' + control.cuadros +
+      ' (el renderer ABANDONA aquí si son menos de 3)');
+
+  // ---- 2) ¿Cuánto tarda de verdad en llegar el primer fotograma? ----
+  const t0 = performance.now();
+  for (let i = 0; i < 400; i += 1) {          // hasta 60 s más
+    if (control.cuadros >= 10) break;
+    await wait(150);
+  }
+  say('tras esperar: cuadros=' + control.cuadros + ' en ' +
+      Math.round(performance.now() - t0) + ' ms más');
+  document.getElementById('lienzo').getContext('2d').drawImage(lienzo, 0, 0);
+
+  // ---- 3) ¿El vídeo de canvas da fotogramas utilizables? ----
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true;
+  v.style.cssText = 'position:fixed;left:-9999px;width:2px;height:2px;opacity:0.01';
+  if (stream) { v.srcObject = stream; document.body.appendChild(v); }
+  try { await v.play(); } catch (e) { say('video.play() rechazada: ' + e.message); }
+  for (let i = 0; i < 100; i += 1) { if (v.videoWidth > 0) break; await wait(100); }
+  say('video del canvas: ' + v.videoWidth + 'x' + v.videoHeight +
+      '  readyState=' + v.readyState);
+
+  if (v.videoWidth > 0) {
+    const c = document.createElement('canvas'); c.width = 64; c.height = 48;
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(v, 0, 0, 64, 48);
+    const d = cx.getImageData(0, 0, 64, 48).data;
+    let s = 0, s2 = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const g = (d[i] + d[i + 1] + d[i + 2]) / 3; s += g; s2 += g * g; n += 1;
+    }
+    const m = s / n, dv = Math.sqrt(Math.max(0, s2 / n - m * m));
+    say('luminancia del vídeo del canvas: media=' + m.toFixed(1) + ' desv=' + dv.toFixed(1) +
+        '  -> ' + ((m > 4 && dv > 6) ? 'IMAGEN UTIL (la cámara SÍ funciona)' : 'IMAGEN PLANA/NEGRA (FALLO)'));
+  }
+
+  // ---- 4) Ruta del NAVEGADOR, para ver por qué cae ----
+  try {
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    say('dispositivos: ' + JSON.stringify(devs.map((d) => ({ k: d.kind, l: d.label || '(sin etiqueta)' }))));
+  } catch (e) { say('enumerateDevices: ' + e.message); }
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    say('getUserMedia: OK -> ' + (s.getVideoTracks()[0] && s.getVideoTracks()[0].label));
+    s.getTracks().forEach((t) => t.stop());
+  } catch (e) { say('getUserMedia: ' + e.name + ' — ' + e.message); }
+
+  say('--- fin ---');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "jarvis-wa-bridge",
+  "version": "1.0.0",
+  "description": "Puente WhatsApp self-chat para JARVIS (Baileys). Te escribes a ti mismo y JARVIS responde.",
+  "type": "module",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "baileys": "^6.17.16",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

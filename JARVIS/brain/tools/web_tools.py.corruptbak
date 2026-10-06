@@ -1,0 +1,252 @@
+xa0]+", " ", c).strip()
+            words = len(c.split())
+            if words >= 4:
+                chunks.append(c)
+        t = "\n".join(chunks)
+    else:
+        t = _re.sub(r"(?is)<[^>]+>", " ", t)
+        t = _html.unescape(t)
+    t = _re.sub(r"[ \t\xa0]+", " ", t)
+    t = _re.sub(r"\n\s*\n+", "\n", t)
+    lines = [l.strip() for l in t.split("\n")]
+    lines = [l for l in lines if len(l) > 2]
+    # recorta repeticiones (menÃºs duplicados)
+    seen, out = set(), []
+    for l in lines:
+        k = l[:60]
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(l)
+    return "\n".join(out)
+
+
+def web_fetch_handler(params: dict) -> dict:
+    url = params.get("url", "")
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        html = _simple_fetch(url, timeout=int(params.get("timeout", 20)))
+    except Exception as e:
+        return {"url": url, "content": "",
+                "error": f"No pude leerla ({e}). Prueba con otro enlace."}
+    return {"url": url, "content": _html_to_text(html)[:8000]}
+
+
+def _search_lite(query: str) -> list[dict]:
+    """DuckDuckGo Lite (aguanta bots). Devuelve [{title, url}]. Reintenta
+    ante 403/202 (rate-limit intermitente de DDG)."""
+    import re
+    import time as _t
+    html = ""
+    for wait in (0, 4, 9):
+        if wait:
+            _t.sleep(wait)
+        try:
+            html = _simple_fetch("https://lite.duckduckgo.com/lite/?q=" + quote(query))
+            if len(html) > 8000:
+                break
+        except Exception as e:
+            log.debug("lite search: %s", e)
+            html = ""
+    out, seen = [], set()
+    for u, t in re.findall(r'href="([^"]+uddg=[^"]+)"[^>]*>(.*?)</a>', html):
+        m = re.search(r"uddg=([^&]+)", u)
+        url = unquote(m.group(1)) if m else u
+        title = re.sub(r"<[^>]+>", "", t).strip()
+        if not title or not url.startswith("http"):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({"title": title[:140], "url": url[:160]})
+        if len(out) >= 8:
+            break
+    return out
+
+
+def web_search_results_handler(params: dict) -> dict:
+    """Busca en la web (DDG Lite + fallback) con cachÃ© de 10 min.
+    Preguntas enciclopÃ©dicas (quÃ© es/quiÃ©n fue/â€¦) van a Wikipedia primero."""
+    import re as _re2
+    query = (params.get("query", "") or "").strip()
+    if not query:
+        return {"results": [], "error": "Sin query."}
+    ck = query.lower()
+    hit = _SEARCH_CACHE.get(ck)
+    if hit and time.time() - hit[0] < _SEARCH_TTL:
+        return {"results": hit[1][:6], "cached": True}
+    if _re2.search(r"^(qu[Ã©e] es|qu[Ã©e] son|qui[Ã©e]n (fue|es)|d[Ã³o]nde est[Ã¡a]|cu[Ã¡a]ndo|por ?qu[Ã©e])\b",
+                   query, _re2.I):
+        try:
+            wiki = _search_wiki(query)
+            if wiki:
+                _SEARCH_CACHE[ck] = (time.time(), wiki)
+                return {"results": wiki[:6], "via": "wikipedia"}
+        except Exception as e:
+            log.debug("wiki-first: %s", e)
+    res = {"results": []}
+    try:
+        lite = _search_lite(query)
+        if lite:
+            res = {"results": lite[:6]}
+    except Exception as e:
+        log.debug("lite search: %s", e)
+    if not res["results"]:
+        from html.parser import HTMLParser
+
+        class _Lite(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.texts = []
+                self.skip = 0
+
+            def handle_data(self, data):
+                if self.skip:
+                    return
+                self.texts.append(data.strip())
+
+            def handle_starttag(self, tag, attrs):
+                if tag in ("script", "style"):
+                    self.skip += 1
+
+            def handle_endtag(self, tag):
+                if tag in ("script", "style") and self.skip:
+                    self.skip -= 1
+
+        try:
+            html = _simple_fetch("https://html.duckduckgo.com/html/?q=" + quote(query))
+            import re
+            blocks = re.findall(r'<a[^>]+class="result__a"[^>]*>(.*?)</a>', html, re.S)
+            urls = re.findall(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"', html)
+            results = []
+            for i, b in enumerate(blocks):
+                clean_b = re.sub(r"<[^>]+>", "", b).strip()
+                u = urls[i].split("&uddg=")[1].split("&rut=")[0] if len(urls) > i and "&uddg=" in urls[i] else (urls[i] if i < len(urls) else "")
+                if clean_b and u.startswith("http"):
+                    results.append({"title": clean_b[:140], "url": u[:160]})
+            if results:
+                res = {"results": results[:6]}
+        except Exception as e:
+            log.warning("web_search_results fallÃ³: %s", e)
+    if not res["results"]:
+        try:
+            res = {"results": _search_wiki(query)}
+        except Exception as e:
+            log.warning("wiki search fallÃ³: %s", e)
+            res = {"results": [], "error": str(e)}
+    if res.get("results"):
+        _SEARCH_CACHE[ck] = (time.time(), res["results"])
+        # poda suave
+        if len(_SEARCH_CACHE) > 60:
+            old = sorted(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])[:20]
+            for k in old:
+                _SEARCH_CACHE.pop(k, None)
+    return res
+
+
+def _search_wiki(query: str) -> list[dict]:
+    """Wikipedia API (sin claves): [{title, url}]."""
+    import json as _js
+    raw = _simple_fetch(
+        "https://es.wikipedia.org/w/api.php?action=query&list=search"
+        "&srsearch=" + quote(query) + "&srlimit=6&format=json")
+    data = _js.loads(raw).get("query", {}).get("search", [])
+    out = []
+    for it in data:
+        title = (it.get("title") or "").strip()
+        if not title:
+            continue
+        url = "https://es.wikipedia.org/wiki/" + quote(title.replace(" ", "_"))
+        out.append({"title": title[:140], "url": url[:160]})
+    return out
+
+
+def web_frontpage_handler(params: dict) -> dict:
+    """Titulares de portada de un medio: RSS si hay, si no h1/h2 de la home."""
+    import re
+    site = (params.get("site", "") or "").strip().lower()
+    feeds = {
+        "marca": ["https://e00-marca.uecdn.es/rss/portada.xml"],
+        "as": ["https://as.com/rss/diarioas.xml"],
+        "sport": ["https://www.sport.es/es/rss/"],
+        "mundo deportivo": ["https://www.mundodeportivo.com/rss/"],
+        "md": ["https://www.mundodeportivo.com/rss/"],
+        "elpais": ["https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada"],
+        "el paÃ­s": ["https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada"],
+        "elmundo": ["https://e00-elmundo.uecdn.es/rss/portada.xml"],
+        "abc": ["https://www.abc.es/rss/feeds/abc-portada.xml"],
+        "bbc": ["https://feeds.bbci.co.uk/mundo/rss.xml"],
+        "cnn": ["http://rss.cnn.com/rss/edition.rss"],
+    }
+    urls = feeds.get(site, [])
+    if not urls:
+        page = site if site.startswith("http") else "https://" + site
+        urls = [page]
+    headlines = []
+    for url in urls:
+        try:
+            html = _simple_fetch(url, timeout=15)
+        except Exception as e:
+            log.debug("frontpage %s: %s", url, e)
+            continue
+        if "<rss" in html[:2000] or "<feed" in html[:2000] or "<item>" in html:
+            import html as _html
+            for m in re.finditer(r"<item>(.*?)</item>", html, re.S):
+                it = m.group(1)
+                t = re.search(r"<title>(.*?)</title>", it, re.S)
+                if not t:
+                    continue
+                title = re.sub(r"<!\[CDATA\[|\]\]>", "", t.group(1)).strip()
+                title = _html.unescape(title)
+                title = re.sub(r"<[^>]+>", "", title)
+                title = re.sub(r"\s+", " ", title).strip(" -â€“â€”")
+                if title and title not in [h["title"] for h in headlines]:
+                    headlines.append({"title": title[:160]})
+                if len(headlines) >= 8:
+                    break
+        else:
+            for tag in ("h1", "h2"):
+                for m in re.finditer(r"<%s[^>]*>(.*?)</%s>" % (tag, tag), html, re.S | re.I):
+                    title = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                    title = re.sub(r"\s+", " ", title)
+                    if len(title) >= 20 and title not in [h["title"] for h in headlines]:
+                        headlines.append({"title": title[:160]})
+                    if len(headlines) >= 8:
+                        break
+        if headlines:
+            break
+    if not headlines:
+        raise RuntimeError(f"No pude leer la portada de '{site}'")
+    return {"site": site, "headlines": headlines[:8]}
+
+
+TOOLS = [
+    {"name": "web_fetch",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"url": "str"},
+     "description": "Descarga el TEXTO LIMPIO de una URL para analizarla/resumirla.",
+     "label": "Consultando la web",
+     "handler": web_fetch_handler},
+    {"name": "web_search_results",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"query": "str"},
+     "description": "BUSCA en la web y devuelve tÃ­tulos+enlaces legibles. Ãšsala siempre que pidan buscar, investigar o resumir algo de internet.",
+     "label": "Buscando en la web",
+     "handler": web_search_results_handler},
+    {"name": "web_frontpage",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"site": "str: marca|as|sport|elpais|elmundo|abc|bbc|cnn o URL"},
+     "description": "Trae los titulares de portada de un diario/medio (deportes, prensa).",
+     "label": "Leyendo portada",
+     "handler": web_frontpage_handler},
+]
+                                                                      õ|ïÍ{mÇÔ`Ø$Âø.ÄáUµ‚xÜrsoÿšPZ¹»Xj¾K ôú®b‰¯ÿf_İÚ½ÒQ…¥zèíï¸Ğ_˜0ó¿á‡ü!\úµ^˜0ƒSAjÉĞÏ«r,Ë°‚Y†)“„O2íë8åØİR\ªf“ö¡â$Õ g®,:â’#¸QØáªÃÖ*yûåeğG»Ë/y‰˜¡sĞ]¬° i˜Âß9@#ÿ¨«XjşXŒü/‹%şŞ×bäBÃ‚(ßÁÂ:/İñSnnKš¨>'¥›¨f'uÊ‹±½‚Nİn…
+$h¹ÉB•1 Â·>åóC¥ü*L-éÈŒ2Õ2bñ]‚EOiò’P‡â†œCñ¬ú<Š~ãq;hpØšó/8¯ÉˆoÛOPvób©y§€ÒşE±Ä?=ĞûcwyPÿUQ¿õ·Šú¿Dı¿HÇê~`µÜÚ}¢ş#¨¿AÔ¿õ3úw"ñI“Ó\KS³Ù7CòP£UåşÈYUÛBŒ'ÒçÉ‹[³Ò²lMÕ8F~ÁIkäÅ¿##¿5!ë†lİ¬ñNµÜ#3[´…éŠ"Ç& q¥S‡¸ôø.wDŸ´A^›Ú u»;èêBò=³9Ñ.ÒÍl¹	W*N?{Ù#_A@Ö‡¬ûsB®£¨j¸ì©–ûÊ$(ÄYMœ—ÎUuê¸„1XS­VX#Öxa—…CÊÌ²µ
+ÛÄßƒ¶~EÄT‘›À:±-t­ãËÄ¯9Wî'íçÅ/Ë_nq~x‡7‰Zœªği¼Et›rG*“±DÖò—gbibi°ÔŠˆæl™ÓúR„å}´®ş²Xj*ÖÂ;‹%ŞĞ“¾½@óĞïE—S.‚?ñËD³hv•h6Í®tšeêúL¤àƒ•â‰;!wlk$2ÈöÙm7ğtÜã1"E“…8ØEá°o<É‹‰Öí†€¦[3\:[«²]Ö¶ğ]—ƒÌ>I¬yo®T¶ßá©¸9«u.‘Hñ±ë0İSö¡ˆ·©ŞèQJÃ]Ùr’@(“Ş‘#k„Ê£¡Ş	YªÛm‹&Ÿ%5VšşY?ƒŸ¹—&æÔ®b©ù~¡†„³ãÜ}˜˜–æÂ7IÎø==Âîf>ïšIÎñÌAˆ;Ç‰[WnA$h}Sw1•ìWt*vU:XœÏÿ¸‡ Z ˆIÔ­ÁÏâdøÛ^	V»­Œøª_İnë:Ay—}€îrùÉÇ÷Ùİ9ü^FQ–›nt"0Ì§Ï²m;ü'»¡Œ|†õğ±ş`ÀŸ,àüñ|LB× øMü¡§a´ñ–™Ôº€Ş€ùgßû†àu“4Š*ãá+V·‘Z>Ôš«[5]ÖŞîvéìmİR¨G>¬ÿn¹‘|AÒ'uŞ{	á+Â¥«‡»n¶@_Ù#p©.?¥ôhßÍÕãİ.=ò¡nüèËb„W–SÈY[ËGœŸâf¢~äC¹i¥ñ(÷œå€HóáİÙõw*“Ş“#p@ĞY'¦²Ö`ëSV“ˆĞ®ú}—#ÀÀ™H-+â´‰Áîº~¯­,©Ğ¶•½_;z/+lU×²giÃeFÅ—Ã¤î J/¨uú®a’n¯í¾Œ’Rùzªùæš½bÊÏ¿qÛšğ!dÎ»îĞİ
+fï5”½¹„‚"É•½S½Š<dª7hşØ4o)vTûÈ4³ø±U]3OÚÉ«N„rÚÏ×‹„ÑŞ-ÍßoX—–}Q,•}ø¸nM¾¨Æw¹ƒ®S:“ù30üúİnÓÃÇO»û#‘v¡RpØ‘z¡ó%²¦ÁUÖÒÆO[ûÿx0ß€¶;ıBƒÕ”¬Â§³kùÂy‡lVé5«gŠìqÕã…p•¶0‘>,ÿIqr`_!@7¬+f/sÀ`ûË>”‹¡)Ä›|c­×]vM³ù‰kÈÂç|¼•àu‹‚ÓÊjJ}ø ïSi}ab–;“ 2/ÜØ´ÜvFAâ¼-kA¾ôÅ’\Œõ#éÖğrİµY™hlôÔçÃ¢"|ä´»»ÊZĞÅÆ¶ÔxäXEÎ¨rìî;*ÇnÏ‡¹ã`UÕœ¦Ê±
+Y]=Dıt˜»y$NVÈxF^ÿÂ#Ç*ÜÉ×xu9¯0H=f%Ó
+óô<.Ç*¡#ñ80õèI=æÊ±k½Îkµëq^¦Ç¿È¡«†êyGö‘«*§şV=ï¨Àåê¢d›wL”\º(ÙÌ;Œw—©r¬ª€†$Ú¨rìêáÁ¼­¢è˜ß•Ì;n°-Áøî2ÑEÕYÁ¼mª»¹X]}¦»¾œ–£‚ñ­wæ*;í‡Rvî¹~æm7ò¶ì]ª8ºÇÈÛñ¦æ¡¼­!ó;âåH(o[Ğü±'ßéåmšyõÑ[Cæ->ì¿>?qK9ÓqûêrØöñ_¾›¸ŠÍŸ—¸Š­Æ¦`Ûu+TÌ/{i›­[Ó‹u+´/è¥è¥m¶ai@ğn¼è¼‹ÚÅ|Ò‹É¦/ó½¿§__N6?SüŠ——ùÆßo³Wà²ì¶ÛnKíé/Ó¯ÿ~›

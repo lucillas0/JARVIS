@@ -1,0 +1,146 @@
+ode: screen;
+  pointer-events: none;
+}
+
+.splash {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 40px;
+  text-align: center;
+}
+
+.orb-sphere {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%,
+      rgba(255, 204, 102, 0.9),
+      rgba(255, 170, 48, 0.5) 40%,
+      rgba(68, 34, 0, 0.2) 100%);
+  box-shadow:
+    0 0 24px rgba(255, 170, 48, 0.55),
+    inset 0 0 18px rgba(255, 170, 48, 0.5);
+  animation: orb-pulse 1.6s ease-in-out infinite;
+  margin-bottom: 18px;
+}
+
+@keyframes orb-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.12); opacity: 0.85; }
+}
+
+h1 {
+  font-size: 20px;
+  letter-spacing: 0.4em;
+  text-shadow: 0 0 12px rgba(255, 170, 48, 0.9);
+  margin-bottom: 6px;
+}
+
+.tagline {
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  opacity: 0.75;
+  margin-bottom: 26px;
+}
+
+.progress-track {
+  width: 100%;
+  max-width: 340px;
+  height: 6px;
+  border: 1px solid rgba(255, 170, 48, 0.45);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(to right, #ffaa30, #ffcc66);
+  box-shadow: 0 0 10px rgba(255, 170, 48, 0.9);
+  transition: width 0.3s ease;
+}
+
+.pct-line {
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  opacity: 0.6;
+}
+
+.pct-line.indeterminate span {
+  display: inline-block;
+  animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  to { visibility: hidden; }
+}
+
+.status {
+  margin-top: 22px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  min-height: 16px;
+  opacity: 0.85;
+  max-width: 380px;
+  overflow-wrap: break-word;
+}
+
+.error {
+  margin-top: 18px;
+  padding: 14px 18px;
+  border: 1px solid rgba(255, 85, 51, 0.6);
+  border-radius: 6px;
+  background: rgba(60, 15, 0, 0.5);
+  max-width: 400px;
+}
+
+.error #errorTitle {
+  font-size: 13px;
+  font-weight: bold;
+  letter-spacing: 0.1em;
+  color: #ff6644;
+  margin-bottom: 6px;
+}
+
+.error #errorDetail {
+  font-size: 11px;
+  line-height: 1.6;
+  color: #ffaa30;
+  opacity: 0.85;
+}
+
+.error-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.btn {
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 170, 48, 0.5);
+  border-radius: 4px;
+  background: rgba(40, 20, 0, 0.6);
+  color: #ffaa30;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: #ffcc66;
+  color: #ffcc66;
+}
+
+.btn.ghost {
+  background: transparent;
+  opacity: 0.7;
+}

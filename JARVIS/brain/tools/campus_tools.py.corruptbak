@@ -1,0 +1,271 @@
+  wins.append(w)
+            except Exception:
+                pass
+    except Exception as e:
+        return {"url": url, "logged_in": False, "note": f"Abierto; no veo la ventana: {e}"}
+    if not wins:
+        try:
+            webbrowser.open(url, new=2)
+        except Exception as e:
+            raise RuntimeError(f"No pude abrir el navegador: {e}")
+        time.sleep(8)
+        try:
+            for w in Desktop(backend="uia").windows():
+                try:
+                    t = w.window_text() or ""
+                    if "aviesau" in t.lower() or "entrar al sitio" in t.lower():
+                        wins.append(w)
+                except Exception:
+                    pass
+        except Exception as e:
+            return {"url": url, "logged_in": False, "note": f"Abierto; no veo la ventana: {e}"}
+    if not wins:
+        return {"url": url, "logged_in": False,
+                "note": "Abierto pero sin ventana a la vista; termina el login a mano."}
+    w = wins[0]
+    try:
+        w.set_focus()
+    except Exception:
+        pass
+    time.sleep(1)
+    # NavegaciÃ³n determinista en la pestaÃ±a ACTIVA (nada de pestaÃ±as viejas
+    # con tokens caducados): omnibox â†’ URL â†’ Enter â†’ esperar login o dentro.
+    from tools.system_tools import _clipboard_set
+
+    def _find_omni(edits):
+        for e in edits:  # 1Âº por automation-id tÃ­pico de Chromium
+            try:
+                if "view_" in str(getattr(e.element_info, "automation_id", "")):
+                    return e
+            except Exception:
+                pass
+        best, best_top = None, None  # 2Âº el Edit mÃ¡s alto (siempre arriba)
+        for e in edits:
+            try:
+                top = e.rectangle().top
+            except Exception:
+                continue
+            if best_top is None or top < best_top:
+                best, best_top = e, top
+        return best
+
+    try:
+        edits0 = w.descendants(control_type="Edit")
+    except Exception:
+        edits0 = []
+    omni = _find_omni(edits0)
+    if omni is None:
+        import webbrowser
+        try:
+            webbrowser.open(url, new=2)
+        except Exception as e:
+            raise RuntimeError(f"No pude abrir el navegador: {e}")
+        time.sleep(6)
+        try:
+            edits0 = w.descendants(control_type="Edit")
+        except Exception:
+            edits0 = []
+        for e in edits0:
+            try:
+                v = e.get_value() or ""
+            except Exception:
+                v = ""
+            if "http" in v.lower():
+                omni = e
+                break
+    if omni is None:
+        return {"url": url, "logged_in": False,
+                "note": "Abierto pero sin barra de direcciones; termina a mano."}
+    try:
+        omni.set_focus()
+        time.sleep(0.4)
+        _clipboard_set(url)
+        time.sleep(0.2)
+        omni.type_keys("^a^v{ENTER}")
+    except Exception as e:
+        raise RuntimeError(f"No pude navegar: {e}")
+    for _ in range(8):
+        time.sleep(2)
+        try:
+            title = (w.window_text() or "").lower()
+        except Exception:
+            continue
+        if title and not any(k in title for k in ("entrar", "login", "log in", "sign in")):
+            return {"url": url, "logged_in": True,
+                    "note": "Ya estaba dentro (sesiÃ³n guardada)."}
+        if "entrar" in title or "login" in title:
+            break
+    time.sleep(2)
+    try:
+        edits = [e for e in w.descendants(control_type="Edit")]
+    except Exception:
+        edits = []
+    if len(edits) < 2:
+        try:
+            title = (w.window_text() or "").lower()
+        except Exception:
+            title = ""
+        if title and not any(k in title for k in ("entrar", "login", "log in", "sign in")):
+            return {"url": url, "logged_in": True,
+                    "note": "Ya estaba dentro (sesiÃ³n guardada)."}
+        return {"url": url, "logged_in": False,
+                "note": "Veo la pÃ¡gina pero no el formulario (Â¿ya dentro?)."}
+    user, pw = _campus_creds()
+
+    def _by_autoid(edits, *ids):
+        for e in edits:
+            try:
+                if getattr(e.element_info, "automation_id", "") in ids:
+                    return e
+            except Exception:
+                pass
+        return None
+
+    def _paste_into(edit, text):
+        # set_edit_text no necesita foco (a prueba de usuario activo).
+        # El pegado por portapapeles queda como respaldo.
+        try:
+            edit.set_edit_text(text)
+            time.sleep(0.5)
+            return
+        except Exception:
+            pass
+        from tools.system_tools import _clipboard_set
+        try:
+            edit.set_focus()
+        except Exception:
+            pass
+        time.sleep(0.4)
+        _clipboard_set(text)
+        time.sleep(0.2)
+        edit.type_keys("^a^v")
+        time.sleep(0.4)
+
+    def _read_back(edit):
+        try:
+            return edit.get_value() or edit.window_text() or ""
+        except Exception:
+            return ""
+
+    # Asentamiento: el tÃ­tulo aparece antes que el DOM usable. Espera al
+    # campo username habilitado (hasta ~12s), re-enumerando.
+    for _settle in range(6):
+        try:
+            edits = [e for e in w.descendants(control_type="Edit")]
+        except Exception:
+            edits = []
+        _ue = _by_autoid(edits, "username", "user", "login_username")
+        if _ue is not None:
+            try:
+                if _ue.is_enabled():
+                    break
+            except Exception:
+                break
+        time.sleep(2)
+
+    try:
+        # 1Âº por automation-id (infalible): username/password.
+        user_edit = _by_autoid(edits, "username", "user", "login_username")
+        pw_edit = _by_autoid(edits, "password", "pass", "passwd",
+                             "login_password", "current-password")
+        if user_edit is None or pw_edit is None:
+            # Sin la omnibox (por identidad, no por su contenido).
+            omni_el = _find_omni(edits)
+            cands = [e for e in edits if e is not omni_el]
+            if len(cands) < 2:
+                # Fallback: los dos Ãºltimos (suele ser usuario+clave).
+                cands = edits[-2:]
+            user_edit, pw_edit = cands[0], cands[1]
+        last_err = ""
+        for _attempt in range(3):
+            try:
+                _paste_into(user_edit, user)
+                time.sleep(0.5)
+                if _read_back(user_edit).strip() != user:
+                    last_err = "el usuario no quedÃ³ escrito"
+                    time.sleep(1)
+                    continue
+                _paste_into(pw_edit, pw)
+                time.sleep(0.5)
+                last_err = ""
+                break
+            except Exception as e:
+                last_err = str(e)[:100]
+                time.sleep(1)
+        if last_err:
+            raise RuntimeError(last_err)
+        submitted = False
+        try:
+            pw_edit.type_keys("{ENTER}")
+            submitted = True
+        except Exception:
+            pass
+        if not submitted:
+            # Clic en el botÃ³n Acceder/Entrar (lista completa, no solo chrome).
+            try:
+                btns = w.descendants(control_type="Button")
+            except Exception:
+                btns = []
+            for b in btns:
+                try:
+                    nm = (b.window_text() or "").lower()
+                except Exception:
+                    continue
+                if any(k in nm for k in ("acced", "entr", "log in", "iniciar sesi")):
+                    try:
+                        b.click_input()
+                    except Exception:
+                        b.click()
+                    submitted = True
+                    break
+        if not submitted:
+            raise RuntimeError("sin vÃ­a de envÃ­o")
+    except Exception as e:
+        raise RuntimeError(f"No pude escribir el login: {e}")
+    logged = False
+    for _ in range(8):
+        time.sleep(2)
+        try:
+            title = w.window_text() or ""
+            if title and not any(k in title.lower() for k in ("entrar", "login", "log in", "sign in")):
+                logged = True
+                break
+        except Exception:
+            pass
+    return {"url": url, "logged_in": logged}
+
+
+CAMPUS_TOOLS = [
+    {"name": "campus_deadlines",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "PrÃ³ximas entregas y vencimientos del campus AVIESAU (tareas con fecha).",
+     "label": "Mirando entregas del campus",
+     "handler": campus_deadlines_handler},
+    {"name": "campus_grades",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Notas por asignatura del campus AVIESAU.",
+     "label": "Mirando notas del campus",
+     "handler": campus_grades_handler},
+    {"name": "campus_open",
+     "risk_level": "medium",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Abre o desbloquea la pÃ¡gina del ciclo (campus AVIESAU) en el navegador y mete el login (usuario y contraseÃ±a ya configurados).",
+     "label": "Abriendo el campus",
+     "handler": campus_open_handler},
+]
+                                                 óâ)ÂÛ_¯À.ØÎ
+vR6:Æë‘y®š½¶l±oøêÃÙLæ–ï¡ñŸÙ.¡ùŞ†qWL‘¢8M)D_ü2ÄìÎwQù‹<dWª·NÄÏ­.1ıøC‘CVgEÔZOg’ºv‡ˆn7MKÛÉ1cÔ®s+ÔëşI-j‹Š7¯Ûˆ¬QO\ç¶bÔÚ}ıÕå‘Œ ñİğAªÜC5N¬ÖŠşräÅÏÀmlÂ`€ñ§nHˆœÄ“O‘óØ¸ ¿Ïº›9y‚ô#b¶øcªQ­™&¡°XD á@™¡Fÿà2Ïb0LR\è!Z.“68~;9å¿f¾71CjØ©kmjl%³4Ş»YzDô‚ bŸZü~$?ë711‹ìóGÊ±é»K:Ã–lÚã-vPEZMâÊ	¸C\ Ş)ŒÈwˆŸ¡î3V‘ácõŠÂe·dñ¬‘jõG)­ë.[‡©%?y÷®f|e„{Om#z~)!kÿ÷QQÏA‡Ú™:ºñv³>òSÆ²1NK²èiq{¼G^“ğİ²uLıyd_VDØ£2Në>uŞœ(/CÚÆâİmõ`œH¢uä7¥«×ùW–xœÉ;¡\«"£ÍFÓ’ñ’­Å~qå\OW¼œ¦X²myN§ãkmáJ¤›(ã;"Ïƒ_8éçßG¾ş™éO‚™ˆ¼›ÁÈAñv¿èÿ ™=ÔÕù&+v0;ò­-òµMüæ1i)YKÉ»ÊÌÏ?¯ëvå&C‰‘Gt’ SÍsÌäI£ßêdz¿¢•·víĞ¸„ırLo+Õv¹=ìÙ{Ñ fnÌ’›ÏLD¬R<á`+‰<5-û§ü^ãudİÅøJšã“sìi±ˆƒëÓğó­0Ä-½,ì|‰töoÉèò#jí×],ní’^Àø½(2öË È×'ÅÃ³±œUÆwW½`‘£{"=ºõ×(:xá% ÄÚ¡5Ì÷1% Ê‹œsˆé÷c	DJøÎ~â¥û“*ù=ëíJ3¤İÔh†tÇ°3íJké:ŞÚÁ ò›àÖ”.äCjVSXì²ÕıÑr^¯\“<5·"~8—\ÈO×ÑÉ¾çµéa±ÓÓÂbœGÅmÒÜJí¿¬¼((îÏçvùwÃÁÍĞ13Ò#İá«G%İr«\f9}Ñ)8 	4Î2±Ó=ó4~İ`ß6‹3;Á-Zëã›K2€¨è€Ş“Eš+É~¹e¡O]OëäûœŞ÷8FÚÓ?ÉJ~Rd™’«åŒ‘–x,rø¯deÛßU€şJb`“p{9’½ä¼ÅŸ„S®èy#E«Î/·Ş ÃA¸ÑnñN'ÿ«]¤ÿğEí’Yàï™ş$œ?­f¼î–pˆ˜)÷—[¥ºÎ_m
+elö—“¬Y¹äZ%ìğÖÕC¬ÊbÜïfº]ú0Ğø©ëü×È÷¯¡;x­+‹ÜY¦„ğ¬õ6Êwä¹HQ«ûİº¿œéşB(SâlN:?£rƒºpP×†1}RY=ò3ë9 ¤§º¿ĞÒ MŒ¬À~¨–lAİ_Ô5–šÏYNò.5îÒV¦h|7y<w©\rêÅ¢C7 /²õ2ßXçÂn©^K‘{
+•E½ŸÈÌiEŒOt1}bÓÇ2#ã<xÜ .k¬ËÛ$|vE©¼ç:%Ü+ÈÇ¦$DË ¿1}‘fêFíá®Ô&fŒw(é;º²“Ü–ßo’{ÑRÜÌØì¿ÖF³àk\x#‡ê“Üs‚uHU°1è«[Øe³¿ÜÑâĞx’óI,Jë£¬äÜÎ
+bx/‡9b›G—;3VÎ)}Kş^mÕZn9®0ß$×"Zú$WÊ:ˆÿä~W7¡Iß,ØXêkÔÔ±uïÖR_£_}$j­ùêÂ›ıy¶ ·¡ºß	ùø9!Çò2+húš˜:v›Ì	ìÛÎôo.Ê³1Çä‚÷núšJÔ±[ı<VŸ^ßäÙ{iÜïÒ
+üNV°QóÕijqú˜ª¿i
+e³Èåñåš²ÚVúó:w0e=Uu¯§Bè5~X.)¬Ö	Ö9¡Íc¶ßºh|ˆ3 O
+ÊyºÛƒ…·ò¸
+j):úZ5ñß†³\‚h|wŸğ#9ÌÇMs³ôòØôÅüêš’C3_l¼qZQ@û‹5Û™Ñ»fÈQ½e‘“9¶¢[C.0ó»š[œÌ8m!^«¼çZEÂg‡œïº”ÿÖÅ
+6İY¸_ğÛ<µúS"kiåş(¤–ŒÕwÁ.`ÊÉÓ1¨Ù†‰şø²˜Öv8èÛ²pv©/VÊw—ªcb¥êØ=‡tİv,àm
+òmÈ‘İh}ğCĞ‡,Û~uÍFoı¬¨cß÷6•ªÿÜ^ªş³^ã1ÖvLã¬­‰ù6â¡æ¨kQKÕÆŞ&D"Ö±¶cŞ¦@´‰©%‰ æ+™o÷"ôı¤ôíZà`V¤’aŒ¦ùÚĞGMİÆ|‡™:f3ÓÇS>m0sì¢	ağõ]˜Åô¾%+o¾F&¯çÈ}ÄCrrê¹Ş?=®À`L|õ4ok\Â?,¸µ'‰‡€

@@ -1,0 +1,26 @@
+solid var(--border); border-radius:10px;
+  padding:16px 18px; margin-bottom:14px;
+}
+.card label { display:block; font-weight:700; margin-bottom:6px; font-size:14px; }
+.card input {
+  width:100%; background:#0a0e14; border:1px solid var(--border); color:var(--text);
+  padding:10px 12px; border-radius:6px; font-family:monospace; font-size:13px; outline:none;
+}
+.card input:focus { border-color:var(--cyan); box-shadow: 0 0 8px rgba(39,215,255,.3); }
+.card small { display:block; margin-top:6px; font-size:11px; color:var(--muted); }
+.badge {
+  display:inline-block; font-size:10px; padding:1px 6px; border-radius:4px;
+  background:rgba(62,166,255,.18); color:var(--glow); margin-left:4px;
+}
+
+footer { padding:16px 28px 22px; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.msg { font-size:12px; flex:1; }
+.msg.ok { color:#5fe0a0; }
+.msg.err { color:#ff7a8a; }
+.actions { display:flex; gap:10px; }
+.btn {
+  padding:10px 16px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px;
+  border: 1px solid var(--border); background:var(--panel); color:var(--text);
+}
+.btn.primary { background:var(--blue); color:#051018; border:none; }
+.btn.ghost { background:transparent; color:var(--muted); }

@@ -1,0 +1,49 @@
+# --- Web / API ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+websockets>=12
+python-dotenv>=1.0
+requests>=2.31
+
+# --- Modelos (Groq, Gemini, OpenRouter/Ollama) ---
+groq>=0.9
+google-generativeai>=0.7
+openai>=1.30
+
+# --- Voz ---
+numpy>=1.26
+sounddevice>=0.4.6
+openwakeword>=0.4.1
+onnxruntime>=1.17
+piper-tts>=1.2.0
+miniaudio>=1.56
+imageio-ffmpeg>=0.5
+
+# --- Visión ---
+Pillow>=10.3
+mss>=9.0
+
+# --- Memoria semántica ---
+qdrant-client>=1.9
+
+# --- Integraciones ---
+google-auth>=2.29
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.130
+spotipy>=2.24
+geocoder>=1.38
+
+# --- Puente Discord (DM privado + llamadas) ---
+py-cord[voice]>=2.5
+PyNaCl>=1.5
+pyogg>=0.6
+
+# --- Sistema / ventanas ---
+psutil>=5.9
+pycaw>=20240210
+comtypes>=1.2
+pywinauto>=0.6.8
+pywin32>=306; platform_system == "Windows"
+
+# --- Lectura de documentos (preview PDF; docx/odt usan stdlib zip+xml) ---
+pypdf>=3.17

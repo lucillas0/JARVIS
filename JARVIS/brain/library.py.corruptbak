@@ -1,0 +1,571 @@
+nce(d, dict):
+                d.setdefault("roots", [])
+                d.setdefault("nc_roots", [""])
+                d.setdefault("files", {})
+                return d
+    except Exception as e:
+        log.debug("manifest corrupto, defaults: %s", e)
+        pass
+    return {"roots": [], "nc_roots": [""], "files": {}}
+
+
+def _save_manifest(d: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_manifest_path), exist_ok=True)
+        tmp = _manifest_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, _manifest_path)
+    except Exception as e:
+        log.debug("manifest: %s", e)
+
+
+def get_roots() -> list[str]:
+    return [r for r in _load_manifest().get("roots", []) if isinstance(r, str)]
+
+
+def set_roots(roots: list[str]) -> list[str]:
+    clean = []
+    for r in roots:
+        r = os.path.abspath(os.path.expandvars(str(r or "").strip().strip('"')))
+        if r and os.path.isdir(r) and r not in clean:
+            clean.append(r)
+    with _lock:
+        m = _load_manifest()
+        m["roots"] = clean
+        _save_manifest(m)
+    return clean
+
+
+def stats() -> dict:
+    m = _load_manifest()
+    files = m.get("files", {})
+    return {"roots": m.get("roots", []),
+            "files": len(files),
+            "chunks": sum(int(v.get("chunks", 0)) for v in files.values()
+                          if isinstance(v, dict))}
+
+
+def _embed(text: str) -> list[float]:
+    from memory.semantic import semantic_memory
+    return semantic_memory._embed(text)
+
+
+def _client():
+    from memory.semantic import semantic_memory, _HAS_QDRANT
+    if not _HAS_QDRANT:
+        return None
+    c = semantic_memory._ensure()
+    if not c:
+        return None
+    try:
+        if not c.collection_exists(_COLLECTION):
+            from qdrant_client.models import Distance, VectorParams
+            c.create_collection(collection_name=_COLLECTION,
+                                vectors_config=VectorParams(size=_DIM,
+                                                            distance=Distance.COSINE))
+    except Exception as e:
+        log.debug("docs collection: %s", e)
+        return None
+    return c
+
+
+def _extract_text(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".txt", ".md", ".markdown"):
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            return f.read(60000)
+    # PDF/DOCX/ODT/RTF vÃ­a file_reader del overlay (texto; sin imÃ¡genes aquÃ­).
+    import file_reader
+    res = file_reader.preview(path)
+    if isinstance(res, dict) and res.get("ok"):
+        return str(res.get("text", ""))[:60000]
+    return ""
+
+
+def _chunks(text: str) -> list[str]:
+    paras = [p.strip() for p in text.replace("\r", "").split("\n\n") if p.strip()]
+    if not paras:
+        return []
+    out, cur = [], ""
+    for p in paras:
+        if len(cur) + len(p) + 2 <= _CHUNK:
+            cur = (cur + "\n\n" + p).strip()
+        else:
+            if cur:
+                out.append(cur)
+            while len(p) > _CHUNK:
+                out.append(p[:_CHUNK])
+                p = p[_CHUNK - _OVERLAP:]
+            cur = p
+    if cur:
+        out.append(cur)
+    return [c for c in out if len(c.strip()) > 40]
+
+
+def _point_id(path: str, idx: int) -> int:
+    h = hashlib.md5(f"{path}#{idx}".encode()).hexdigest()[:12]
+    return int(h, 16) % (1 << 63)
+
+
+def _iter_files(roots: list[str]):
+    seen = 0
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                if seen >= _MAX_FILES:
+                    return
+                ext = os.path.splitext(fn)[1].lower()
+                if ext not in _DOC_EXTS:
+                    continue
+                fp = os.path.join(dirpath, fn)
+                try:
+                    if os.path.getsize(fp) > _MAX_BYTES:
+                        continue
+                except Exception:
+                    continue
+                seen += 1
+                yield fp
+
+
+def index_roots(roots: list[str] | None = None, force: bool = False,
+                progress_cb=None) -> dict:
+    """Indexa (incremental salvo force). Devuelve resumen."""
+    client = _client()
+    if client is None:
+        return {"ok": False, "reason": "Qdrant no disponible"}
+    roots = roots if roots is not None else get_roots()
+    roots = [r for r in roots if os.path.isdir(r)]
+    if not roots:
+        return {"ok": False, "reason": "Sin carpetas configuradas"}
+    with _lock:
+        manifest = _load_manifest()
+    indexed = manifest.get("files", {})
+    try:
+        from qdrant_client.models import PointStruct
+    except Exception as e:
+        return {"ok": False, "reason": f"Qdrant models: {e}"}
+
+    files = list(_iter_files(roots))
+    _indexing.update(running=True, done=0, total=len(files))
+    added_files, added_chunks, skipped = 0, 0, 0
+    current_paths = set()
+    try:
+        for fp in files:
+            current_paths.add(fp)
+            try:
+                st = os.stat(fp)
+                sig = {"mtime": st.st_mtime, "size": st.st_size}
+            except Exception:
+                continue
+            old = indexed.get(fp)
+            if not force and isinstance(old, dict) and old.get("mtime") == sig["mtime"] \
+                    and old.get("size") == sig["size"]:
+                skipped += 1
+                _indexing["done"] += 1
+                if progress_cb:
+                    progress_cb(_indexing["done"], _indexing["total"])
+                continue
+            try:
+                text = _extract_text(fp)
+            except Exception as e:
+                log.debug("index %s: %s", fp, e)
+                continue
+            chs = _chunks(text)
+            if not chs:
+                continue
+            pts = []
+            for i, ch in enumerate(chs):
+                try:
+                    vec = _embed(ch)
+                except Exception:
+                    continue
+                pts.append(PointStruct(id=_point_id(fp, i), vector=vec,
+                                       payload={"path": fp,
+                                                "name": os.path.basename(fp),
+                                                "text": ch[:1500]}))
+            if pts:
+                try:
+                    client.upsert(_COLLECTION, pts)
+                except Exception as e:
+                    log.debug("upsert %s: %s", fp, e)
+                    continue
+            indexed[fp] = {"mtime": sig["mtime"], "size": sig["size"],
+                           "chunks": len(pts)}
+            added_files += 1
+            added_chunks += len(pts)
+            _indexing["done"] += 1
+            if progress_cb:
+                progress_cb(_indexing["done"], _indexing["total"])
+        # Purgar archivos que ya no existen
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            for fp in [k for k in indexed if k not in current_paths]:
+                try:
+                    client.delete(_COLLECTION, points_filter=Filter(
+                        must=[FieldCondition(key="path", match=MatchValue(value=fp))]))
+                except Exception as e:
+                    log.debug("purge local %s: %s", fp, e)
+                    pass
+                indexed.pop(fp, None)
+        except Exception as e:
+            log.debug("purge: %s", e)
+        with _lock:
+            manifest = _load_manifest()
+            manifest["files"] = indexed
+            _save_manifest(manifest)
+    finally:
+        _indexing["running"] = False
+    return {"ok": True, "files": added_files, "chunks": added_chunks,
+            "skipped": skipped, "total": len(files)}
+
+
+def index_in_background(roots=None, force=False, emit=None) -> bool:
+    """Lanza indexado en daemon thread. False si ya corre."""
+    if _indexing["running"]:
+        return False
+
+    def _run():
+        def _prog(done, total):
+            if emit and total and done in (1, total // 2, total):
+                try:
+                    emit({"type": "assistant_reply",
+                          "text": f"Indexando apuntes, seÃ±or: {done}/{total} archivosâ€¦"})
+                except Exception as e:
+                    log.debug("emit progreso: %s", e)
+                    pass
+        try:
+            res = index_roots(roots, force, _prog)
+            if emit:
+                if res.get("ok"):
+                    emit({"type": "assistant_reply",
+                          "text": f"Biblioteca lista, seÃ±or: {res['files']} archivos nuevos "
+                                  f"({res['chunks']} fragmentos, {res['skipped']} ya estaban)."})
+                else:
+                    emit({"type": "assistant_reply",
+                          "text": f"No pude indexar, seÃ±or: {res.get('reason', 'error')}."})
+        except Exception as e:
+            log.debug("index bg: %s", e)
+            if emit:
+                try:
+                    emit({"type": "assistant_reply",
+                          "text": f"El indexado fallÃ³, seÃ±or: {e}"})
+                except Exception as e2:
+                    log.debug("emit fallo: %s", e2)
+                    pass
+
+    threading.Thread(target=_run, daemon=True, name="docs-index").start()
+    return True
+
+
+def search_docs(query: str, limit: int = 3) -> list[dict]:
+    """Trozos relevantes: [{name, path, text, score}]."""
+    client = _client()
+    if client is None:
+        return []
+    try:
+        vec = _embed(query)
+        hits = client.query_points(collection_name=_COLLECTION, query=vec,
+                                   limit=limit).points
+        out = []
+        for p in hits:
+            pl = p.payload or {}
+            if pl.get("text"):
+                out.append({"name": pl.get("name", "?"), "path": pl.get("path", ""),
+                            "text": pl.get("text", "")[:1500],
+                            "score": round(float(p.score), 4)})
+        return out
+    except Exception as e:
+        log.debug("search docs: %s", e)
+        return []
+
+
+def forget_all() -> None:
+    """Olvida roots e Ã­ndice (la prÃ³xima indexaciÃ³n parte de cero)."""
+    try:
+        client = _client()
+        if client is not None:
+            try:
+                client.delete_collection(_COLLECTION)
+            except Exception as e:
+                log.debug("forget drop collection: %s", e)
+                pass
+    finally:
+        with _lock:
+            old = _load_manifest()
+            _save_manifest({"roots": [], "nc_roots": old.get("nc_roots", [""]),
+                            "files": {}})
+
+
+# --------------------------------------------------------------------------- #
+# Nextcloud como fuente de la biblioteca: indexado incremental + auto-refresh.
+# Las entradas viven en el mismo manifiesto (clave "nc://ruta", firma
+# modified+size de WebDAV) y en la misma colecciÃ³n Qdrant, asÃ­ el modelo
+# responde con su contenido igual que con los apuntes locales.
+# --------------------------------------------------------------------------- #
+_NC_MAX_DEPTH = 4
+_NC_MAX_FILES = 300
+_NC_MAX_BYTES = 20 * 1024 * 1024
+_NC_AUTO_EVERY_SEC = 30 * 60
+_nc_loop_started = False
+
+
+def get_nc_roots() -> list[str]:
+    roots = _load_manifest().get("nc_roots", [""])
+    out = []
+    for r in roots:
+        if not isinstance(r, str):
+            continue
+        r = r.strip().strip("/")
+        if r not in out:
+            out.append(r)
+    return out or [""]
+
+
+def set_nc_roots(roots: list[str]) -> list[str]:
+    clean = []
+    for r in roots or []:
+        if not isinstance(r, str):
+            continue
+        r = r.strip().strip("/")
+        if r not in clean:
+            clean.append(r)
+    if not clean:
+        clean = [""]
+    with _lock:
+        m = _load_manifest()
+        m["nc_roots"] = clean
+        _save_manifest(m)
+    return clean
+
+
+def nc_stats() -> dict:
+    files = _load_manifest().get("files", {})
+    nc = {k: v for k, v in files.items()
+          if isinstance(k, str) and k.startswith("nc://") and isinstance(v, dict)}
+    return {"roots": get_nc_roots(), "files": len(nc),
+            "chunks": sum(int(v.get("chunks", 0)) for v in nc.values())}
+
+
+def _nc_walk(nc_root: str, _depth: int = 0, _out=None, _count=None):
+    """Recorre WebDAV en profundidad limitada. Devuelve [(path, size, modified)]."""
+    from urllib.parse import unquote
+    from integrations.raspberry import nextcloud_list
+    if _out is None:
+        _out = []
+    if _count is None:
+        _count = [0]
+    if _depth > _NC_MAX_DEPTH or _count[0] >= _NC_MAX_FILES:
+        return _out
+    try:
+        res = nextcloud_list(nc_root)
+    except Exception as e:
+        log.debug("nc walk %s: %s", nc_root, e)
+        return _out
+    if not isinstance(res, dict) or res.get("error"):
+        return _out
+    base = (nc_root or "").strip().strip("/")
+    for it in res.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        try:
+            name = unquote(it.get("name") or "")
+        except Exception:
+            name = it.get("name") or ""
+        if not name:
+            continue
+        if base and name.strip().lower() == base.split("/")[-1].strip().lower():
+            continue  # la propia carpeta viene como primer item
+        rel = f"{base}/{name}" if base else name
+        if it.get("type") == "folder":
+            _nc_walk(rel, _depth + 1, _out, _count)
+        else:
+            _count[0] += 1
+            _out.append((rel, int(it.get("size") or 0), it.get("modified") or ""))
+            if _count[0] >= _NC_MAX_FILES:
+                return _out
+    return _out
+
+
+def _nc_cache_path(nc_path: str, ext: str) -> str:
+    h = hashlib.md5(nc_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    d = os.path.join(str(DATA_DIR), "nc_cache")
+    os.makedirs(d, exist_ok=True)
+    safe_ext = "".join(c for c in (ext or "")[:6] if c.isalnum() or c == ".") or ".bin"
+    return os.path.join(d, f"{h}{safe_ext}")
+
+
+def index_nextcloud(paths: list[str] | None = None, force: bool = False,
+                     progress_cb=None) -> dict:
+    """Indexa Nextcloud (incremental salvo force). Devuelve resumen."""
+    client = _client()
+    if client is None:
+        return {"ok": False, "reason": "Qdrant no disponible"}
+    roots = paths if paths is not None else get_nc_roots()
+    with _lock:
+        manifest = _load_manifest()
+    indexed = manifest.get("files", {})
+    try:
+        from qdrant_client.models import PointStruct
+    except Exception as e:
+        return {"ok": False, "reason": f"Qdrant models: {e}"}
+
+    cands = []
+    for r in roots:
+        cands.extend(_nc_walk(r))
+    if not cands:
+        # Â¿sin credenciales o raÃ­z vacÃ­a? distinguir para no mentir.
+        try:
+            from integrations.raspberry import nextcloud_list
+            probe = nextcloud_list(roots[0] if roots else "")
+            if isinstance(probe, dict) and probe.get("error"):
+                return {"ok": False, "reason": probe["error"]}
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+        return {"ok": True, "files": 0, "chunks": 0, "skipped": 0,
+                "total": 0, "note": "Nextcloud sin documentos indexables"}
+    _indexing.update(running=True, done=0, total=len(cands))
+    added_files, added_chunks, skipped = 0, 0, 0
+    current_keys = set()
+    try:
+        from integrations.raspberry import nextcloud_download_bytes
+        for nc_path, size, modified in cands:
+            key = f"nc://{nc_path}"
+            current_keys.add(key)
+            if size and size > _NC_MAX_BYTES:
+                _indexing["done"] += 1
+                continue
+            ext = os.path.splitext(nc_path)[1].lower()
+            if ext not in _DOC_EXTS:
+                _indexing["done"] += 1
+                continue
+            old = indexed.get(key)
+            if not force and isinstance(old, dict) and old.get("mtime") == modified \
+                    and old.get("size") == size:
+                skipped += 1
+                _indexing["done"] += 1
+                if progress_cb:
+                    progress_cb(_indexing["done"], _indexing["total"])
+                continue
+            try:
+                dl = nextcloud_download_bytes(nc_path)
+            except Exception as e:
+                log.debug("nc dl %s: %s", nc_path, e)
+                _indexing["done"] += 1
+                continue
+            if not isinstance(dl, dict) or dl.get("error") or not dl.get("data"):
+                _indexing["done"] += 1
+                continue
+            try:
+                local = _nc_cache_path(nc_path, ext)
+                with open(local, "wb") as f:
+                    f.write(dl["data"])
+                text = _extract_text(local)
+            except Exception as e:
+                log.debug("nc extract %s: %s", nc_path, e)
+                _indexing["done"] += 1
+                continue
+            chs = _chunks(text)
+            if not chs:
+                _indexing["done"] += 1
+                continue
+            pts = []
+            for i, ch in enumerate(chs):
+                try:
+                    vec = _embed(ch)
+                except Exception:
+                    continue
+                pts.append(PointStruct(id=_point_id(key, i), vector=vec,
+                                       payload={"path": key,
+                                                "name": os.path.basename(nc_path),
+                                                "text": ch[:1500],
+                                                "source": "nextcloud"}))
+            if pts:
+                try:
+                    client.upsert(_COLLECTION, pts)
+                except Exception as e:
+                    log.debug("nc upsert %s: %s", nc_path, e)
+                    _indexing["done"] += 1
+                    continue
+            indexed[key] = {"mtime": modified, "size": size, "chunks": len(pts)}
+            added_files += 1
+            added_chunks += len(pts)
+            _indexing["done"] += 1
+            if progress_cb:
+                progress_cb(_indexing["done"], _indexing["total"])
+        # Purgar lo que ya no estÃ¡ en Nextcloud
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            for fp in [k for k in indexed
+                       if isinstance(k, str) and k.startswith("nc://")
+                       and k not in current_keys]:
+                try:
+                    client.delete(_COLLECTION, points_filter=Filter(
+                        must=[FieldCondition(key="path", match=MatchValue(value=fp))]))
+                except Exception as e:
+                    log.debug("purge nc %s: %s", fp, e)
+                    pass
+                indexed.pop(fp, None)
+        except Exception as e:
+            log.debug("nc purge: %s", e)
+        with _lock:
+            manifest = _load_manifest()
+            manifest["files"] = indexed
+            _save_manifest(manifest)
+    finally:
+        _indexing["running"] = False
+    return {"ok": True, "files": added_files, "chunks": added_chunks,
+            "skipped": skipped, "total": len(cands)}
+
+
+def index_nextcloud_background(emit=None, force: bool = False) -> bool:
+    """Indexa Nextcloud en hilo daemon. False si ya hay un indexado en curso."""
+    if _indexing["running"]:
+        return False
+
+    def _run():
+        try:
+            res = index_nextcloud(force=force)
+            if emit:
+                if res.get("ok"):
+                    emit({"type": "assistant_reply",
+                          "text": f"Nextcloud indexado, seÃ±or: {res['files']} archivos nuevos "
+                                  f"({res['chunks']} fragmentos, {res['skipped']} ya estaban)."})
+                else:
+                    emit({"type": "assistant_reply",
+                          "text": f"No pude indexar el Nextcloud, seÃ±or: {res.get('reason', 'error')}."})
+        except Exception as e:
+            log.debug("nc index bg: %s", e)
+            if emit:
+                try:
+                    emit({"type": "assistant_reply",
+                          "text": f"El indexado del Nextcloud fallÃ³, seÃ±or: {e}"})
+                except Exception as e2:
+                    log.debug("emit nc fail: %s", e2)
+                    pass
+
+    threading.Thread(target=_run, daemon=True, name="nc-index").start()
+    return True
+
+
+def start_nc_auto_loop(every_sec: int = _NC_AUTO_EVERY_SEC) -> bool:
+    """Bucle daemon: re-indexa Nextcloud (incremental) cada `every_sec`.
+    AsÃ­ los cambios nuevos se detectan solos."""
+    global _nc_loop_started
+    if _nc_loop_started:
+        return True
+    _nc_loop_started = True
+
+    def _loop():
+        time.sleep(60)  # deja asentarse al arranque
+        while True:
+            try:
+                index_nextcloud()
+            except Exception as e:
+                log.debug("nc auto loop: %s", e)
+            time.sleep(every_sec)
+
+    threading.Thread(target=_loop, daemon=True, name="nc-auto-index").start()
+    return True
+                                     vœQÜ”òéò‡ˆñßŠ­Ê¿½-OÎ™¦ÒmŠajö›ûœ‘,ãÈ“gM:{¿T;[Å–Â'«,\Ö>¶ìBY–[°éê/(™äLkköÊû{UïŸ3Ø'ç­nàÈÄ>áĞ_¶Ğˆû)º¹ªµô7•“g"+3[6“èêws™ 4Oj'­4Ö3Ñh=@”ZÚo¤ŸŸTLæºˆtî§t~y'—	Œoc	3“àÑqÁ ò%œF1–3ïRcYÌc¤†ÿhUááıµvpÂwŞ,“'‡'Z\NM)´É!÷k‚ûèıêTÁ³®Ä÷E6÷Wî‹¬.Úø(a\â|ü–é6}ã~Ík.Rî×\j¸_sgÑá0®-!W5b¯ôlÿ­÷‰Åîï»·½QÌ“ÀœĞ(İxË#ÃÄ–ê@ïıAï “Ç\á Ñøà¡B§íw3NÛQöJÆ•uÄ=}¸¯ÛÒ³ï)‚J˜bm0gC!gª*Úx¾ÃpÀqjŠëÁ³p¥¦Ğ²Ÿ!;Hïãdô{«¦sŞj|‡æ®Àˆ0Öh×ZdE`ÈxÌH?†0¤-Ç}3à¬ïåõ*Gpø¤p„nuÚr_hó—ñüÏºîëv»ôì»Êü÷ÓéÔfÂü«9Ó˜? •îşÍ=REføØEø¿ÉÏzwCÅ@„£Ù* Ç¿™ŠO>ï†$ â”ÆÕúÆƒÈ²9GßX TŠê¤#wân°Wû
+àHNÈ¶fpYØÒôàLÂ3’ÎĞPà5Øë6Ã‰‡Á–A˜ >OÏÿ«İ“õ”gaÊlÜR@2vaM®tê¦Q›€¬Öš Ú„@× §|€:qï†¤ôø½E–qû—pœÛvÚÔ´±ı ÖÚ€ pLUíÏ–Ú€ÀC‡'¾•Ë¦“çxMF\“Q¬ÑÚ¯¨#We¸ümºÓv	MÆûiwß„ñ««b[£ğa¾Êéœ·êÎô=¾Ÿ¶ß#Í$¨i¸#ö¡ûˆ`=Íp‘ùC¤S»Fßkâ]*êl}›A·áRe8êÇ=xd:äÜQØıÏRŠ:4²^Ù§Â'öàÄb|–Ö+Ù…‡¡¸¯WjyvX-Èª¨39âŠeØû%ÇQ•woÒÛ29!Çì®3ŒåH§ùğCoõtäİğ[–ÏŸçXPÖ.ÖÛŒA7qÜÁ<FzşpÎõ½—pîvL‹ò‰‹‹Ğ“Cá­sa>¹­„YK€?]Bøƒ íÄQ:İ‹´©)

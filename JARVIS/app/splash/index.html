@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>JARVIS</title>
+<link rel="stylesheet" href="splash.css" />
+</head>
+<body>
+  <div class="splash">
+    <div class="orb-sphere"></div>
+    <h1>J.A.R.V.I.S.</h1>
+    <p id="tagline" class="tagline">Preparando el cerebro</p>
+
+    <div class="progress-track">
+      <div id="bar" class="progress-bar"></div>
+    </div>
+    <div class="pct-line">
+      <span id="pct">0%</span>
+    </div>
+
+    <p id="status" class="status">Buscando Python…</p>
+
+    <div id="errorBox" class="error" hidden>
+      <p id="errorTitle"></p>
+      <p id="errorDetail"></p>
+      <div class="error-actions">
+        <button id="retryBtn" type="button" class="btn">Reintentar</button>
+        <button id="closeBtn" type="button" class="btn ghost">Salir</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="splash.js"></script>
+</body>
+</html>
