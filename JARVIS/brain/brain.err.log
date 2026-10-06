@@ -1,0 +1,32 @@
+INFO:     Started server process [4004]
+INFO:     Waiting for application startup.
+2026-09-15 15:34:07,730 tool_manager INFO ToolManager: 16 herramientas registradas
+2026-09-15 15:34:07,896 voice.audio ERROR No pude abrir el stream de audio: Error querying device -1
+Traceback (most recent call last):
+  File "E:\jarvis-handoff\JARVIS\brain\voice\audio.py", line 64, in start
+    self._stream = sd.Stream(
+                   ^^^^^^^^^^
+  File "E:\jarvis-handoff\JARVIS\brain\venv\Lib\site-packages\sounddevice.py", line 1843, in __init__
+    _StreamBase.__init__(self, kind='duplex', wrap_callback='array',
+  File "E:\jarvis-handoff\JARVIS\brain\venv\Lib\site-packages\sounddevice.py", line 817, in __init__
+    iparameters, idtype, isize, isamplerate = _get_stream_parameters(
+                                              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\jarvis-handoff\JARVIS\brain\venv\Lib\site-packages\sounddevice.py", line 2751, in _get_stream_parameters
+    info = query_devices(device)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "E:\jarvis-handoff\JARVIS\brain\venv\Lib\site-packages\sounddevice.py", line 578, in query_devices
+    raise PortAudioError(f'Error querying device {device}')
+sounddevice.PortAudioError: Error querying device -1
+2026-09-15 15:34:07,915 voice.manager ERROR Sin audio, arranco igualmente pero sin voz.
+2026-09-15 15:34:07,916 brain INFO Brain listo: con API keys
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:50446 - "WebSocket /ws" [accepted]
+INFO:     connection open
+2026-09-15 15:36:28,584 httpx INFO HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-09-15 15:36:28,623 model_router INFO Groq OK en 0.53s
+2026-09-15 15:36:28,624 brain INFO reset a 1.14s vía groq (fallback=False)
+2026-09-15 15:36:32,747 memory.semantic INFO Evento indexado en memoria semántica
+2026-09-15 15:36:36,821 memory.semantic INFO Evento indexado en memoria semántica
+INFO:     127.0.0.1:53052 - "WebSocket /ws" [accepted]
+INFO:     connection open

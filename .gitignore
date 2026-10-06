@@ -1,0 +1,15 @@
+venv/
+.venv/
+
+dist/
+build/
+dist-installer/
+
+*.exe
+*.onnx
+
+.env
+__pycache__/
+*.pyc
+
+node_modules/

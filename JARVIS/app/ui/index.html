@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>J.A.R.V.I.S.</title>
+<link rel="stylesheet" href="styles.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="orbRoot" class="orb-root"></div>
+
+  <div class="overlay-vignette"></div>
+  <div class="overlay-grain"></div>
+  <div class="overlay-scanlines"></div>
+
+  <div class="voice-wrap">
+    <canvas id="voiceLine" class="voice-line-canvas"></canvas>
+  </div>
+
+  <div id="actionPanel" class="action-panel">
+    <div class="action-steps">
+      <div class="action-step" id="stepThink">
+        <span class="step-dot"></span>
+        <span class="step-name">PENSAR</span>
+      </div>
+      <div class="step-arrow">→</div>
+      <div class="action-step" id="stepAct">
+        <span class="step-dot"></span>
+        <span class="step-name">ACTUAR</span>
+      </div>
+      <div class="step-arrow">→</div>
+      <div class="action-step" id="stepSpeak">
+        <span class="step-dot"></span>
+        <span class="step-name">HABLAR</span>
+      </div>
+    </div>
+    <div id="actionText" class="action-text">—</div>
+  </div>
+
+  <div class="hud hud-title">J.A.R.V.I.S.</div>
+
+  <div class="hud hud-controls">
+    <div id="cameraPanel" class="camera-panel">
+      <video id="camVideo" muted playsinline class="camera-video"></video>
+      <canvas id="camOverlay" width="208" height="156" class="camera-overlay"></canvas>
+      <div id="cameraStatus" class="camera-status">SHOW HANDS</div>
+    </div>
+
+    <div id="hudError" class="hud-error"></div>
+
+    <div class="hud-row">
+      <button id="gesturesBtn" type="button" class="hud-btn" aria-pressed="false">GESTURES OFF</button>
+    </div>
+    <div class="hud-row">
+      <button id="zoomInBtn" type="button" class="hud-btn" aria-label="Zoom in">+</button>
+      <button id="zoomOutBtn" type="button" class="hud-btn" aria-label="Zoom out">−</button>
+      <button id="resetBtn" type="button" class="hud-btn">RESET</button>
+    </div>
+  </div>
+
+  <script src="gestures.js"></script>
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>

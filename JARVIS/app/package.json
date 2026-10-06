@@ -1,0 +1,78 @@
+{
+  "name": "jarvis",
+  "version": "4.0.0",
+  "description": "JARVIS - Asistente personal de escritorio con voz (Windows)",
+  "main": "main.js",
+  "author": "Lucas",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "electron-builder install-app-deps",
+    "dist": "electron-builder --win"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.jarvis.assistant",
+    "productName": "JARVIS",
+    "files": [
+      "main.js",
+      "preload.js",
+      "overlay-backend.js",
+      "ui/**/*",
+      "splash/**/*",
+      "setup-wizard/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../brain",
+        "to": "brain",
+        "filter": [
+          "**/*",
+          "!venv/**",
+          "!db/**",
+          "!**/__pycache__/**",
+          "!.env.bak"
+        ]
+      },
+      {
+        "from": "../assets",
+        "to": "assets"
+      },
+      {
+        "from": "../wa-bridge",
+        "to": "wa-bridge",
+        "filter": [
+          "**/*",
+          "!session/**"
+        ]
+      },
+      {
+        "from": "../dist-assets/wheelhouse",
+        "to": "wheelhouse"
+      }
+    ],
+    "directories": {
+      "output": "../dist-installer"
+    },
+    "afterPack": "scripts/after-pack.js",
+    "compression": "maximum",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "runAfterFinish": true
+    }
+  }
+}

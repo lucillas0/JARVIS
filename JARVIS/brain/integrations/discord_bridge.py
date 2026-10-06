@@ -1,0 +1,740 @@
+"""Puente Discord (DM privado con el propietario) para JARVIS.
+
+Hilo propio con su event loop (discord.py es asyncio). Solo atiende al
+propietario (DISCORD_OWNER_ID): DMs y canales donde esté el bot.
+Texto + notas de voz (ogg/opus) + imágenes; responde texto, o voz si
+le hablaron por voz. Sin token u owner configurados, apagado silencioso.
+"""
+import asyncio
+import base64
+import io
+import logging
+import re
+import threading
+import time
+
+log = logging.getLogger("integrations.discord")
+
+MAX_MEDIA_BYTES = 20 * 1024 * 1024
+DISCORD_MSG_LIMIT = 1900
+
+_JOIN_RE = re.compile(
+    r"\b(únete|unete|entra|ven|conéctate|conectate|conecta|súbete|subete|métete|metete|llámame|llamame)\b.{0,30}\b(voz|canal|llamada)\b"
+    r"|^\s*(únete|unete|entra|ven|conecta|llámame|llamame)\b", re.I)
+_QUIT_RE = re.compile(
+    r"\b(sal|cuelga|vete|desconecta|adiós|adios)\b.{0,30}\b(voz|canal|llamada)\b"
+    r"|^\s*(sal|vete|cuelga|desconecta)\b", re.I)
+_SAY_RE = re.compile(r"^(di en voz|dí en voz)\s+(.+)", re.I | re.S)
+
+
+def chunk_text(text: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
+    """Trocea respuestas largas al límite de Discord (2000 chars)."""
+    text = text or ""
+    if len(text) <= limit:
+        return [text] if text else []
+    parts, cur = [], []
+    cur_len = 0
+    for line in text.split("\n"):
+        if cur_len + len(line) + 1 > limit and cur:
+            parts.append("\n".join(cur))
+            cur, cur_len = [], 0
+        # Línea gigante: corte duro
+        while len(line) > limit:
+            parts.append(line[:limit])
+            line = line[limit:]
+        cur.append(line)
+        cur_len += len(line) + 1
+    if cur:
+        parts.append("\n".join(cur))
+    return parts or [text[:limit]]
+
+
+def _video_middle_frame(data: bytes) -> bytes | None:
+    """Extrae un JPG del segundo 1 (o del inicio) de un vídeo para analizarlo."""
+    import subprocess
+    import tempfile
+    try:
+        from integrations.voice_call import ffmpeg_exe
+        ff = ffmpeg_exe()
+    except Exception:
+        return None
+    if not ff:
+        return None
+    tmp_in, tmp_out = None, None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(data)
+            tmp_in = f.name
+        tmp_out = tmp_in + ".jpg"
+        for ss in ("1", "0"):
+            try:
+                r = subprocess.run(
+                    [ff, "-y", "-v", "error", "-ss", ss, "-i", tmp_in,
+                     "-frames:v", "1", "-q:v", "3", tmp_out],
+                    capture_output=True, timeout=30,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if r.returncode == 0:
+                    with open(tmp_out, "rb") as f:
+                        jpg = f.read()
+                    if len(jpg) > 2000:
+                        return jpg
+            except Exception:
+                continue
+    except Exception:
+        return None
+    finally:
+        for p in (tmp_in, tmp_out):
+            try:
+                if p:
+                    import os as _os
+                    _os.remove(p)
+            except Exception:
+                pass
+    return None
+
+
+class JarvisDiscordBridge:
+    def __init__(self, token: str, owner_id: int, prefix: str = "",
+                 handle_fn=None):
+        self.token = token
+        self.owner_id = owner_id
+        self.prefix = (prefix or "").strip()
+        self.handle_fn = handle_fn
+        self.client = None
+        self._thread = None
+        self.voice_call = None  # llamada activa (voice_call.VoiceCall)
+
+    # ---------------- ciclo de vida ----------------
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="discord-bridge")
+        self._thread.start()
+        return self
+
+    def _make_client(self):
+        try:
+            # El constructor del cliente exige un event loop en este hilo.
+            asyncio.set_event_loop(asyncio.new_event_loop())
+        except Exception as e:
+            log.debug("discord loop: %s", e)
+        import discord
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.dm_messages = True
+        intents.guild_messages = True
+        intents.members = True  # ver al owner en canales de voz (¡activar también en el portal!)
+        intents.voice_states = True
+        client = discord.Client(intents=intents)
+        self.client = client
+
+        @client.event
+        async def on_ready():
+            guilds = [g.name for g in client.guilds]
+            log.info("Discord conectado como %s (owner %s). Servidores: %s",
+                     client.user, self.owner_id, guilds or "ninguno")
+
+        @client.event
+        async def on_message(message):
+            try:
+                await self._route(client, message)
+            except Exception as e:
+                log.debug("discord on_message: %s", e)
+
+        @client.event
+        async def on_voice_state_update(member, before, after):
+            try:
+                await self._auto_leave(member, after)
+            except Exception as e:
+                log.debug("discord voice_state: %s", e)
+            try:
+                await self._auto_join(member, before, after)
+            except Exception as e:
+                log.debug("discord auto-join: %s", e)
+        return client
+
+    def _run(self):
+        tries = 0
+        self.last_error = None
+        self.tries = 0
+        while tries < 30:
+            tries += 1
+            self.tries = tries
+            client = self._make_client()
+            try:
+                async def _amain():
+                    async with client:
+                        await client.start(self.token, reconnect=True)
+                asyncio.run(_amain())
+                return  # salida limpia
+            except Exception as e:
+                self.last_error = f"{type(e).__name__}: {e}"[:300]
+                log.warning("Puente Discord intento %d/30: %s", tries, e)
+                try:
+                    time.sleep(60)
+                except Exception:
+                    return
+        log.warning("Puente Discord: reintentos agotados.")
+        try:
+            from memory import selfheal as _sh
+            _sh.report("restart:discord",
+                       f"Puente Discord caído tras 30 intentos: {self.last_error or '?'}",
+                       "discord_bridge._run agotó reintentos; hook reinicia vía start_discord_bridge")
+            _sh.fix_now()
+        except Exception as e:
+            log.debug("discord selfheal: %s", e)
+
+    # ---------------- enrutado ----------------
+    async def _route(self, client, message):
+        author = getattr(message, "author", None)
+        try:
+            ch = getattr(message, "channel", None)
+            log.info("discord msg: author=%s bot=%s ch=%s guild=%s len=%d",
+                     getattr(author, "id", "?"), getattr(author, "bot", "?"),
+                     getattr(ch, "name", getattr(ch, "id", "?")),
+                     getattr(getattr(ch, "guild", None), "name", "DM"),
+                     len(str(getattr(message, "content", "") or "")))
+        except Exception:
+            pass
+        if not author or getattr(author, "bot", False):
+            return
+        if int(getattr(author, "id", 0) or 0) != self.owner_id:
+            return  # solo el propietario, siempre
+        content = str(getattr(message, "content", "") or "").strip()
+        attachments = list(getattr(message, "attachments", []) or [])
+
+        audio_att = next((a for a in attachments
+                          if str(getattr(a, "content_type", "") or "").startswith("audio/")), None)
+        image_att = next((a for a in attachments
+                          if str(getattr(a, "content_type", "") or "").startswith("image/")), None)
+        video_att = next((a for a in attachments
+                          if str(getattr(a, "content_type", "") or "").startswith("video/")), None)
+
+        if self.prefix and not content.startswith(self.prefix):
+            return
+        clean = content[len(self.prefix):].strip() if self.prefix else content
+
+        # Comandos de llamada (solo texto, owner ya verificado arriba)
+        if _QUIT_RE.search(clean):
+            await self._quit_voice(message.channel)
+            return
+        m_say = _SAY_RE.match(clean)
+        if m_say:
+            await self._say_voice(message.channel, m_say.group(2).strip())
+            return
+        if _JOIN_RE.search(clean):
+            await self._join_voice(message)
+            return
+
+        payload = {"kind": "text", "text": clean, "voice_reply": False}
+        if audio_att is not None:
+            payload = {"kind": "voice", "voice_reply": True}
+        elif image_att is not None:
+            payload = {"kind": "image", "text": clean, "voice_reply": False}
+        elif video_att is not None:
+            payload = {"kind": "video", "text": clean, "voice_reply": False}
+
+        if payload["kind"] == "text" and not clean:
+            return
+
+        channel = message.channel
+
+        async def _work():
+            try:
+                async with channel.typing():
+                    return await asyncio.to_thread(self._process, payload,
+                                                   audio_att, image_att, video_att)
+            except Exception as e:
+                log.debug("discord process: %s", e)
+                return None
+
+        # Barómetro: <4s directo; si piensa, avisa y cada 25s informa.
+        task = asyncio.create_task(_work())
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), timeout=4.0)
+        except asyncio.TimeoutError:
+            result = None
+            try:
+                from main import TEXT_ACK as _TEXT_ACK, PROGRESS_MSG as _PROG
+            except Exception:
+                _TEXT_ACK, _PROG = ("Ahora voy, señor, voy a investigarlo.",
+                                    "Sigo en proceso, señor.")
+            try:
+                await channel.send(_TEXT_ACK)
+            except Exception:
+                pass
+            while True:
+                try:
+                    result = await asyncio.wait_for(asyncio.shield(task), timeout=25.0)
+                    break
+                except asyncio.TimeoutError:
+                    try:
+                        await channel.send(_PROG)
+                    except Exception:
+                        pass
+        if not result:
+            return
+        reply, voice_bytes = result
+        # Intención de voz detectada por el LLM (fallback a cualquier
+        # formulación que el regex no case): se ejecuta, no se envía.
+        if "[[VOICE_JOIN]]" in reply:
+            await self._join_voice(message)
+            rest = reply.replace("[[VOICE_JOIN]]", "").strip()
+            if rest:
+                await self._send(message.channel, rest)
+            return
+        if "[[VOICE_LEAVE]]" in reply:
+            await self._quit_voice(message.channel)
+            rest = reply.replace("[[VOICE_LEAVE]]", "").strip()
+            if rest:
+                await self._send(message.channel, rest)
+            return
+        # Ritual Despertar inline: el acuse ya se envió; la narración va al
+        # canal (o hablada en la llamada si está activa), no solo al HUD.
+        if self._is_wakeup(clean):
+            await asyncio.to_thread(self._run_wakeup_blocking, message.channel)
+            return
+        try:
+            if voice_bytes:
+                await channel.send(file=self._discord_file(voice_bytes, "respuesta.ogg"))
+            elif reply:
+                for part in chunk_text(reply):
+                    await channel.send(part)
+        except Exception as e:
+            log.debug("discord send: %s", e)
+        # Si estoy en llamada: repetir la respuesta POR VOZ en el canal.
+        try:
+            call = self.voice_call
+            if call is not None and getattr(call, "active", False) and reply:
+                await call.speak(reply[:1200])
+        except Exception as e:
+            log.debug("discord speak-reply: %s", e)
+
+    def _discord_file(self, data: bytes, name: str):
+        import discord
+        return discord.File(io.BytesIO(data), filename=name)
+
+    def _process(self, payload, audio_att, image_att, video_att=None):
+        """Hilo worker: medios → brain → (reply, voice_bytes|None)."""
+        kind = payload["kind"]
+        try:
+            if kind == "voice":
+                data = self._read_attachment(audio_att)
+                if not data:
+                    return ("No pude descargar ese audio, señor.", None)
+                from voice.wa_media import transcribe_ogg, synthesize_ogg
+                text = transcribe_ogg(data) or ""
+                if not text:
+                    return ("Le oí, señor, pero no entendí el audio. Repítamelo.", None)
+                reply = self._ask(text) or "Disculpe, señor, ahora mismo no alcanzo al cerebro."
+                try:
+                    return (reply, synthesize_ogg(reply))
+                except Exception as e:
+                    log.debug("discord tts: %s", e)
+                    return (reply, None)
+            if kind == "image":
+                data = self._read_attachment(image_att)
+                if not data:
+                    return ("No pude descargar esa imagen, señor.", None)
+                from vision.analyzer import analyze_webcam_frame
+                prompt = payload.get("text") or "Describe qué se ve en esta imagen."
+                try:
+                    reply = analyze_webcam_frame(base64.b64encode(data).decode(),
+                                                 prompt)
+                except Exception as e:
+                    log.debug("discord vision: %s", e)
+                    reply = "No he podido ver la imagen, señor."
+                return (reply, None)
+            if kind == "video":
+                data = self._read_attachment(video_att)
+                if not data:
+                    return ("No pude descargar ese vídeo, señor.", None)
+                frame = _video_middle_frame(data)
+                if not frame:
+                    return ("No pude extraer imagen del vídeo, señor.", None)
+                from vision.analyzer import analyze_webcam_frame
+                prompt = payload.get("text") or \
+                    "Describe qué se ve en este vídeo (miro su fotograma central)."
+                try:
+                    reply = analyze_webcam_frame(base64.b64encode(frame).decode(),
+                                                 prompt)
+                except Exception as e:
+                    log.debug("discord vision video: %s", e)
+                    reply = "No he podido ver el vídeo, señor."
+                return (reply, None)
+            reply = self._ask(payload.get("text", "")) or \
+                "Disculpe, señor, ahora mismo no alcanzo al cerebro."
+            return (reply, None)
+        except Exception as e:
+            log.debug("discord _process: %s", e)
+            return ("Ha fallado algo en mis sistemas, señor. Sigo operativo.", None)
+
+    def _read_attachment(self, att):
+        """Lee un adjunto de forma síncrona (llamado desde worker)."""
+        size = int(getattr(att, "size", 0) or 0)
+        if size > MAX_MEDIA_BYTES:
+            return None
+        future = asyncio.run_coroutine_threadsafe(att.read(), self._loop())
+        return future.result(timeout=60)
+
+    def _loop(self):
+        if self.client:
+            try:
+                return self.client.loop
+            except Exception:
+                pass
+        return asyncio.new_event_loop()
+
+    def _ask(self, text: str) -> str:
+        if not text.strip() or self.handle_fn is None:
+            return ""
+        try:
+            return self.handle_fn(text, "discord", None, False) or ""
+        except Exception as e:
+            log.debug("discord ask: %s", e)
+            return ""
+
+    def _is_wakeup(self, text: str) -> bool:
+        try:
+            from main import _WAKE_UP_RE
+            return bool(_WAKE_UP_RE.search(text or ""))
+        except Exception:
+            return False
+
+    def _wakeup_done(self):
+        try:
+            from main import brain as _brain
+            _brain.emit({"type": "action_status", "label": "Protocolo matutino",
+                         "state": "done"})
+        except Exception as e:
+            log.debug("wakeup done: %s", e)
+
+    def _run_wakeup_blocking(self, channel):
+        """Ejecuta el ritual en hilo worker: líneas al canal (o habladas en
+        llamada si hay una activa). Llamar vía to_thread desde el loop."""
+        from routines import wake_up
+        loop = self._loop()
+        call = self.voice_call
+        in_call = call is not None and getattr(call, "active", False)
+
+        def say_channel(line: str):
+            try:
+                fut = asyncio.run_coroutine_threadsafe(channel.send(line), loop)
+                fut.result(timeout=60)
+            except Exception as e:
+                log.debug("wakeup say: %s", e)
+
+        def say_call(line: str):
+            try:
+                fut = asyncio.run_coroutine_threadsafe(call.speak(line), loop)
+                fut.result(timeout=180)
+            except Exception as e:
+                log.debug("wakeup speak: %s", e)
+            say_channel(line)
+
+        try:
+            if in_call:
+                wake_up.run(emit=lambda m: None, speak_fn=say_call,
+                            engine=None, music=False)
+            else:
+                wake_up.run(emit=lambda m: None, speak_fn=say_channel,
+                            engine=None, music=False)
+        except Exception as e:
+            log.debug("wakeup run: %s", e)
+        self._wakeup_done()
+
+    # ---------------- llamada de voz ----------------
+    def _voice_mod(self):
+        try:
+            from integrations import voice_call as vc_mod
+            return vc_mod
+        except Exception as e:
+            log.debug("voice_call no disponible: %s", e)
+            return None
+
+    async def _send(self, channel, text: str):
+        if channel is None:
+            return
+        try:
+            for part in chunk_text(text):
+                await channel.send(part)
+        except Exception as e:
+            log.debug("discord send: %s", e)
+
+    async def _join_voice(self, message):
+        channel = message.channel
+        vc_mod = self._voice_mod()
+        if vc_mod is None:
+            await self._send(channel, "Voz no disponible en este equipo, señor.")
+            return
+        if not vc_mod.ensure_opus():
+            log.warning("join voz: sin opus")
+            await self._send(channel, "No tengo códec de voz aquí, señor.")
+            return
+        call = self.voice_call
+        if call is not None and getattr(call, "active", False):
+            await self._send(channel, "Ya estoy en el canal, señor. Escríbame y se lo digo por voz.")
+            return
+        target = None
+        try:
+            client = self.client
+            guilds = list(getattr(client, "guilds", []) or [])
+            log.info("join voz: %d servidores visibles", len(guilds))
+            for g in guilds:
+                try:
+                    m = g.get_member(self.owner_id)
+                except Exception:
+                    m = None
+                if m is not None and getattr(m, "voice", None) and m.voice.channel:
+                    target = m.voice.channel
+                    break
+        except Exception as e:
+            log.debug("voice find: %s", e)
+        if target is None:
+            log.info("join voz: owner no está en ningún canal de voz")
+            await self._send(channel, "No le veo en ningún canal de voz, señor. Entre usted primero.")
+            return
+        log.info("join voz: entrando en '%s' (%s)", getattr(target, "name", "?"), getattr(target, "id", "?"))
+        await self._enter_voice(target, channel)
+
+    async def _auto_join(self, member, before, after):
+        """Si el propietario ENTRA en un canal de voz, unirse solo."""
+        try:
+            if int(getattr(member, "id", 0) or 0) != self.owner_id:
+                return
+            after_ch = getattr(after, "channel", None)
+            before_ch = getattr(before, "channel", None)
+            if after_ch is None:
+                return
+            if before_ch is not None and getattr(before_ch, "id", None) == getattr(after_ch, "id", None):
+                return
+            call = self.voice_call
+            if call is not None and getattr(call, "active", False):
+                return
+            log.info("auto-join: el owner entró en '%s'; me uno",
+                     getattr(after_ch, "name", "?"))
+            await self._enter_voice(after_ch, None)
+            try:
+                u = self.client.get_user(self.owner_id) if self.client else None
+                if u is None and self.client:
+                    u = await self.client.fetch_user(self.owner_id)
+                if u:
+                    await u.send("Me uno a la llamada, señor.")
+            except Exception as e:
+                log.debug("auto-join dm: %s", e)
+        except Exception as e:
+            log.debug("auto-join: %s", e)
+
+    async def _enter_voice(self, target, channel):
+        """Conecta al canal `target` y arranca la llamada. channel puede ser
+        None (auto-join: solo voz + DM de aviso)."""
+        vc_mod = self._voice_mod()
+        if vc_mod is None or not vc_mod.ensure_opus():
+            if channel is not None:
+                await self._send(channel, "Voz no disponible en este equipo, señor.")
+            return
+        call = self.voice_call
+        if call is not None and getattr(call, "active", False):
+            return
+        try:
+            vc = await target.connect()
+        except Exception as e:
+            log.warning("join voz connect: %s", e)
+            if channel is not None:
+                await self._send(channel, f"No pude entrar al canal, señor: {e}")
+            return
+        from voice.stt import transcribe as _stt
+        from voice.wa_media import synthesize_ogg as _tts_ogg
+        call = vc_mod.VoiceCall(
+            vc, self.owner_id, self.client.loop, channel,
+            handle_fn=lambda t: self.handle_fn(t, "discord-voice", None, False)
+            if self.handle_fn else "",
+            transcribe_fn=lambda audio16k: _stt(audio16k),
+            tts_fn=lambda txt: _tts_ogg(txt),
+        )
+        self.voice_call = call
+        try:
+            await call.start()
+        except Exception as e:
+            log.debug("voice start: %s", e)
+            self.voice_call = None
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+            await self._send(channel, f"No pude activar el micro, señor: {e}")
+            return
+        dave_note = ""
+        try:
+            if vc.is_dave_connection():
+                dave_note = " (canal cifrado DAVE: podré hablarle, pero quizá no oírle hasta que Discord lo permita)"
+        except Exception:
+            pass
+        ok = await call.speak(vc_mod.time_greeting())
+        use = (" Escríbame por aquí (o mándeme notas de voz) y se lo digo por voz; "
+               "«di …» repite un texto en la llamada.")
+        await self._send(channel, "En el canal." + ("" if ok else " (sin audio)") + dave_note + use)
+
+    def _find_owner_channel(self):
+        """Canal de voz donde está el propietario (o None). Síncrono."""
+        try:
+            client = self.client
+            for g in list(getattr(client, "guilds", []) or []):
+                try:
+                    m = g.get_member(self.owner_id)
+                except Exception:
+                    m = None
+                if m is not None and getattr(m, "voice", None) and m.voice.channel:
+                    return m.voice.channel
+        except Exception as e:
+            log.debug("voice find: %s", e)
+        return None
+
+    async def dm_owner(self, text: str) -> bool:
+        """DM al propietario (push al móvil). Devuelve True si se envió."""
+        try:
+            u = self.client.get_user(self.owner_id) if self.client else None
+            if u is None and self.client:
+                u = await self.client.fetch_user(self.owner_id)
+            if u and (text or "").strip():
+                await u.send(text[:1800])
+                return True
+        except Exception as e:
+            log.debug("dm owner: %s", e)
+        return False
+
+    async def join_owner_channel(self) -> str:
+        """Para llamadas desde fuera de Discord (Win+J): entra donde esté el
+        owner. Devuelve 'joined' | 'already' | 'no-channel' | 'no-voice'."""
+        vc_mod = self._voice_mod()
+        if vc_mod is None or not vc_mod.ensure_opus():
+            return "no-voice"
+        call = self.voice_call
+        if call is not None and getattr(call, "active", False):
+            return "already"
+        target = await asyncio.to_thread(self._find_owner_channel)
+        if target is None:
+            return "no-channel"
+        await self._enter_voice(target, None)
+        call = self.voice_call
+        if call is not None and getattr(call, "active", False):
+            try:
+                u = self.client.get_user(self.owner_id) if self.client else None
+                if u is None and self.client:
+                    u = await self.client.fetch_user(self.owner_id)
+                if u:
+                    await u.send("Me uno a la llamada, señor.")
+            except Exception as e:
+                log.debug("join_owner dm: %s", e)
+            return "joined"
+        return "failed"
+
+    async def _quit_voice(self, channel):
+        call = self.voice_call
+        self.voice_call = None
+        try:
+            from integrations.voice_call import _vlog as _vv
+            _vv(event="quit_cmd")
+        except Exception:
+            pass
+        if call is None or not getattr(call, "active", False):
+            await self._send(channel, "No estoy en ninguna llamada, señor.")
+            return
+        try:
+            await call.stop()
+        except Exception as e:
+            log.debug("voice stop: %s", e)
+        await self._send(channel, "A sus órdenes, señor.")
+
+    async def _say_voice(self, channel, text: str):
+        call = self.voice_call
+        if call is None or not getattr(call, "active", False):
+            await self._send(channel, "No estoy en voz, señor. Dígame «únete a la voz» primero.")
+            return
+        ok = await call.speak(text[:1200] if text else "")
+        if not ok:
+            await self._send(channel, "No pude sonar, señor.")
+
+    async def _auto_leave(self, member, after):
+        try:
+            call = self.voice_call
+            if call is None or not getattr(call, "active", False):
+                return
+            if int(getattr(member, "id", 0) or 0) != self.owner_id:
+                return
+            ch = getattr(getattr(call, "vc", None), "channel", None)
+            after_ch = getattr(after, "channel", None)
+            left = after_ch is None or (
+                ch is not None and getattr(after_ch, "id", None) != getattr(ch, "id", None))
+            if left:
+                try:
+                    from integrations.voice_call import _vlog as _vv
+                    _vv(event="auto_leave")
+                except Exception:
+                    pass
+                await call.stop()
+                self.voice_call = None
+                log.info("Owner salió de voz: cuelgo.")
+        except Exception as e:
+            log.debug("voice auto-leave: %s", e)
+
+
+def _persisted(key: str, value: str = None):
+    """Ajustes en la db persistente (sobreviven reinstalaciones)."""
+    try:
+        from memory import sqlite_store as db
+        if value is None:
+            return db.get_setting(key, "")
+        db.set_setting(key, value)
+        return value
+    except Exception:
+        return "" if value is None else value
+
+
+def start_discord_bridge(handle_fn=None):
+    """Arranca el puente si hay token + owner (env o ajustes). Devuelve bridge o None."""
+    try:
+        from config import Config
+        token = (Config.DISCORD_BOT_TOKEN or "").strip()
+        owner_raw = (Config.DISCORD_OWNER_ID or "").strip()
+        prefix = (Config.DISCORD_PREFIX or "").strip()
+        if not token:
+            token = _persisted("discord_token")
+        if not owner_raw:
+            owner_raw = _persisted("discord_owner")
+        if token and not _persisted("discord_token"):
+            _persisted("discord_token", token)
+        if owner_raw and not _persisted("discord_owner"):
+            _persisted("discord_owner", owner_raw)
+        try:
+            owner_id = int(owner_raw)
+        except (TypeError, ValueError):
+            owner_id = 0
+        if not token:
+            log.info("Discord: sin token, puente apagado.")
+            return None
+        if not owner_id:
+            log.warning("Discord: falta DISCORD_OWNER_ID; puente apagado (seguridad).")
+            return None
+        try:
+            import discord  # noqa: F401
+        except Exception:
+            log.warning("Discord: discord.py no instalado, puente apagado.")
+            return None
+        bridge = JarvisDiscordBridge(token, owner_id, prefix, handle_fn).start()
+        try:
+            import hashlib as _hl
+            bridge.token_sha = _hl.sha256(token.encode()).hexdigest()[:16]
+        except Exception:
+            bridge.token_sha = None
+        log.info("Puente Discord arrancado (owner %s).", owner_id)
+        return bridge
+    except Exception as e:
+        log.warning("Discord no iniciado: %s", e)
+        try:
+            from memory import selfheal as _sh
+            _sh.report("restart:discord", f"Discord no inició: {e}",
+                       "discord_bridge.start_discord_bridge lanzó excepción")
+            _sh.fix_now()
+        except Exception:
+            pass
+        return None

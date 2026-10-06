@@ -1,0 +1,15 @@
+{
+  "name": "jarvis-mvp",
+  "version": "0.1.0",
+  "description": "MVP de JARVIS - bloques 1 a 3 (cimientos, brain minimo, memoria)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}

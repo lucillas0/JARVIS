@@ -1,0 +1,708 @@
+);
+    }
+
+    _buildDebris(orbGroup) {
+      const debrisGeos = [
+        new THREE.IcosahedronGeometry(0.012, 0),
+        new THREE.IcosahedronGeometry(0.02, 0),
+        new THREE.IcosahedronGeometry(0.03, 1),
+        new THREE.IcosahedronGeometry(0.008, 0),
+        new THREE.TetrahedronGeometry(0.015, 0),
+        new THREE.OctahedronGeometry(0.018, 0),
+      ];
+      this.debris = [];
+
+      for (let i = 0; i < 180; i++) {
+        const geo = debrisGeos[Math.floor(Math.random() * debrisGeos.length)];
+        const mat = new THREE.MeshBasicMaterial({
+          color: Math.random() > 0.7 ? C_BRIGHT : C_MID,
+          transparent: true,
+          opacity: 0.3 + Math.random() * 0.6,
+          blending: THREE.AdditiveBlending,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        const orbitR = 1.3 + Math.random() * 3.4;
+        const speed = (0.08 + Math.random() * 0.6) * (Math.random() > 0.5 ? 1 : -1);
+        const tiltX = (Math.random() - 0.5) * Math.PI * 0.9;
+        const tiltZ = (Math.random() - 0.5) * Math.PI * 0.5;
+        const phase = Math.random() * Math.PI * 2;
+        mesh.userData = { orbitR, speed, tiltX, tiltZ, phase };
+        this.debris.push(mesh);
+        orbGroup.add(mesh);
+
+        if (Math.random() > 0.85) {
+          const trailPts = [];
+          for (let j = 0; j <= 15; j++) {
+            const a = -(j / 15) * 0.3;
+            trailPts.push(new THREE.Vector3(
+              orbitR * Math.cos(a + phase),
+              orbitR * 0.08 * Math.sin(a * 3),
+              orbitR * Math.sin(a + phase)
+            ));
+          }
+          mesh.add(new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(trailPts),
+            lineMat(C_FAINT, 0.08)
+          ));
+        }
+      }
+    }
+
+    _buildDust(orbGroup) {
+      const dustCount = 1500;
+      const dustPos = new Float32Array(dustCount * 3);
+
+      for (let i = 0; i < dustCount; i++) {
+        const rr = 0.5 + Math.pow(Math.random(), 0.6) * 6.5;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        dustPos[i * 3] = rr * Math.sin(phi) * Math.cos(theta);
+        dustPos[i * 3 + 1] = rr * Math.cos(phi);
+        dustPos[i * 3 + 2] = rr * Math.sin(phi) * Math.sin(theta);
+      }
+
+      const dustGeo = new THREE.BufferGeometry();
+      dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+
+      const dotC = document.createElement('canvas');
+      dotC.width = dotC.height = 64;
+      const dCtx = dotC.getContext('2d');
+      const g = dCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      g.addColorStop(0, 'rgba(93,166,204,1)');
+      g.addColorStop(0.2, 'rgba(60,126,163,0.6)');
+      g.addColorStop(0.5, 'rgba(40,86,115,0.15)');
+      g.addColorStop(1, 'rgba(22,55,74,0)');
+      dCtx.fillStyle = g;
+      dCtx.fillRect(0, 0, 64, 64);
+
+      this.dustPoints = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+        map: new THREE.CanvasTexture(dotC),
+        size: 0.04,
+        transparent: true,
+        opacity: 0.5,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        sizeAttenuation: true,
+        color: C_BRIGHT,
+      }));
+      orbGroup.add(this.dustPoints);
+    }
+
+    _buildScanRings(orbGroup) {
+      const R1 = this.R1;
+      const R3 = this.R3;
+
+      function makeScanRing(radius, thickness) {
+        const geo = new THREE.RingGeometry(radius - thickness, radius + thickness, 120);
+        const mat = new THREE.MeshBasicMaterial({
+          color: C_BRIGHT,
+          transparent: true,
+          opacity: 0,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.rotation.x = Math.PI / 2;
+        return mesh;
+      }
+
+      this.scanRing1 = makeScanRing(R1, 0.01);
+      this.scanRing2 = makeScanRing(R3 * 0.7, 0.008);
+      orbGroup.add(this.scanRing1, this.scanRing2);
+    }
+
+    _buildHexNodes(orbGroup) {
+      const group = new THREE.Group();
+      const R1 = this.R1;
+
+      for (let i = 0; i < 15; i++).PI / 2;
+      pts.push(
+        new THREE.Vector3(
+          radius * Math.cos(lat) * Math.cos(lon),
+          radius * Math.sin(lat),
+          radius * Math.cos(lat) * Math.sin(lon)
+        )
+      );
+    }
+    return new THREE.BufferGeometry().setFromPoints(pts);
+  }
+
+  class JarvisOrb {
+    constructor(container) {
+      this.container = container;
+      this.scene = null;
+      this.camera = null;
+      this.renderer = null;
+      this.clock = null;
+      this.mode = 'idle';
+      this.level = 0;
+      this.raf = null;
+      this._init();
+    }
+
+    _init() {
+      const w = this.container.clientWidth || 300;
+      const h = this.container.clientHeight || 300;
+
+      this.scene = new THREE.Scene();
+      this.scene.fog = new THREE.Fog(0x04121c, 8, 22);
+
+      this.camera = new THREE.PerspectiveCamera(55, w / h, 0.1, 60);
+      this.camera.position.set(0, 0.4, 5.4);
+
+      const amb = new THREE.AmbientLight(0x3c7ea3, 0.25);
+      this.scene.add(amb);
+      const dir = new THREE.DirectionalLight(0x5da6cc, 0.6);
+      dir.position.set(3, 5, 4);
+      this.scene.add(dir);
+      const rim = new THREE.PointLight(0x3c7ea3, 0.5, 10);
+      rim.position.set(-3, 1, -3);
+      this.scene.add(rim);
+
+      const orbGroup = new THREE.Group();
+      this.orbGroup = orbGroup;
+      this.scene.add(orbGroup);
+
+      this._buildShell(orbGroup);
+      this._buildPanels(orbGroup);
+      this._buildSecondaryShell(orbGroup);
+      this._buildInnerCore(orbGroup);
+      this._buildHotCore(orbGroup);
+      this._buildTextSprites(orbGroup);
+      this._buildDebris(orbGroup);
+      this._buildDust(orbGroup);
+      this._buildScanRings(orbGroup);
+      this._buildHexNodes(orbGroup);
+
+      this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+      this.renderer.setSize(w, h);
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      this.container.appendChild(this.renderer.domElement);
+      this.clock = new THREE.Clock();
+
+      window.addEventListener('resize', () => this._resize());
+      this._loop();
+    }
+
+    _buildShell(orbGroup) {
+      const group = new THREE.Group();
+      const R1 = 2.0;
+      this.R1 = R1;
+
+      for (let i = -15; i <= 15; i++) {
+        const lat = (i / 15) * (Math.PI / 2) * 0.95;
+        const major = i % 3 === 0;
+        group.add(new THREE.Line(latRing(R1, lat), lineMat(major ? C_MID : C_FAINT, major ? 0.5 : 0.12)));
+      }
+
+      for (let i = 0; i < 24; i++) {
+        const lon = (i / 24) * Math.PI * 2;
+        const isMajor = i % 6 === 0;
+        group.add(new THREE.Line(meridian(R1, lon), lineMat(isMajor ? C_MID : C_FAINT, isMajor ? 0.6 : 0.1)));
+      }
+
+      const CROSS_LINES = 18;
+      const CROSS_SPREAD = 0.25;
+      for (let i = 0; i < 4; i++) {
+        const lon = (i / 4) * Math.PI * 2;
+        for (let j = 0; j < CROSS_LINES; j++) {
+          const t = (j / (CROSS_LINES - 1)) * 2 - 1;
+          const falloff = 1 - Math.abs(t) * 0.7;
+          group.add(new THREE.Line(
+            meridian(R1, lon + (t * CROSS_SPREAD) / 2, 200),
+            lineMat(Math.abs(t) < 0.3 ? C_BRIGHT : C_MID, 0.85 * falloff)
+          ));
+        }
+      }
+
+      const EQ_LINES = 20;
+      const EQ_SPREAD = 0.35;
+      for (let j = 0; j < EQ_LINES; j++) {
+        const t = (j / (EQ_LINES - 1)) * 2 - 1;
+        const falloff = 1 - Math.abs(t) * 0.65;
+        group.add(new THREE.Line(
+          latRing(R1, (t * EQ_SPREAD) / 2, 200),
+          lineMat(Math.abs(t) < 0.3 ? C_BRIGHT : C_MID, 0.8 * falloff)
+        ));
+      }
+
+      this.outerShell = group;
+      orbGroup.add(group);
+    }
+
+    _buildPanels(orbGroup) {
+      const group = new THREE.Group();
+      const R1 = this.R1;
+
+      for (let i = 0; i < 30; i++) {
+        const latCenter = (Math.random() - 0.5) * Math.PI * 0.8;
+        const lonCenter = Math.random() * Math.PI * 2;
+        const size = 0.15 + Math.random() * 0.25;
+        const divisions = 3 + Math.floor(Math.random() * 3);
+        const mat = lineMat(C_DIM, 0.25);
+        const panel = new THREE.Group();
+
+        for (let k = 0; k <= divisions; k++) {
+          const lat = latCenter - size / 2 + (k / divisions) * size;
+          const pts = [];
+          for (let m = 0; m <= divisions * 4; m++) {
+            const lon = lonCenter - size / 2 + (m / (divisions * 4)) * size;
+            pts.push(new THREE.Vector3(
+              R1 * Math.cos(lat) * Math.cos(lon),
+              R1 * Math.sin(lat),
+              R1 * Math.cos(lat) * Math.sin(lon)
+            ));
+          }
+          panel.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+        }
+
+        for (let k = 0; k <= divisions; k++) {
+          const lon = lonCenter - size / 2 + (k / divisions) * size;
+          const pts = [];
+          for (let m = 0; m <= divisions * 4; m++) {
+            const lat = latCenter - size / 2 + (m / (divisions * 4)) * size;
+            pts.push(new THREE.Vector3(
+              R1 * Math.cos(lat) * Math.cos(lon),
+              R1 * Math.sin(lat),
+              R1 * Math.cos(lat) * Math.sin(lon)
+            ));
+          }
+          panel.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+        }
+
+        group.add(panel);
+      }
+
+      this.panelGroup = group;
+      orbGroup.add(group);
+    }
+
+    _buildSecondaryShell(orbGroup) {
+      const group = new THREE.Group();
+      const R2 = 2.12;
+
+      for (let i = 0; i < 16; i++) {
+        const lat = (Math.random() - 0.5) * Math.PI * 0.85;
+        const startLon = Math.random() * Math.PI * 2;
+        const arcLen = 0.3 + Math.random() * 1.2;
+        const pts = [];
+        const segs = 60;
+        const r = R2 * Math.cos(lat);
+        const y = R2 * Math.sin(lat);
+        for (let j = 0; j <= segs; j++) {
+          const a = startLon + (j / segs) * arcLen;
+          pts.push(new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a)));
+        }
+        group.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(pts),
+          lineMat(C_MID, 0.2 + Math.random() * 0.3)
+        ));
+      }
+
+      for (let i = 0; i < 12; i++) {
+        const lon = Math.random() * Math.PI * 2;
+        const startLat = (Math.random() - 0.5) * Math.PI * 0.8;
+        const arcLen = 0.3 + Math.random() * 0.8;
+        const pts = [];
+        const segs = 40;
+        for (let j = 0; j <= segs; j++) {
+          const lat = startLat + (j / segs) * arcLen;
+          pts.push(new THREE.Vector3(
+            R2 * Math.cos(lat) * Math.cos(lon),
+            R2 * Math.sin(lat),
+            R2 * Math.cos(lat) * Math.sin(lon)
+          ));
+        }
+        group.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(pts),
+          lineMat(C_DIM, 0.15 + Math.random() * 0.2)
+        ));
+      }
+
+      this.shell2 = group;
+      orbGroup.add(group);
+    }
+
+    _buildInnerCore(orbGroup) {
+      const group = new THREE.Group();
+      const R3 = 0.9;
+      this.R3 = R3;
+
+      for (let s = 0; s < 8; s++) {
+        const pts = [];
+        const turns = 3 + Math.random() * 2;
+        const segs = 300;
+        const phase = (s / 8) * Math.PI * 2;
+        for (let i = 0; i <= segs; i++) {
+          const t = i / segs;
+          const lat = t * Math.PI - Math.PI / 2;
+          const lon = t * turns * Math.PI * 2 + phase;
+          pts.push(new THREE.Vector3(
+            R3 * Math.cos(lat) * Math.cos(lon),
+            R3 * Math.sin(lat),
+            R3 * Math.cos(lat) * Math.sin(lon)
+          ));
+        }
+        group.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(pts),
+          lineMat(C_BRIGHT, 0.3 + Math.random() * 0.2)
+        ));
+      }
+
+      for (let i = -6; i <= 6; i++) {
+        const lat = (i / 6) * (Math.PI / 2) * 0.9;
+        group.add(new THREE.Line(latRing(R3, lat, 80), lineMat(C_DIM, 0.2)));
+      }
+
+      for (let i = 0; i < 12; i++) {
+        const lon = (i / 12) * Math.PI * 2;
+        group.add(new THREE.Line(meridian(R3, lon, 80), lineMat(C_DIM, 0.15)));
+      }
+
+      this.innerCore = group;
+      orbGroup.add(group);
+    }
+
+    _buildHotCore(orbGroup) {
+      const coreR = 0.25;
+
+      const icoGeo = new THREE.IcosahedronGeometry(coreR, 1);
+      const icoEdges = new THREE.EdgesGeometry(icoGeo);
+      this.icoWireMat = lineMat(C_HOT, 0.9);
+      this.icoWire = new THREE.LineSegments(icoEdges, this.icoWireMat);
+
+      const coreSphereMat = new THREE.MeshBasicMaterial({
+        color: C_HOT,
+        transparent: true,
+        opacity: 0.15,
+        blending: THREE.AdditiveBlending,
+      });
+      this.coreSphereMat = coreSphereMat;
+      this.coreSphere = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 16), coreSphereMat);
+
+      const glowSphereMat = new THREE.MeshBasicMaterial({
+        color: C_MID,
+        transparent: true,
+        opacity: 0.04,
+        blending: THREE.AdditiveBlending,
+      });
+      this.glowSphereMat = glowSphereMat;
+      this.glowSphere = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 16), glowSphereMat);
+
+      const halo1Mat = new THREE.MeshBasicMaterial({
+        color: C_BRIGHT,
+        transparent: true,
+        opacity: 0.05,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      this.halo1Mat = halo1Mat;
+      this.halo1 = new THREE.Mesh(new THREE.SphereGeometry(0.85, 24, 24), halo1Mat);
+
+      const halo2Mat = new THREE.MeshBasicMaterial({
+        color: C_MID,
+        transparent: true,
+        opacity: 0.025,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      this.halo2Mat = halo2Mat;
+      this.halo2 = new THREE.Mesh(new THREE.SphereGeometry(1.25, 24, 24), halo2Mat);
+
+      orbGroup.add(this.icoWire, this.coreSphere, this.glowSphere, this.halo1, this.halo2);
+    }
+
+    _buildTextSprites(orbGroup) {
+      const codeSnippets = [
+        'sys.init()', '0xFF3A', 'malloc()', '>> SCAN', 'void*', 'ACK',
+        'SYNC OK', 'ptr_ref', 'exec()', 'hash256', '::bind', 'core.0',
+        '01101001', '10110100', '>>> RDY', 'HEAP 4K', 'TCP/SYN',
+        'mutex.lk', 'IRQ 0x7', 'DMA xfer', 'REG EAX', 'FAULT 0',
+        'kernel.d', 'pipe |>', 'chmod +x', 'fork()', 'SIGTERM',
+        'eth0: UP', 'AES-256', 'RSA 4096', 'TLS 1.3', 'HTTP/2',
+        'latency', '200 OK', 'PATCH /', 'fn main', 'use std',
+        'impl Orb', 'async {}', 'spawn()', 'arc::new', '.unwrap',
+        'SCAN', 'THINK', 'ACT', 'SPEAK',
+      ];
+      this.textGroups = [];
+
+      const self = this;
+      function makeTextSprite(text, size) {
+        const c = document.createElement('canvas');
+        c.width = 256;
+        c.height = 32;
+        const ctx = c.getContext('2d');
+        ctx.font = 'bold 14px Courier New';
+        const alpha = 0.35 + Math.random() * 0.55;
+        ctx.fillStyle =
+          'rgba(' + ((90 + Math.random() * 60) | 0) + ', ' + ((150 + Math.random() * 40) | 0) + ', ' + ((195 + Math.random() * 35) | 0) + ', ' + alpha + ')';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, 128, 16);
+        const tex = new THREE.CanvasTexture(c);
+        tex.minFilter = THREE.LinearFilter;
+        const s = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: tex,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        s.scale.set(size * 5, size * 0.7, 1);
+        return s;
+      }
+
+      function scatterText(count, sizeFn, rFn, speedScale) {
+        const group = new THREE.Group();
+        for (let i = 0; i < count; i++) {
+          const sp = makeTextSprite(
+            codeSnippets[Math.floor(Math.random() * codeSnippets.length)],
+            sizeFn()
+          );
+          const phi = Math.acos(2 * Math.random() - 1);
+          const theta = Math.random() * Math.PI * 2;
+          const r = rFn();
+          sp.position.set(
+            r * Math.sin(phi) * Math.cos(theta),
+            r * Math.cos(phi),
+            r * Math.sin(phi) * Math.sin(theta)
+          );
+          sp.userData = {
+            phi: phi,
+            theta: theta,
+            r: r,
+            speed: (speedScale[0] + Math.random() * speedScale[1]) * (Math.random() > 0.5 ? 1 : -1),
+          };
+          group.add(sp);
+        }
+        return group;
+      }
+
+      this.textOuter = scatterText(600, () => 0.04 + Math.random() * 0.04, () => this.R1 + 0.03 + Math.random() * 0.08, [0.0002, 0.0008]);
+      this.textInner = scatterText(80, () => 0.03 + Math.random() * 0.03, () => this.R3 + 0.02, [0.0005, 0.001]);
+      this.textAmbient = scatterText(240, () => 0.03, () => this.R3 + 0.2 + Math.random() * (this.R1 - this.R3 - 0.3), [0.0003, 0.0006]);
+
+      this.textGroups.push([this.textOuter, 1], [this.textInner, 2], [this.textAmbient, 1.2]);
+      orbGroup.add(this.textOuter, this.textInner, this.textAmbient);
+    }
+
+    _buildDebris(orbGroup) {
+      const debrisGeos = [
+        new THREE.IcosahedronGeometry(0.012, 0),
+        new THREE.IcosahedronGeometry(0.02, 0),
+        new THREE.IcosahedronGeometry(0.03, 1),
+        new THREE.IcosahedronGeometry(0.008, 0),
+        new THREE.TetrahedronGeometry(0.015, 0),
+        new THREE.OctahedronGeometry(0.018, 0),
+      ];
+      this.debris = [];
+
+      for (let i = 0; i < 180; i++) {
+        const geo = debrisGeos[Math.floor(Math.random() * debrisGeos.length)];
+        const mat = new THREE.MeshBasicMaterial({
+          color: Math.random() > 0.7 ? C_BRIGHT : C_MID,
+          transparent: true,
+          opacity: 0.3 + Math.random() * 0.6,
+          blending: THREE.AdditiveBlending,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        const orbitR = 1.3 + Math.random() * 3.4;
+        const speed = (0.08 + Math.random() * 0.6) * (Math.random() > 0.5 ? 1 : -1);
+        const tiltX = (Math.random() - 0.5) * Math.PI * 0.9;
+        const tiltZ = (Math.random() - 0.5) * Math.PI * 0.5;
+        const phase = Math.random() * Math.PI * 2;
+        mesh.userData = { orbitR, speed, tiltX, tiltZ, phase };
+        this.debris.push(mesh);
+        orbGroup.add(mesh);
+
+        if (Math.random() > 0.85) {
+          const trailPts = [];
+          for (let j = 0; j <= 15; j++) {
+            const a = -(j / 15) * 0.3;
+            trailPts.push(new THREE.Vector3(
+              orbitR * Math.cos(a + phase),
+              orbitR * 0.08 * Math.sin(a * 3),
+              orbitR * Math.sin(a + phase)
+            ));
+          }
+          mesh.add(new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(trailPts),
+            lineMat(C_FAINT, 0.08)
+          ));
+        }
+      }
+    }
+
+    _buildDust(orbGroup) {
+      const dustCount = 1500;
+      const dustPos = new Float32Array(dustCount * 3);
+
+      for (let i = 0; i < dustCount; i++) {
+        const rr = 0.5 + Math.pow(Math.random(), 0.6) * 6.5;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        dustPos[i * 3] = rr * Math.sin(phi) * Math.cos(theta);
+        dustPos[i * 3 + 1] = rr * Math.cos(phi);
+        dustPos[i * 3 + 2] = rr * Math.sin(phi) * Math.sin(theta);
+      }
+
+      const dustGeo = new THREE.BufferGeometry();
+      dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+
+      const dotC = document.createElement('canvas');
+      dotC.width = dotC.height = 64;
+      const dCtx = dotC.getContext('2d');
+      const g = dCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      g.addColorStop(0, 'rgba(93,166,204,1)');
+      g.addColorStop(0.2, 'rgba(60,126,163,0.6)');
+      g.addColorStop(0.5, 'rgba(40,86,115,0.15)');
+      g.addColorStop(1, 'rgba(22,55,74,0)');
+      dCtx.fillStyle = g;
+      dCtx.fillRect(0, 0, 64, 64);
+
+      this.dustPoints = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+        map: new THREE.CanvasTexture(dotC),
+        size: 0.04,
+        transparent: true,
+        opacity: 0.5,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        sizeAttenuation: true,
+        color: C_BRIGHT,
+      }));
+      orbGroup.add(this.dustPoints);
+    }
+
+    _buildScanRings(orbGroup) {
+      const R1 = this.R1;
+      const R3 = this.R3;
+
+      function makeScanRing(radius, thickness) {
+        const geo = new THREE.RingGeometry(radius - thickness, radius + thickness, 120);
+        const mat = new THREE.MeshBasicMaterial({
+          color: C_BRIGHT,
+          transparent: true,
+          opacity: 0,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.rotation.x = Math.PI / 2;
+        return mesh;
+      }
+
+      this.scanRing1 = makeScanRing(R1, 0.01);
+      this.scanRing2 = makeScanRing(R3 * 0.7, 0.008);
+      orbGroup.add(this.scanRing1, this.scanRing2);
+    }
+
+    _buildHexNodes(orbGroup) {
+      const group = new THREE.Group();
+      const R1 = this.R1;
+
+      for (let i = 0; i < 15; i++) {
+        const phi = Math.acos(2 * Math.random() - 1);
+        const theta = Math.random() * Math.PI * 2;
+        const r = R1 + 0.02;
+        const hexGeo = new THREE.CircleGeometry(0.03 + Math.random() * 0.02, 6);
+        const hexEdges = new THREE.EdgesGeometry(hexGeo);
+        const hex = new THREE.LineSegments(hexEdges, lineMat(C_MID, 0.5));
+        hex.position.set(
+          r * Math.sin(phi) * Math.cos(theta),
+          r * Math.cos(phi),
+          r * Math.sin(phi) * Math.sin(theta)
+        );
+        hex.lookAt(0, 0, 0);
+        group.add(hex);
+      }
+
+      this.hexNodes = group;
+      this.outerShell.add(group);
+    }
+
+    setMode(mode) {
+      this.mode = mode === 'active' ? 'active' : 'idle';
+      const idle = this.mode === 'idle';
+      const compact = !!this.compact;
+      if (this.orbGroup) {
+        const s = compact && idle ? 1.55 : 1;
+        this.orbGroup.scale.set(s, s, s);
+      }
+      if (this.camera) this.camera.position.z = compact && idle ? 3.6 : 5.4;
+    }
+
+    rotateBy(deltaTheta, deltaPhi) {
+      if (!this.orbGroup) return;
+      this.orbGroup.rotation.y -= deltaTheta;
+      this.orbGroup.rotation.x = Math.max(-1.5, Math.min(1.5, this.orbGroup.rotation.x - deltaPhi));
+    }
+
+    zoomBy(factor) {
+      if (!this.camera) return;
+      const dist = Math.max(1.4, Math.min(12, this.camera.position.z * factor));
+      this.camera.position.z = dist;
+    }
+
+    zoomIn() {
+      this.zoomBy(0.65);
+    }
+
+    zoomOut() {
+      this.zoomBy(1.55);
+    }
+
+    resetView() {
+      if (this.orbGroup) this.orbGroup.rotation.set(0, 0, 0);
+      if (this.camera) {
+        this.camera.position.z = this.compact ? 3.6 : 5.5;
+        this.camera.position.x = 0;
+      }
+    }
+
+    setLevel(level) {
+      this.level = Math.max(0, Math.min(1, level));
+    }
+
+    _resize() {
+      const w = this.container.clientWidth || window.innerWidth || 0;
+      const h = this.container.clientHeight || window.innerHeight || 0;
+      if (!w || !h || !this.camera || !this.renderer) return;
+      this.camera.aspect = w / h;
+      this.camera.updateProjectionMatrix();
+      this.renderer.setSize(w, h);
+    }
+
+    _loop() {
+      this.raf = requestAnimationFrame(() => this._loop());
+      const t = this.clock.getElapsedTime();
+      const active = this.mode === 'active';
+      const boost = active ? 1 + this.level : 0;
+      const speed = active ? 3 : 1;
+
+      this.outerShell.rotation.y += 0.0015 * speed;
+      this.outerShell.rotation.x = Math.sin(t * 0.08) * 0.05;
+
+      this.panelGroup.rotation.y += 0.0018 * speed;
+      this.panelGroup.rotation.x = Math.sin(t * 0.08 + 0.5) * 0.04;
+
+      this.shell2.rotation.y -= 0.001 * speed;
+      this.shell2.rotation.z = Math.sin(t * 0.12) * 0.03;
+
+      this.innerCore.rotation.y -= 0.005 * speed;
+      this.innerCore.rotation.z += 0.002 * speed;
+      this.innerCore.rotation.x = Math.cos(t * 0.1) * 0.08;
+
+      this.icoWire.rotation.x += 0.008 * speed;
+      this.icoWire.rotation.y += 0.012 * speed;
+
+      const wave1 = Math.sin(t * 1.2);
+      const wave3 = Math.pow(Math.max(0, Math.sin(t * 0.4)), 5);
+      const wave4 = Math.pow(Math.max(0, Math.sin(t * 0.7 + 2)), 8);
+      const fadeOut = Math.pow(Math.max(0, Math.sin(t * 0.25)), 3);
+      const surge = wave3 * 1.5 + wave4 * 2.0 + boost;
+      const coreScale = 1 + surge * 0.8 + Math.sin(t * 5) * 0.05;
+      this.coreSphere.scale.setScalar(coreScale);
+      this.coreSphereMat.opacity 

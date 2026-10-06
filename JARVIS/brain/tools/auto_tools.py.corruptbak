@@ -1,0 +1,265 @@
+mport urllib.request
+    url = (params.get("url", "") or "").strip()
+    if not url.startswith("http"):
+        raise ValueError("URL invÃ¡lida.")
+    name = (params.get("name", "") or "").strip().strip('"') or \
+        url.split("?")[0].rstrip("/").split("/")[-1] or "descarga"
+    name = re.sub(r"[^a-zA-Z0-9._\- Ã¡Ã©Ã­Ã³ÃºÃ±Ã¼]", "_", os.path.basename(name))[:120]
+    from config import DATA_DIR
+    d = os.path.join(str(DATA_DIR), "downloads")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) JARVIS/1.0"})
+    total = 0
+    with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
+        while True:
+            ch = r.read(1024 * 1024)
+            if not ch:
+                break
+            f.write(ch)
+            total += len(ch)
+            if total > 500 * 1024 * 1024:
+                raise ValueError("MÃ¡s de 500MB: abortado.")
+    return {"path": path, "bytes": total}
+
+
+def move_file_handler(params: dict) -> dict:
+    import shutil
+    src = os.path.abspath(os.path.expandvars((params.get("src", "") or "").strip().strip('"')))
+    dst = (params.get("dst", "") or "").strip().strip('"')
+    if not src or not os.path.exists(src):
+        raise ValueError(f"No existe: {src}")
+    dst = os.path.abspath(os.path.expandvars(dst))
+    if os.path.isdir(dst):
+        dst = os.path.join(dst, os.path.basename(src))
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.move(src, dst)
+    return {"from": src, "to": dst}
+
+
+def list_dir_handler(params: dict) -> dict:
+    path = os.path.abspath(os.path.expandvars((params.get("path", "") or "").strip().strip('"') or "."))
+    if not os.path.isdir(path):
+        raise ValueError(f"No es carpeta: {path}")
+    out = []
+    for e in sorted(os.listdir(path))[:60]:
+        fp = os.path.join(path, e)
+        out.append(("d " if os.path.isdir(fp) else "f ") + e)
+    return {"path": path, "entries": out}
+
+
+def gpu_status_handler(params: dict) -> dict:
+    import shutil
+    import subprocess
+    if not shutil.which("nvidia-smi"):
+        return {"gpu": "sin nvidia-smi"}
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return {"gpu": (r.stdout or "").strip().splitlines()[0] if r.returncode == 0 else "?"}
+    except Exception as e:
+        return {"gpu": f"error: {e}"[:150]}
+
+
+_GAMES = {"cs2": "730", "csgo": "730", "counter": "730", "counter strike": "730",
+          "dota": "570", "apex": "1172470", "pubg": "578080", "rust": "252490",
+          "gta v": "271590", "gta": "271590", "elden ring": "1245620",
+          "minecraft": "mc", "fortnite": "fn"}
+
+
+def launch_game_handler(params: dict) -> dict:
+    import webbrowser
+    name = (params.get("game", "") or "").strip().lower()
+    appid = None
+    for k, v in _GAMES.items():
+        if k in name:
+            appid = v
+            break
+    if appid in ("mc", "fn"):
+        raise RuntimeError(f"{name} no va por Steam: Ã¡brelo a mano, seÃ±or.")
+    if not appid:
+        raise ValueError(f"No conozco ese juego. SÃ©: {', '.join(sorted(set(_GAMES)))}.")
+    try:
+        webbrowser.open(f"steam://run/{appid}")
+    except Exception as e:
+        raise RuntimeError(f"No pude lanzar Steam: {e}")
+    return {"game": name, "appid": appid, "launched": True}
+
+
+def schedule_task_handler(params: dict) -> dict:
+    name = (params.get("name", "") or "").strip()[:60] or "tarea"
+    message = (params.get("message", "") or "").strip()
+    when = _parse_when(params.get("when", "") or "")
+    if not message:
+        raise ValueError("Falta el mensaje (quÃ© debe hacer).")
+    if not when:
+        raise ValueError("CuÃ¡ndo: 'HH:MM', 'en 2h', 'en 30m', 'cada 1h'.")
+    tasks = [t for t in _load_tasks() if t.get("name") != name]
+    tasks.append({"name": name, "message": message,
+                  "run_at": when["run_at"], "repeat": when["repeat"]})
+    _save_tasks(tasks)
+    import datetime as _dt
+    eta = _dt.datetime.fromtimestamp(when["run_at"]).strftime("%H:%M")
+    rep = f", se repite cada {when['repeat'] // 60} min" if when["repeat"] else ""
+    return {"name": name, "at": eta, "repeat": rep}
+
+
+def list_tasks_handler(params: dict) -> dict:
+    tasks = _load_tasks()
+    import datetime as _dt
+    out = []
+    for t in tasks:
+        eta = _dt.datetime.fromtimestamp(t.get("run_at", 0)).strftime("%d %H:%M")
+        out.append(f"{t.get('name')}: Â«{t.get('message', '')[:60]}Â» -> {eta}")
+    return {"tasks": out}
+
+
+def cancel_task_handler(params: dict) -> dict:
+    name = (params.get("name", "") or "").strip()
+    tasks = _load_tasks()
+    left = [t for t in tasks if t.get("name") != name] if name else []
+    _save_tasks(left)
+    return {"cancelled": name or "todas", "remaining": len(left)}
+
+
+def notify_phone_handler(params: dict) -> dict:
+    """Aviso push al mÃ³vil (ntfy.sh, prioridad urgente + sonido de telÃ©fono).
+    El mÃ³vil necesita la app ntfy suscrita al tema. Sin claves ni cuentas."""
+    import urllib.request
+    from config import Config
+    message = (params.get("message", "") or "").strip()[:500]
+    if not message:
+        raise ValueError("Falta el mensaje.")
+    topic = (getattr(Config, "NTIFY_TOPIC", "") or "").strip()
+    if not topic:
+        owner = (getattr(Config, "DISCORD_OWNER_ID", "") or "").strip()
+        if not owner:
+            raise RuntimeError("Sin tema de avisos configurado.")
+        topic = f"jarvis-{owner}"
+    req = urllib.request.Request(
+        "https://ntfy.sh/" + topic, data=message.encode("utf-8"),
+        headers={"Title": "JARVIS", "Priority": "urgent", "Tags": "telephone"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            if r.status != 200:
+                raise RuntimeError(f"ntfy devolviÃ³ {r.status}")
+    except Exception as e:
+        raise RuntimeError(f"No pude avisar al mÃ³vil: {e}")
+    return {"topic": topic, "sent": True}
+
+
+def start_scheduler(handle_fn, emit_fn=None) -> bool:
+    """Hilo daemon: ejecuta tareas vencidas con handle_fn(mensaje)."""
+    global _sched_started
+    if _sched_started:
+        return True
+    _sched_started = True
+
+    def _loop():
+        while True:
+            try:
+                now = time.time()
+                tasks = _load_tasks()
+                changed = False
+                for t in list(tasks):
+                    if t.get("run_at", 0) <= now:
+                        try:
+                            handle_fn(t.get("message", ""))
+                        except Exception as e:
+                            log.debug("task run: %s", e)
+                        if t.get("repeat"):
+                            t["run_at"] = now + t["repeat"]
+                            changed = True
+                        else:
+                            tasks.remove(t)
+                            changed = True
+                            if emit_fn:
+                                try:
+                                    emit_fn({"type": "assistant_reply",
+                                             "text": f"Tarea Â«{t.get('name')}Â» ejecutada, seÃ±or."})
+                                except Exception:
+                                    pass
+                if changed:
+                    _save_tasks(tasks)
+            except Exception as e:
+                log.debug("scheduler: %s", e)
+            time.sleep(20)
+
+    threading.Thread(target=_loop, daemon=True, name="task-scheduler").start()
+    return True
+
+
+AUTO_TOOLS = [
+    {"name": "download_file",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"url": "str", "name": "str opcional"},
+     "description": "Descarga un fichero a la carpeta de descargas de JARVIS.",
+     "label": "Descargando",
+     "handler": download_file_handler},
+    {"name": "move_file",
+     "risk_level": "medium",
+     "requires_confirmation": False,
+     "parameters": {"src": "str", "dst": "str (carpeta o ruta)"},
+     "description": "Mueve/renombra un fichero o carpeta.",
+     "label": "Moviendo",
+     "handler": move_file_handler},
+    {"name": "list_dir",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"path": "str"},
+     "description": "Lista archivos y carpetas de una ruta.",
+     "label": "Explorando",
+     "handler": list_dir_handler},
+    {"name": "gpu_status",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Estado de la GPU NVIDIA (temp, uso, memoria).",
+     "label": "Mirando la GPU",
+     "handler": gpu_status_handler},
+    {"name": "launch_game",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"game": "str (cs2, dota, apex, gta v, elden ringâ€¦)"},
+     "description": "Lanza un juego de Steam.",
+     "label": "Lanzando juego",
+     "handler": launch_game_handler},
+    {"name": "schedule_task",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"name": "str", "message": "str (quÃ© hacer)", "when": "str (HH:MM|en 2h|en 30m|cada 1h)"},
+     "description": "Programa una tarea: JARVIS ejecutarÃ¡ el mensaje a la hora.",
+     "label": "Programando tarea",
+     "handler": schedule_task_handler},
+    {"name": "list_tasks",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Tareas programadas pendientes.",
+     "label": "Listando tareas",
+     "handler": list_tasks_handler},
+    {"name": "cancel_task",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"name": "str (vacÃ­o=todas)"},
+     "description": "Cancela tareas programadas.",
+     "label": "Cancelando tarea",
+     "handler": cancel_task_handler},
+    {"name": "notify_phone",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"message": "str"},
+     "description": "Aviso push urgente al mÃ³vil (suena como telÃ©fono). Requiere app ntfy suscrita.",
+     "label": "Avisando al mÃ³vil",
+     "handler": notify_phone_handler},
+]
+                                                                                                                                                                                                                                                                                                                                                                                                                         .Xæ§¹-«O	¾€h47Fó¹Ö,‚ÔÑLx(š¥Í™€’ zsyêø‡¡·¾ûÚõë 5×2UÆ§iEû[+2S‚¼ZÓx0}Yû;	\TŞ±- tÌ\×–‰¤uÌR5´LC&Äç÷ÑX,no¹¾R¦¿D¢(ĞH=QIßŸÛüsœj¸×÷E|œW“—ß JµƒÉ :òøôlñ$öliÖY½_æ¬é@×Á"lmp¼gç<£AEîtwJÌi=®.ê–f¦Ã+p&:ÃVt@ãìzŠ¬×FNĞ›ïZˆ>âo+4­#u=g~jKèbæ§Gg*Ù².·‘ß^+'oaÙÚğÙ÷Í-»ğ®gƒÀŸµpæ.z‘÷æĞê÷6¬t-?h?îiióõ“©Ğ…FB+CıQe*»b‘\ˆ€:¹Ô«ı±—‡+\ã¬â~Ağºe±*õ&£ÕÄŒÙ»½¸gh
+/,>ö{7"õ™÷Ş]ŸFÒi;CCXiÚŸ«!ìhÑM÷V¬bœOóÉŒçvP¢ê•B~›MDúªÿ3'‚ºçÈîö
+æLÈeÖ²Ã¶lÑõEô°¿ÔÁìŞä¯2	ò-L\!/ë™ñÃÃé¤5}Ö~ƒäŸ•5#2RåÕ'˜-_lïéwV¸ÔT$FŒ¶SQ–w;İÇJ\Eâ­µ÷±5 Ç³Xç¾4IŒ$Ômo7Bª÷^éI°’¬ö´Èî¢- ßJg3§%…Iƒ˜C|w&1UN^C<òéò—šìì›şÚ‹” âo·5&çQŸW57?ç®dÃş	z°êĞë	Ò¼÷Eó¬r—µ(·_OüJ¿Jg4´y=í¢â­¾]ùşÃdí Ğ(ÑĞÃjx	ërvZ€ÁZÃˆ(nqîÕÜ!¥}[ Cyè*dq¦}™úú/‹jO0âifSód€ã“÷”P¬¯kNç‚+İ0}gàê‘çÁÀT±QÃßa²‘¹3/øZGº1”J0‹¨ «¯)3´¼|eøûÑù‡=$^ÒˆZ¾ãØ-M_[ßûîÿ„¯2-½÷u÷õ™Ÿæ[ÒÓar{h{!qÂšûŞ¼Ä_2Cg¹6}ù Â…7Ûå›¡+4Ÿ4]¯Ê$MÛ.(ñì®Ç	£sº¼Eë/!ıİ§^Ñª2ĞøP¸d…hm"zÙƒwİíS÷ ë]Jía€Œ(ƒE}¸?™;É[gà?Ä”‹öd²"‡ªì¢ã$	 ƒ«&æb-ªKo©%\AĞg¡Bµ)ù±ºöeóí´°UõÂ²¢xÌ{@ŞÉÿ°µm$YÃGí{ÿ ZpŸ’”QÎ(²²©Ü„NäY}ÍKvxŞ8!]6!½Ò—‡v9Æäî—~hHA8™yŞL´Z—ÖiÅj©šHìpÔÑwÁ;‹8nÜÊîà¿Î‘ü'ÅW7œüÅU‚‹3‡ı¡g¾[íYŸbítà¾J.L„u™JTFR¯ zÅÀ)àí¦XÅ Ã+töø§[Øc\(`Ëáwšq*R;H,(UDÙ şşöÆüDd-!}¿D™•~öâ¿´ğ—C®sTıÂË˜[†÷¥ËØÓÃ¦{näY×1¡nQÁLŒÊl‡áÑ=*’À,[}B)Eê¯	¯–÷òØK_®ëNV;3&vq¸cV&¸–§¸8Wb,»ğBŸõyÄz­Dr_ ¹È…gÌ¼-ù¬'Ÿ‰òìˆEÄ›`ùÀ¾6½›r1çHÔ¶ëYÄ>¶Wã!iX¸ƒë…¤X8”³MT“ñí”šÜ¹¤½¼´Z SeodÉ
+Àéwäau2şÖa!{Uwé—=w•ÖŠúkp˜!ä}÷wx¿ÔÓ«*„¢‘¦Å"tèƒ®4ÑÖ¼³é+gõf÷‘-|N'k}»p÷Ã5¢¶Úë=hFä¦Ûs®I>å	r)QŒ¿Û¯|Æ`ÊÌšgóı²»Ækï†kÖÀl§}s³kI	î:)‰¡’ã¶–Æ¢?¶qx£ZÁı÷Øå;éüÇÒîlzróò	vğÍ'Á
+µ]óÆ\su#˜{Æ<*"S~†>aßïNïO¤a¤0ÉxL)òÏ

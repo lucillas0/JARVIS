@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Prueba de cámara — JARVIS</title>
+<style>
+  body { background:#101418; color:#e6edf3; font:14px/1.5 system-ui, sans-serif; margin:0; padding:18px; }
+  h1 { font-size:16px; margin:0 0 14px; color:#8fc9e0; }
+  .grid { display:flex; gap:18px; flex-wrap:wrap; }
+  figure { margin:0; }
+  figcaption { margin-top:6px; color:#9aa7b2; font-size:12px; }
+  img { border:1px solid #2b333b; border-radius:6px; background:#000; display:block; }
+  #live, #foto { width:480px; height:360px; object-fit:contain; }
+  pre { background:#181d22; border:1px solid #2b333b; border-radius:6px; padding:10px; white-space:pre-wrap; max-width:520px; }
+</style>
+</head>
+<body>
+<h1>Diagnóstico de cámara — <span id="host"></span></h1>
+<div class="grid">
+  <figure>
+    <img id="foto" alt="fotograma del Cerebro">
+    <figcaption>1) Fotograma del Cerebro (endpoint /api/camara/foto.jpg)</figcaption>
+  </figure>
+  <figure>
+    <img id="live" alt="stream en vivo">
+    <figcaption>2) Stream en vivo (endpoint /api/camara/mjpeg)</figcaption>
+  </figure>
+  <figure>
+    <pre id="log">probando…</pre>
+    <figcaption>3) Estado y ruta de vídeo del navegador</figcaption>
+  </figure>
+</div>
+<script>
+const out = [];
+const say = (m) => { out.push(m); document.getElementById('log').textContent = out.join('\n'); };
+document.getElementById('host').textContent = location.origin;
+
+(async () => {
+  say('origen: ' + location.origin);
+  say('contexto seguro: ' + window.isSecureContext);
+  say('navigator.mediaDevices: ' + (navigator.mediaDevices ? 'presente' : 'AUSENTE'));
+
+  // Estado del Cerebro (CORS lo bloquea en el navegador: solo informativo)
+  try {
+    const r = await fetch('http://127.0.0.1:8000/api/camara/estado');
+    say('estado Cerebro: ' + JSON.stringify(await r.json()));
+  } catch (e) { say('estado Cerebro: sin CORS (' + e.message + ')'); }
+
+  // Stream en vivo del Cerebro
+  const live = document.getElementById('live');
+  let gotFrame = false;
+  live.addEventListener('load', () => { gotFrame = true; say('MJPEG: primer fotograma recibido'); });
+  live.addEventListener('error', () => say('MJPEG: error al cargar el <img>'));
+  live.src = 'http://127.0.0.1:8000/api/camara/mjpeg';
+
+  // Fotograma suelto
+  // Fotograma suelto directo del Cerebro (sin guardar nada en disco).
+  document.getElementById('foto').src = 'http://127.0.0.1:8000/api/camara/foto.jpg';
+
+  // Ruta nativa del navegador: ¿pide permiso y abre?
+  if (navigator.mediaDevices) {
+    try {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      say('dispositivos: ' + JSON.stringify(devs.map(d => ({ kind: d.kind, label: d.label || '(sin etiqueta)' }))));
+    } catch (e) { say('enumerateDevices: ERROR ' + e.message); }
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      const t = s.getVideoTracks()[0];
+      say('getUserMedia: OK -> ' + (t ? t.label || '(track sin etiqueta)' : 'sin track'));
+      t && t.stop();
+    } catch (e) {
+      say('getUserMedia: FALLO ' + e.name + ' — ' + e.message);
+    }
+  }
+  setTimeout(() => { if (!gotFrame) say('MJPEG: NO llegó ningún fotograma'); }, 4000);
+})();
+</script>
+</body>
+</html>
