@@ -1,0 +1,84 @@
+# =============================================================================
+#  JARVIS · servidor
+# =============================================================================
+#  Pensado para Docker en general y, en concreto, para Synology/Xenology con
+#  Container Manager: crea el proyecto apuntando a esta carpeta y el boton
+#  "Build" se encarga de todo.
+#
+#  Container Manager lee el `.env` de la misma carpeta, asi que la configuracion
+#  vive en un solo sitio.
+# =============================================================================
+
+services:
+  jarvis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jarvis:local
+    container_name: jarvis
+    restart: unless-stopped
+
+    # El puerto se abre solo en la LAN. Si el NAS esta exposing este puerto a
+    # internet, pon una contraseña delante: el endpoint /api/apps y /api/recap
+    # no piden autenticacion.
+    ports:
+      - "${JARVIS_PORT:-8000}:8000"
+
+    # Toda la configuracion vive en .env. El contenedor lo lee de /app/.env
+    # (asi lo hace brain/config.py) y tambien de las variables del entorno.
+    env_file:
+      - .env
+    environment:
+      TZ: "${TZ:-Europe/Madrid}"
+      BRAIN_HOST: "${BRAIN_HOST:-0.0.0.0}"
+      BRAIN_PORT: "${BRAIN_PORT:-8000}"
+      JARVIS_DATA_DIR: /data
+      JARVIS_SERVER_MODE: "1"
+
+    volumes:
+      # Datos: base de datos, memoria, registros. Sobrevive a las actualizaciones.
+      - ./data:/data
+      # La configuracion entra como solo lectura; el contenedor nunca la escribe.
+      - ./.env:/app/.env:ro
+      # Assets compartidos (audio de aviso, imagenes). Opcional.
+      - ./assets:/app/assets:ro
+
+    # Corre con el usuario indicado en .env. Sin esto Docker crea todo como
+    # root y luego no puedes editar ni borrar los ficheros desde DSM.
+    user: "${PUID:-1026}:${PGID:-100}"
+
+    networks:
+      - jarvis
+
+    # El servidor no necesita root ni capabilities: se las quitamos todas.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5).status==200 else sys.exit(1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    deploy:
+      resources:
+        limits:
+          # 0 = sin limite. En un NAS con poca RAM bajalo a 2048m.
+          memory: ${JARVIS_MEMORY_LIMIT:-0}
+
+networks:
+  jarvis:
+    driver: bridge
