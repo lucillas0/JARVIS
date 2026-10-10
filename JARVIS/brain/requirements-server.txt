@@ -1,0 +1,34 @@
+# Dependencias del cerebro para el servidor (Docker / Synology Container Manager).
+#
+# Aqui no entran Electron, drivers de escritorio, audio ni los modelos locales:
+# en un NAS no hay pantalla ni tarjeta de sonido, y torch pesa mas que la propia
+# imagen. Todo eso el cerebro lo importa perezoso dentro de una funcion, asi que
+# si alguna vez hace falta, se anade a mano.
+#
+# Los valores por defecto salen de brain/config.py; no hace falta fijarlos.
+
+# --- Servidor y websocket ----------------------------------------------------
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-dotenv>=1.0
+requests>=2.32
+httpx>=0.27
+
+# --- Modelos (inteligencia) --------------------------------------------------
+groq>=0.11
+openai>=1.40
+google-generativeai>=0.7
+
+# --- Memoria y busqueda semantica -------------------------------------------
+numpy>=1.26
+qdrant-client>=1.9
+
+# --- Vision, ficheros y red --------------------------------------------------
+Pillow>=10.0
+pypdf>=4.0
+paramiko>=3.4
+geocoder>=1.38
+
+# --- Sistema: lo usa brain/apps.py para poner las mascotas de Coucou a
+#     trabajar segun que procesos estan vivos. Sin esto cae a tasklist.
+psutil>=5.9

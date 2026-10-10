@@ -1,0 +1,24 @@
+# Ficheros que deben viajar con finales de linea LF.
+#
+# Sin esto, core.autocrlf los convertiria a CRLF al hacer checkout y
+# instalar.sh dejaria de arrancar en Linux: el shebang con \r da
+# "bad interpreter: /usr/bin/env bash^M". En un NAS Synology esto rompe.
+
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.env       text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+
+# Documentacion y ficheros de texto normal.
+*.md        text eol=lf
+*.py        text eol=lf
+*.json      text eol=lf
+*.txt       text eol=lf
+
+# Los ficheros de configuracion con secretos nunca se versionan.
+.env        -text
+.env.*      -text
+keys.env    -text

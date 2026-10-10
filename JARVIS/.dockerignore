@@ -1,0 +1,37 @@
+# Lo que no entra en la imagen del servidor.
+#
+# La app de escritorio (Electron), sus dependencias y los artefactos de build
+# ocupan gigabytes y no se usan en el contenedor: el servidor solo es el
+# cerebro.
+
+# Secretos: jamas se hornean en la imagen. El .env se monta en tiempo de
+# ejecucion (ver docker-compose.yml).
+**/.env
+**/.env.*
+!brain/.env.example
+!configuracion.env.example
+**/keys.env
+
+# Python
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+
+# Datos: viven en el volumen /data, no en la imagen.
+**/*.db
+**/db/
+**/qdrant/
+data/
+
+# Electron y escritorio
+app/
+node_modules/
+dist-installer/
+dist-assets/
+
+# Ruido
+*.log
+*.corruptbak
+.DS_Store
+Thumbs.db
