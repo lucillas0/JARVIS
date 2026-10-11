@@ -13,6 +13,14 @@ rem ============================================================================
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+rem --- Quitar la marca de "viene de internet" ---------------------------------
+rem Si bajaste un ZIP, Windows marca los ficheros y algunos programas se
+rem niegan a tocarlos. Unblock-File quita esa marca; si no hay nada marcado,
+rem no hace nada y no falla.
+if exist "%~dp0*" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Unblock-File -Path '%~dp0*' -ErrorAction SilentlyContinue" >nul 2>&1
+)
+
 echo.
 echo   J.A.R.V.I.S.  -  instalacion
 echo   ------------------------------
@@ -20,7 +28,7 @@ echo.
 
 rem --- Buscar Python ---------------------------------------------------------
 rem Se prueban por orden: el lanzador "py" es el mas fiable en Windows porque
-rem  sabe cual es el Python por defecto aunque no este en el PATH.
+rem sabe cual es el Python por defecto aunque no este en el PATH.
 
 set "PYTHON="
 
@@ -34,9 +42,21 @@ if not defined PYTHON (
     )
 )
 
+rem El Python de la Tienda (WindowsApps) abre la tienda en vez de ejecutar:
+rem si es ese, se descarta y se sigue buscando uno de verdad.
+if defined PYTHON (
+    echo %%PYTHON%% | find /i "WindowsApps" >nul && set "PYTHON="
+)
+
 if not defined PYTHON (
     for /f "delims=" %%d in ('dir /b /ad "%ProgramFiles%\Python3*" 2^>nul') do (
         if not defined PYTHON if exist "%ProgramFiles%\%%d\python.exe" set "PYTHON=%ProgramFiles%\%%d\python.exe"
+    )
+)
+
+if not defined PYTHON (
+    for /f "delims=" %%d in ('dir /b /ad "%LocalAppData%\Programs\Python\Python3*" 2^>nul') do (
+        if not defined PYTHON if exist "%LocalAppData%\Programs\Python\%%d\python.exe" set "PYTHON=%LocalAppData%\Programs\Python\%%d\python.exe"
     )
 )
 
@@ -45,6 +65,9 @@ if not defined PYTHON (
     echo.
     echo     Instala Python 3.10 o superior desde https://www.python.org/downloads/
     echo     y MARCA la casilla "Add python.exe to PATH" durante la instalacion.
+    echo.
+    echo     Ojo: el Python de la Microsoft Store no vale, abre la tienda en
+    echo     lugar de ejecutarse. Descarga el de python.org.
     echo.
     echo     Si ya lo tienes y aqui no aparece, se puede lanzar a mano:
     echo         python instalar.py
