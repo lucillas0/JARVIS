@@ -1,8 +1,11 @@
-# Compila JARVIS para Windows, Linux y macOS.
+# Compila JARVIS para Windows, Linux y macOS, y publica una release.
 #
 # Cada SO se compila en su propio runner: un .dmg para macOS no se puede
 # generar desde Windows, y un AppImage necesita el toolchain de Linux. El
 # nombre de la Release trae la arquitectura para no liar los ficheros.
+#
+# Los iconos se generan en cada job en lugar de en uno comun: cada job hace su
+# propio checkout, asi que un artefacto de otro job no estaria disponible.
 
 name: build
 
@@ -19,23 +22,13 @@ on:
 permissions:
   contents: write
 
-jobs:
-  iconos:
-    name: Iconos
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Generar iconos de Linux y macOS
-        run: |
-          python -m pip install --quiet pillow
-          node app/scripts/generar-iconos.mjs .
+env:
+  # Que npm no falle si un aviso de dependencia bloquea el arbol de trabajo.
+  NPM_CONFIG_FUND: 'false'
 
+jobs:
   windows:
     name: Windows (x64)
-    needs: iconos
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,16 +38,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python -m pip install --quiet pillow
+      - run: npm --prefix app run iconos
       - run: npm ci --prefix app
       - run: npm --prefix app run dist:win
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-windows
+          name: jarvis-windows-x64
           path: JARVIS/dist-installer/*.exe
 
   linux:
     name: Linux (x64)
-    needs: iconos
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -68,11 +62,41 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
+      - run: python -m pip install --quiet pillow
+      - run: npm --prefix app run iconos
       - run: npm ci --prefix app
-      - run: npm --prefix app run dist:linux:todo
+      - run: npm --prefix app run dist:linux
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-linux
+          name: jarvis-linux-x64
+          path: |
+            JARVIS/dist-installer/*.AppImage
+            JARVIS/dist-installer/*.deb
+            JARVIS/dist-installer/*.rpm
+            JARVIS/dist-installer/*.tar.gz
+
+  linux-arm:
+    name: Linux (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependencias de AppImage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
+      - run: python -m pip install --quiet pillow
+      - run: npm --prefix app run iconos
+      - run: npm ci --prefix app
+      - run: npm --prefix app run dist:linux:arm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-linux-arm64
           path: |
             JARVIS/dist-installer/*.AppImage
             JARVIS/dist-installer/*.deb
@@ -81,7 +105,6 @@ jobs:
 
   macos-arm:
     name: macOS (Apple Silicon)
-    needs: iconos
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +114,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python -m pip install --quiet pillow
+      - run: npm --prefix app run iconos
       - run: npm ci --prefix app
       - run: npm --prefix app run dist:mac:arm
       - uses: actions/upload-artifact@v4
@@ -100,8 +125,7 @@ jobs:
 
   macos-intel:
     name: macOS (Intel)
-    needs: iconos
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -110,6 +134,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python -m pip install --quiet pillow
+      - run: npm --prefix app run iconos
       - run: npm ci --prefix app
       - run: npm --prefix app run dist:mac
       - uses: actions/upload-artifact@v4
@@ -119,31 +145,23 @@ jobs:
 
   release:
     name: Publicar release
-    needs: [windows, linux, macos-arm, macos-intel]
+    needs: [windows, linux, linux-arm, macos-arm, macos-intel]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # En un push de tag la release se crea siempre; a mano, solo si se indica
+    # version, porque electron-builder ya ha subido esos mismos ficheros.
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artefactos
           merge-multiple: true
-      - name: Etiquetar los ficheros
-        run: |
-          cd artefactos
-          for f in *; do
-            [ -f "$f" ] || continue
-            case "$f" in
-              *-arm64*|*x64*|*arm*|*intel*) : ;;
-              *arm64*) : ;;
-              *) mv "$f" "$(echo "$f" | sed 's/-\(x64\|arm64\)\./-x64./')" ;;
-            esac
-          done
-          ls -la
+      - name: Listar los ficheros
+        run: ls -la artefactos
       - name: Crear la release
         uses: softprops/action-gh-release@v2
         with:
-          name: JARVIS ${{ inputs.version || github.ref_name }}
-          tag_name: ${{ inputs.version || github.ref_name }}
+          name: JARVIS ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             artefactos/*.exe

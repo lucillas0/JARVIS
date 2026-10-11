@@ -23,12 +23,23 @@ if (!fs.existsSync(origen)) {
   process.exit(1);
 }
 
-// Pillow viene en el entorno del cerebro, no en node_modules de la app.
-const venvPy = process.env.JARVIS_PY || path.join(
-  process.env.APPDATA || '', 'JARVIS', 'brain-data', 'venv', 'Scripts', 'python.exe');
-if (!fs.existsSync(venvPy)) {
-  console.error('  No encuentro el Python del cerebro: ' + venvPy);
-  process.exit(1);
+// Pillow vive en el entorno del cerebro, no en node_modules de la app, asi que
+// hay que buscar un Python que lo tenga. En Windows es el venv del cerebro; en
+// CI (Linux y macOS) es el Python que pone Actions.
+function buscarPython() {
+  const candidatos = [];
+  if (process.env.JARVIS_PY) candidatos.push({ exe: process.env.JARVIS_PY, args: [] });
+  if (process.env.APPDATA) {
+    candidatos.push({
+      exe: path.join(process.env.APPDATA, 'JARVIS', 'brain-data', 'venv',
+                     'Scripts', 'python.exe'),
+      args: [],
+    });
+  }
+  candidatos.push({ exe: 'python', args: [] });
+  candidatos.push({ exe: 'python3', args: [] });
+  candidatos.push({ exe: 'py', args: ['-3'] });
+  return candidatos;
 }
 
 const guion = `
@@ -72,8 +83,22 @@ const tmp = path.join(base, '.generar-iconos.py');
 fs.writeFileSync(tmp, guion, 'utf8');
 try {
   const { execFileSync } = require('node:child_process');
-  const salida = execFileSync(venvPy, [tmp, base], { encoding: 'utf8' });
-  console.log('  ' + salida.trim());
+  let ultimoError = '';
+  for (const cand of buscarPython()) {
+    try {
+      execFileSync(cand.exe, [...cand.args, '-c', 'import PIL'], { stdio: 'ignore' });
+    } catch (e) {
+      ultimoError = e.message;
+      continue;
+    }
+    const salida = execFileSync(cand.exe, [...cand.args, tmp, base], { encoding: 'utf8' });
+    console.log('  ' + salida.trim());
+    process.exit(0);
+  }
+  console.error('  Ningun Python encontrado con Pillow. En Windows se instala con');
+  console.error('  instalar.bat; en CI, con: pip install pillow');
+  console.error('  Ultimo error: ' + ultimoError.split('\n')[0]);
+  process.exit(1);
 } finally {
   fs.rmSync(tmp, { force: true });
 }
