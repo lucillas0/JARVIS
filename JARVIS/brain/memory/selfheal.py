@@ -60,25 +60,49 @@ def report(source: str, error, context: str = "") -> dict:
     for it in reversed(items[-20:]):
         if it.get("source") == source and it.get("error") == err \
                 and now - it.get("ts", 0) < 3600 \
-                and it.get("status") in ("pending", "escalated"):
+                and it.get("status") in ("pending", "escalated", "informativo"):
             it["hits"] = it.get("hits", 1) + 1
             it["ts"] = now
+            # La severidad se recalcula siempre. Si el error ya no cumple los
+            # criterios críticos (o nunca los cumplió y lo marcó una versión
+            # antigua del filtro), degrado a aviso en vez de arrastrarlo a la
+            # cola de reparación para siempre.
+            critico = es_critico(source, err, context)
+            it["severidad"] = "critico" if critico else "aviso"
+            if critico:
+                it["status"] = "pending"
+            elif it.get("status") in ("pending", "escalated"):
+                it["status"] = "informativo"
+                it["next_retry"] = now + 86400
             _save(items)
+            if critico and it["hits"] == 1:
+                _announce("found", it)
+                fix_now()
             return it
+    critico = es_critico(source, err, context)
     item = {"id": f"E{int(now)}", "ts": now, "source": source, "error": err,
-            "context": (context or "")[:800], "status": "pending",
-            "attempts": 0, "hits": 1, "history": [], "next_retry": now}
+            "context": (context or "")[:800],
+            "status": "pending" if critico else "informativo",
+            "severidad": "critico" if critico else "aviso",
+            "attempts": 0, "hits": 1, "history": [],
+            "next_retry": now if critico else now + 86400}
     items.append(item)
     _save(items)
-    _announce("found", item)
-    fix_now()
+    if critico:
+        _announce("found", item)
+        fix_now()
+    else:
+        log.info("[autocorrector] aviso, no se repara: %s: %s", source, err[:140])
     return item
 
 
 def list_errors(limit: int = 10, only_pending: bool = False) -> list:
     items = _load()
     if only_pending:
-        items = [i for i in items if i.get("status") in ("pending", "escalated")]
+        # Solo lo que de verdad hay que arreglar: los avisos no entran aquí.
+        items = [i for i in items
+                 if i.get("status") in ("pending", "escalated")
+                 and _es_critico_item(i)]
     return items[-limit:]
 
 
@@ -134,7 +158,8 @@ def request_approval(item: dict) -> bool:
     discord_fn = _CTX.get("discord_fn")
     if discord_fn:
         try:
-            discord_fn(f"🔧 ¿Permite el arreglo, señor?\n{err_short}\n"
+            discord_fn(f"Solicitud de permiso.\n¿Me permite el arreglo, señor?\n"
+                       f"Error: {err_short}\n"
                        f"Plan: {plan}\nResponda APROBAR o DENEGAR.")
         except Exception:
             pass
@@ -149,14 +174,17 @@ def request_approval(item: dict) -> bool:
         _set(item["id"], approved=False, status="denied",
              note="denegado por el señor")
         return False
-    _set(item["id"], approved=True)
+    # Sin respuesta NO se procede: el señor manda. Queda pendiente para
+    # cuando conteste, sin reintentar por nuestra cuenta.
+    _set(item["id"], next_retry=time.time() + 1800, note="esperando su permiso")
     if emit_fn:
         try:
             emit_fn({"type": "assistant_reply",
-                     "text": "Sin respuesta, señor: procedo con el arreglo y le aviso al terminar."})
+                     "text": "Sigo esperando su permiso, señor. No tocaré nada "
+                             "hasta que me lo dé."})
         except Exception:
             pass
-    return True
+    return False
 
 
 def resolve_approval(item_id: str, approved: bool) -> bool:
@@ -182,11 +210,105 @@ def pending_approval_id() -> str | None:
     return ids[-1] if ids else None
 
 
+def busy() -> bool:
+    """¿Hay alguna reparación ejecutándose ahora mismo?"""
+    return bool(_fixing_now)
+
+
+def active_items() -> list:
+    """Errores que se están reparando en este instante (para preguntar)."""
+    out = []
+    for it in _load():
+        if it.get("id") in _fixing_now:
+            out.append(it)
+    return out
+
+
+def stop_active(reason: str = "parada por el señor") -> int:
+    """Cancela las reparaciones en marcha. Devuelve cuántas paré."""
+    n = 0
+    for it in _load():
+        if it.get("id") in _fixing_now and it.get("status") in ("pending", "escalated"):
+            _set(it["id"], status="cancelled", note=reason,
+                 next_retry=time.time() + 86400)
+            n += 1
+    return n
+
+
 _NEEDS_USER_RE = (
     "sin acceso", "notallowederror", "notreadableerror",
     "could not start video source", "no hay cámara", "sin permiso",
     "permission denied", "device in use", "busy",
 )
+
+# --------------------------------------------------------------------------- #
+# Qué merece reparación automática y qué no.
+#
+# Antes, cualquier cosa que fallara (un móvil sin conectar, una clave que
+# falta, el señor cancelando) entraba en la cola, se anunciaba por voz y se
+# llamaba a OpenCode para que tocara el código. Eso es tirar balones fuera del
+# campo por una avería que no existe. Aquí se separa:
+#
+#   - CRÍTICO: el sistema roto de verdad (excepciones, módulos que faltan,
+#     puertos ocupados, base de datos bloqueada, cableados mal). Se repara.
+#   - AVISO: depende de que el señor conecte o configure algo, o de que él
+#     cancele. Se apunta y ya está: ni voz, ni OpenCode, ni reintentos.
+# --------------------------------------------------------------------------- #
+_CRITICOS = (
+    "traceback", "nameerror", "attributeerror", "importerror",
+    "modulenotfound", "syntaxerror", "keyerror", "typeerror",
+    "unboundlocalerror", "referenceerror", "indexerror", "assertionerror",
+    "recursionerror", "memoryerror", "jsonsyntaxerror", "unicodedecodeerror",
+    "cannot find module", "no such file or directory", "address already in use",
+    "eaddrinuse", "database is locked", "no space left on device",
+    "out of memory", "no me deja hablar con la interfaz",
+    "no se pudo arrancar", "no arranca", "se cae el proceso",
+    # El puente con la interfaz: si el Electron no habla con el cerebro, JARVIS
+    # es sordo, y eso no se arregla esperando.
+    "connection refused", "connectionerror", "connectionreseterror",
+    "connection aborted", "econnrefused", "no se pudo conectar",
+    "websocketserver is not running", "handshake status 404",
+)
+
+# Situaciones que NO son averías: sin móvil, sin configurar, cancelado, hardware
+# ocupado o sin permiso. Ningún parche de código las arregla.
+_NO_REPARAR = (
+    "no veo ningun movil", "no veo ningún móvil", "ningun movil conectado",
+    "ningún móvil conectado", "conectalo por usb", "conéctalo por usb",
+    "no configurado", "no esta configurado", "no está configurado",
+    "sin claves", "falta la clave", "no hay cámara", "no hay camara",
+    "notallowederror", "notreadableerror", "could not start video source",
+    "permission denied", "sin permiso", "acceso denegado", "device in use",
+    "cancelado", "sin confirmacion", "sin confirmación",
+    "no conozco ese juego", "no conozco esa herramienta",
+    "no esta en el catalogo", "no está en el catálogo",
+    "no such device", "no such host", "no hay raspberry",
+    "no such file or directory: 'adb", "requested device not found",
+)
+
+def es_critico(source: str, error, context: str = "") -> bool:
+    """True solo si esto es una avería real del sistema.
+
+    Se mira el error y de dónde viene, NO el contexto: el contexto lleva el
+    volcado de la excepción, y ahí aparece la palabra 'Traceback' hasta en un
+    fallo tonto como que la máquina virtual está apagada. Clasificar por el
+    contexto convertía cualquierimuslo en avería.
+
+    Con una sola vez no se toca nada: casi todo lo que falla una vez se
+    resuelve solo. La lista es corta a propósito, porque una reparación
+    automática equivocada es peor que no reparar.
+    """
+    txt = ("%s %s" % (source, error)).lower()
+    if any(k in txt for k in _NO_REPARAR):
+        return False
+    return any(k in txt for k in _CRITICOS)
+
+
+def _es_critico_item(item: dict) -> bool:
+    # No me fío del campo guardado: si un error antiguo quedó marcado como
+    # crítico con el filtro viejo, aquí se recalcula con el de ahora.
+    return es_critico(item.get("source", ""), item.get("error", ""),
+                      item.get("context", ""))
 
 
 def _classify(item: dict) -> str:
@@ -325,7 +447,13 @@ def _fix_opencode(item: dict) -> tuple[bool, str]:
     if any(k in blob for k in ("gestures.js", "overlay", "orb", "hud",
                                "app\\ui", "app/ui", "win+j", "electron",
                                ".js", "camera", "cámara", "camera-tracking")):
-        for cand in (r"E:\jarvis-handoff\JARVIS\app\ui",
+        # Fuentes de la app derivadas del brain en ejecución (nunca rutas fijas).
+        try:
+            from config import BRAIN_DIR as _BD
+            repo_app_ui = os.path.join(str(_BD), "..", "app", "ui")
+        except Exception:
+            repo_app_ui = os.path.join(workdir, "..", "app", "ui")
+        for cand in (os.path.abspath(repo_app_ui),
                      os.path.join(workdir, "..", "app", "ui")):
             if os.path.isdir(cand):
                 workdir = os.path.abspath(cand)
@@ -390,7 +518,7 @@ def _announce(stage: str, item: dict, note: str = "", quiet: bool = False) -> No
         discord_fn = _CTX.get("discord_fn")
         if discord_fn:
             try:
-                discord_fn(f"🔧 {text}")
+                discord_fn(text)
             except Exception:
                 pass
 
@@ -415,6 +543,12 @@ def fixer_pass(hooks: dict = None, ask_fn=None, emit_fn=None) -> list:
     out = []
     now = time.time()
     for item in [i for i in _load() if i.get("status") in ("pending", "escalated")]:
+        if not _es_critico_item(item):
+            # Aviso (sin móvil, sin clave, cancelado): se cierra como resuelto
+            # y no vuelve a intentarlo. Antes quemaba intentos y preguntaba.
+            _set(item["id"], status="informativo",
+                 note="aviso, no es una avería: no se repara solo")
+            continue
         if item.get("id") in _fixing_now:
             continue
         if now < float(item.get("next_retry", 0) or 0):

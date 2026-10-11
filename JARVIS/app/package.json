@@ -1,14 +1,27 @@
 {
   "name": "jarvis",
   "version": "4.0.0",
-  "description": "JARVIS - Asistente personal de escritorio con voz (Windows)",
+  "description": "JARVIS - Asistente personal de escritorio con voz para Windows, Linux y macOS",
   "main": "main.js",
   "author": "Lucas",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "postinstall": "electron-builder install-app-deps",
-    "dist": "electron-builder --win"
+    "test": "node --test tests/*.test.js",
+    "iconos": "node scripts/generar-iconos.mjs ..",
+
+    "dist": "npm run dist:win",
+    "dist:win": "npm run iconos && electron-builder --win nsis --x64",
+
+    "dist:linux": "npm run iconos && electron-builder --linux --x64",
+    "dist:linux:arm": "npm run iconos && electron-builder --linux --arm64",
+
+    "dist:mac": "npm run iconos && electron-builder --mac --x64",
+    "dist:mac:arm": "npm run iconos && electron-builder --mac --arm64",
+
+    "dist:linux:todo": "npm run iconos && electron-builder --linux AppImage deb rpm tar.gz --x64",
+    "dist:mac:todo": "npm run iconos && electron-builder --mac dmg zip --x64 --arm64"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
@@ -23,6 +36,8 @@
     "productName": "JARVIS",
     "files": [
       "main.js",
+      "jarvis-history.js",
+      "notch-geometry.js",
       "preload.js",
       "overlay-backend.js",
       "ui/**/*",
@@ -38,6 +53,7 @@
           "!venv/**",
           "!db/**",
           "!**/__pycache__/**",
+          "!.env",
           "!.env.bak"
         ]
       },
@@ -52,10 +68,6 @@
           "**/*",
           "!session/**"
         ]
-      },
-      {
-        "from": "../dist-assets/wheelhouse",
-        "to": "wheelhouse"
       }
     ],
     "directories": {
@@ -64,9 +76,61 @@
     "afterPack": "scripts/after-pack.js",
     "compression": "maximum",
     "win": {
-      "target": "nsis",
+      "extraResources": [
+        {
+          "from": "../dist-assets/wheelhouse",
+          "to": "wheelhouse"
+        }
+      ],
+      "target": [
+        "nsis"
+      ],
       "icon": "assets/icon.ico",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "artifactName": "JARVIS-${version}-win-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm",
+        "tar.gz"
+      ],
+      "icon": "assets/linux-icons",
+      "category": "Utility",
+      "synopsis": "Asistente personal de escritorio con voz",
+      "description": "JARVIS es un asistente personal con voz. Habla, escucha y responde, y tiene una isla en la barra superior que se pliega sola.",
+      "artifactName": "JARVIS-${version}-${arch}.${ext}",
+      "desktop": {
+        "entry": {
+          "Name": "JARVIS",
+          "Comment": "Asistente personal con voz",
+          "Categories": "Utility;",
+          "StartupWMClass": "JARVIS",
+          "MimeType": "x-scheme-handler/jarvis;"
+        }
+      }
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.productivity",
+      "darkModeSupport": true,
+      "artifactName": "JARVIS-${version}-mac-${arch}.${ext}",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "JARVIS necesita el microfono para oirte.",
+        "NSCameraUsageDescription": "JARVIS usa la camara para verte.",
+        "LSUIElement": false
+      }
+    },
+    "dmg": {
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
     },
     "nsis": {
       "oneClick": true,

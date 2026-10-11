@@ -8,7 +8,7 @@ Modo conversación (sección 3 de la especificación):
 """
 import logging
 import time
-from threading import Thread
+from threading import Event, Thread
 from typing import Callable, Optional
 
 import numpy as np
@@ -36,6 +36,8 @@ class VoiceManager:
         self._wake_detected_at = 0.0
         self._last_speech_ts = 0.0
         self._thread: Optional[Thread] = None
+        self._speech_queued = Event()
+        self.mic_muted = False
 
         self.engine.on_mic_chunk = self._on_mic_chunk
         self.engine.on_barge_in = self._on_barge_in
@@ -46,23 +48,49 @@ class VoiceManager:
     def start(self):
         if not self.engine.start():
             log.error("Sin audio, arranco igualmente pero sin voz.")
-        if self.engine.has_input:
+        if self.engine.has_input or self.engine.has_output:
+            # También vigila el final del TTS si solo hay altavoces; antes, sin
+            # micro no arrancaba el bucle y el HUD quedaba eternamente en SPEAKING.
             self._thread = Thread(target=self._loop, daemon=True, name="voice-loop")
             self._thread.start()
-        else:
+        if not self.engine.has_input:
             log.warning("Sin micro: modo output-only (hablar sí, escuchar no).")
 
     def stop(self):
         self._active = False
+        self._speech_queued.clear()
         self.engine.stop_playback()
 
     def wake_now(self):
         """Activación forzada (botón del HUD o comando de texto)."""
+        if self.mic_muted:
+            return
         self._last_speech_ts = time.time()
         self._wake_detected_at = time.time()
 
+    def set_mic_muted(self, muted: bool, silent: bool = False) -> bool:
+        """Silencia/habilita el micrófono (botón del orbe). Persiste."""
+        self.mic_muted = bool(muted)
+        try:
+            from memory import sqlite_store as _db
+            _db.set_setting("mic_muted", "1" if self.mic_muted else "0")
+        except Exception:
+            pass
+        if self.mic_muted:
+            try:
+                self.engine.end_recording()
+            except Exception:
+                pass
+            self._wake_detected_at = 0.0
+            self._set_state(IDLE)
+        if not silent:
+            self.emit({"type": "mic_state", "muted": self.mic_muted})
+        return self.mic_muted
+
     # ---------------- callbacks ---------------
     def _on_mic_chunk(self, chunk: np.ndarray):
+        if self.mic_muted:
+            return
         if self.state == IDLE:
             if wake_word.process_audio(chunk):
                 log.info("Wake word detectado.")
@@ -70,6 +98,7 @@ class VoiceManager:
 
     def _on_barge_in(self):
         if self.state == SPEAKING:
+            self._speech_queued.clear()
             self._last_speech_ts = time.time()
             self._set_state(LISTENING)
             self.engine.begin_recording()
@@ -85,12 +114,36 @@ class VoiceManager:
             log.info("estado voz → %s", st)
 
     # ---------------- bucle ----------------
+    def _finish_speech(self):
+        self._speech_queued.clear()
+        self.engine.set_gain(0.4 if self.engine.music_active() else 1.0)
+        self.emit({"type": "speech_end", "ok": True})
+        self._last_speech_ts = time.time()
+        if self.engine.has_input and not self.mic_muted:
+            self._set_state(LISTENING)
+            self.engine.begin_recording()
+        else:
+            self._set_state(IDLE)
+
     def _loop(self):
         min_active_speaking = Config.CONVERSATION_SILENCE_SECONDS
         while self._active:
             now = time.time()
-            if (self.state == IDLE) and (self._wake_detected_at and
-                                         (now - self._wake_detected_at) < 8):
+            if self.mic_muted:
+                if self.state == LISTENING:
+                    try:
+                        self.engine.end_recording()
+                    except Exception:
+                        pass
+                    self._wake_detected_at = 0.0
+                    self._set_state(IDLE)
+                if (self.state == SPEAKING and self._speech_queued.is_set()
+                        and not self.engine.speaking()):
+                    self._finish_speech()
+                time.sleep(0.25)
+                continue
+            if (self.engine.has_input and self.state == IDLE and self._wake_detected_at and
+                    (now - self._wake_detected_at) < 8):
                 self._start_conversation()
 
             elif self.state == LISTENING:
@@ -104,11 +157,10 @@ class VoiceManager:
                             self._finish_recording()
 
             elif self.state == SPEAKING:
-                if not self.engine.speaking():
-                    # terminó de hablar → si en plena conversación, sigue escuchando
-                    self._last_speech_ts = time.time()
-                    self._set_state(LISTENING)
-                    self.engine.begin_recording()
+                # Mientras Piper sintetiza todavía no hay audio en la cola; no
+                # volver a escuchar hasta que la reproducción haya empezado y acabe.
+                if self._speech_queued.is_set() and not self.engine.speaking():
+                    self._finish_speech()
             time.sleep(0.25)
 
     def _start_conversation(self):
@@ -155,27 +207,35 @@ class VoiceManager:
         except Exception:
             return False
         try:
-            self._speak(text)
-            return True
+            return self._speak(text)
         except Exception as e:
             log.warning("speak_out: %s", e)
             return False
 
-    def _speak(self, text: Optional[str]):
+    def _speak(self, text: Optional[str]) -> bool:
         if not text:
-            self._set_state(LISTENING)
-            self.engine.begin_recording()
+            self._set_state(LISTENING if self.engine.has_input else IDLE)
+            if self.engine.has_input:
+                self.engine.begin_recording()
             self._last_speech_ts = time.time()
-            return
+            return False
+        self._speech_queued.clear()
+        # Descarta audio anterior si se inicia una respuesta mientras otra voz
+        # seguía en cola, por ejemplo un ACK seguido de la respuesta final.
+        self.engine.stop_playback(emit=False)
         self._set_state(SPEAKING)
         self.emit({"type": "speech_start"})
         # Ducking: si suena música de fondo, la bajamos mientras JARVIS habla.
         self.engine.set_gain(0.12 if self.engine.music_active() else 1.0)
         from voice import tts
         ok = tts.speak(text, self.engine)
-        self.emit({"type": "speech_end", "ok": ok})
         self.engine.set_gain(0.4 if self.engine.music_active() else 1.0)
         if not ok:
-            self._set_state(LISTENING)
-            self.engine.begin_recording()
+            self.emit({"type": "speech_end", "ok": False})
+            self._set_state(LISTENING if self.engine.has_input else IDLE)
+            if self.engine.has_input:
+                self.engine.begin_recording()
             self._last_speech_ts = time.time()
+            return False
+        self._speech_queued.set()
+        return True

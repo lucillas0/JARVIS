@@ -2,26 +2,62 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, shell, screen, globalShortcut, 
 const path = require('path');
 const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
+const crypto = require('crypto');
 const Database = require('better-sqlite3');
+const { readJarvisConversation } = require('./jarvis-history');
+const { notchHitTest, roundedRectRows } = require('./notch-geometry');
 
 // En desarrollo, los recursos viven junto al proyecto; empaquetado, en resources/.
 const ROOT_DIR = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..');
 const BRAIN_DIR = app.isPackaged ? path.join(process.resourcesPath, 'brain') : path.join(ROOT_DIR, 'brain');
-const ENV_FILE = path.join(BRAIN_DIR, '.env');
+let ENV_FILE = path.join(BRAIN_DIR, '.env');
 const ASSETS_DIR = app.isPackaged ? path.join(process.resourcesPath, 'assets') : path.join(ROOT_DIR, 'assets');
 
 // Los datos del cerebro se guardan fuera de la instalación para sobrevivir reinstalaciones.
+let notchWindow = null;
+let notchHidden = false;
+let notchExpanded = false;
+let notchContentHeight = 360;
+let notchHovered = false;
+let notchPointerTimer = null;
+let globalShortcuts = {};
+let bootstrapPromise = null;
+let tray = null;
+
 function brainDataDir() {
   let ud = null;
   try { ud = app.getPath('userData'); } catch { /* app no listo aún */ }
   return ud ? path.join(ud, 'brain-data') : BRAIN_DIR;
 }
+function brainDatabasePath() {
+  const persisted = path.join(brainDataDir(), 'jarvis.db');
+  return fs.existsSync(persisted) ? persisted : path.join(BRAIN_DIR, 'db', 'jarvis.db');
+}
 function venvDir() { return path.join(brainDataDir(), 'venv'); }
-function venvPy() { return path.join(venvDir(), 'Scripts', 'python.exe'); }
+function venvPy() {
+  return path.join(venvDir(), process.platform === 'win32' ? 'Scripts' : 'bin',
+    process.platform === 'win32' ? 'python.exe' : 'python3');
+}
 function venvOk() { return path.join(venvDir(), 'setup.ok'); }
+function requirementsFile() {
+  return path.join(BRAIN_DIR, process.platform === 'win32' ? 'requirements.txt' : 'requirements-desktop.txt');
+}
+function requirementsHash() {
+  return crypto.createHash('sha256').update(fs.readFileSync(requirementsFile())).digest('hex');
+}
+function pythonLaunchCandidates() { return process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python']; }
+function resolveVenvHome(home) {
+  const candidates = process.platform === 'win32' ? ['python.exe'] : ['python3', 'python3.12', 'python3.11', 'python'];
+  return candidates.some((name) => fs.existsSync(path.join(home, name)));
+}
+function hasApiKeyValues(env) { return API_KEY_NAMES.slice(0, 3).some((key) => env[key]); }
+function legacyKeyPaths() {
+  const paths = [path.join(BRAIN_DIR, '.env')];
+  if (process.env.APPDATA) paths.push(path.join(process.env.APPDATA, 'JARVIS', 'keys.env'));
+  return paths;
+}
 
 let db;
-let tray;
 let hudWindow = null;
 let orbWindow = null;
 let wizardWindow = null;
@@ -68,6 +104,38 @@ function persistEnvPath() {
   return ud ? path.join(ud, 'keys.env') : null;
 }
 
+function setupWizardSkippedPath() {
+  const ud = userDataPath();
+  return ud ? path.join(ud, 'setup-wizard-skipped') : null;
+}
+
+function setupWizardSkipped() {
+  const marker = setupWizardSkippedPath();
+  return Boolean(marker && fs.existsSync(marker));
+}
+
+function markSetupWizardSkipped() {
+  const marker = setupWizardSkippedPath();
+  if (!marker) throw new Error('No se pudo localizar la carpeta de datos de usuario.');
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, '1\n', 'utf8');
+}
+
+function clearSetupWizardSkipped() {
+  const marker = setupWizardSkippedPath();
+  if (marker && fs.existsSync(marker)) fs.unlinkSync(marker);
+}
+
+function migrateUserConfig() {
+  const ud = userDataPath();
+  if (!ud) return;
+  const target = path.join(ud, 'brain.env');
+  const source = path.join(BRAIN_DIR, '.env');
+  fs.mkdirSync(ud, { recursive: true });
+  if (!fs.existsSync(target) && fs.existsSync(source)) fs.copyFileSync(source, target);
+  ENV_FILE = target;
+}
+
 function readEnvFile(file) {
   if (!file || !fs.existsSync(file)) return {};
   const out = {};
@@ -86,8 +154,8 @@ const API_KEY_NAMES = ['GROQ_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY', '
 
 function hasAnyApiKey() {
   const persisted = persistEnvPath() && readEnvFile(persistEnvPath());
-  const env = (persisted && API_KEY_NAMES.some((k) => persisted[k])) ? persisted : readEnv();
-  return !!API_KEY_NAMES.slice(0, 3).some((k) => env[k]);
+  if (hasApiKeyValues(persisted || {})) return true;
+  return legacyKeyPaths().some((file) => hasApiKeyValues(readEnvFile(file)));
 }
 
 function persistKeys(env) {
@@ -105,16 +173,26 @@ function persistKeys(env) {
 // persistidas y las volcamos al .env que lee el brain.
 function restorePersistedKeys() {
   const persisted = persistEnvPath();
-  if (!persisted || !fs.existsSync(persisted)) return;
+  if (!persisted) return;
   const keys = readEnvFile(persisted);
   const env = readEnv();
-  let changed = false;
-  for (const k of API_KEY_NAMES) {
-    if (keys[k] && !env[k]) { env[k] = keys[k]; changed = true; }
+  for (const source of legacyKeyPaths()) {
+    const legacy = readEnvFile(source);
+    for (const key of API_KEY_NAMES) {
+      if (!keys[key] && legacy[key]) keys[key] = legacy[key];
+    }
   }
-  if (changed) {
+  for (const key of API_KEY_NAMES) {
+    if (!keys[key] && env[key]) keys[key] = env[key];
+    if (keys[key] && !env[key]) env[key] = keys[key];
+  }
+  if (Object.keys(keys).length) {
+    fs.mkdirSync(path.dirname(persisted), { recursive: true });
+    fs.writeFileSync(persisted, Object.entries(keys).map(([key, value]) => `${key}=${value}`).join('\n') + '\n', 'utf8');
+  }
+  if (Object.keys(env).length) {
     fs.mkdirSync(path.dirname(ENV_FILE), { recursive: true });
-    fs.writeFileSync(ENV_FILE, Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n', 'utf8');
+    fs.writeFileSync(ENV_FILE, Object.entries(env).map(([key, value]) => `${key}=${value}`).join('\n') + '\n', 'utf8');
   }
 }
 
@@ -128,24 +206,28 @@ function venvUsable() {
   const m = fs.readFileSync(cfg, 'utf8').match(/^home\s*=\s*(.+)$/m);
   if (!m) return false;
   const home = m[1].trim();
-  return fs.existsSync(path.join(home, 'python.exe'));
+  return resolveVenvHome(home);
 }
 
 function startBrain() {
   if (brainProcess) return;
+  try { fs.mkdirSync(brainDataDir(), { recursive: true }); } catch (err) {
+    console.error('[JARVIS] No pude crear el directorio de datos:', err.message);
+    return;
+  }
   const venvPython = venvPy();
-  const python = venvUsable() ? venvPython : 'python';
+  const python = venvUsable() ? venvPython : (process.platform === 'win32' ? 'python' : 'python3');
   const args = ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000'];
   try {
-    const logOut = fs.openSync(path.join(BRAIN_DIR, 'brain.out.log'), 'a');
-    const logErr = fs.openSync(path.join(BRAIN_DIR, 'brain.err.log'), 'a');
-    fs.mkdirSync(brainDataDir(), { recursive: true });
+    const logOut = fs.openSync(path.join(brainDataDir(), 'brain.out.log'), 'a');
+    const logErr = fs.openSync(path.join(brainDataDir(), 'brain.err.log'), 'a');
     brainProcess = spawn(python, args, {
-      cwd: BRAIN_DIR,
-      env: { ...process.env, JARVIS_DATA_DIR: brainDataDir() },
+      cwd: BRAIN_DIR,      env: { ...process.env, JARVIS_DATA_DIR: brainDataDir(), JARVIS_USER_DATA_DIR: userDataPath() || brainDataDir(), JARVIS_ENV_FILE: ENV_FILE },
       stdio: ['ignore', logOut, logErr],
       windowsHide: true,
     });
+    fs.closeSync(logOut);
+    fs.closeSync(logErr);
     brainProcess.unref();
     brainProcess.on('error', (err) => {
       console.error('[JARVIS] No pude lanzar el brain:', err.message);
@@ -164,18 +246,8 @@ let setupResolve = null;
 
 function venvReady() {
   if (!venvUsable()) return false;
-  if (fs.existsSync(VENV_OK())) return true;
   try {
-      const res = spawnSync(
-        venvPy(),
-        ['-c', 'import fastapi, uvicorn, websockets, sounddevice, numpy, pypdf; print(1)'],
-        { timeout: 25000, windowsHide: true },
-      );
-    if (res.status === 0) {
-      try { fs.writeFileSync(VENV_OK(), 'ok'); } catch { /* noop */ }
-      return true;
-    }
-    return false;
+    return fs.readFileSync(VENV_OK(), 'utf8').trim() === requirementsHash();
   } catch {
     return false;
   }
@@ -195,10 +267,12 @@ function findPython() {
     return null;
   };
 
-  const viaShell = tryResolve('py') || tryResolve('python') || tryResolve('python3');
+  const viaShell = pythonLaunchCandidates().map(tryResolve).find(Boolean);
   if (viaShell) return viaShell;
+  if (process.platform !== 'win32') return null;
 
   const la = process.env.LOCALAPPDATA;
+  if (process.platform !== 'win32') return null;
   const fallbacks = [
     la && path.join(la, 'Programs', 'Python', 'Python312', 'python.exe'),
     la && path.join(la, 'Programs', 'Python', 'Python311', 'python.exe'),
@@ -276,19 +350,21 @@ async function runSetup() {
       sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Entorno virtual ya existe.', percent: 10 });
     }
 
-    sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Actualizando pip…', percent: 14 });
-    await runCmd(venvPy(), ['-m', 'pip', 'install', '--upgrade', 'pip'], { onLine: () => {} });
-
-    // 2. dependencias con progreso por paquete
+    // 2. dependencias (pip conserva su caché entre arranques; no actualizarlo cada vez).
+    const currentHash = requirementsHash();
+    const wheelhouse = app.isPackaged
+      ? path.join(ROOT_DIR, 'wheelhouse')
+      : path.join(ROOT_DIR, 'dist-assets', 'wheelhouse');
     //    Si existe wheelhouse local (viene con el instalador), instalamos sin red.
-    const wheelhouse = path.join(ROOT_DIR, 'wheelhouse');
-    const hasLocal = fs.existsSync(wheelhouse) &&
+    const hasLocal = process.platform === 'win32' && fs.existsSync(wheelhouse) &&
       fs.readdirSync(wheelhouse).some((f) => f.endsWith('.whl'));
+    const requirements = requirementsFile();
+    const reqPath = path.basename(requirements);
     const pipArgs = hasLocal
-      ? ['-m', 'pip', 'install', '--no-index', '--find-links', wheelhouse, '-r', 'requirements.txt', '--no-input']
-      : ['-m', 'pip', 'install', '-r', 'requirements.txt', '--no-input'];
+      ? ['-m', 'pip', 'install', '--no-index', '--find-links', wheelhouse, '-r', reqPath, '--no-input']
+      : ['-m', 'pip', 'install', '-r', reqPath, '--no-input'];
 
-    const reqs = fs.readFileSync(path.join(BRAIN_DIR, 'requirements.txt'), 'utf8')
+    const reqs = fs.readFileSync(requirements, 'utf8')
       .split(/\r?\n/)
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith('#'));
@@ -317,7 +393,7 @@ async function runSetup() {
       if (hasLocal) {
         console.error('[JARVIS] wheelhouse local falló, reintento por red:', localErr && localErr.message);
         try {
-          await runCmd(venvPy(), ['-m', 'pip', 'install', '-r', 'requirements.txt', '--no-input'], {
+          await runCmd(venvPy(), ['-m', 'pip', 'install', '-r', reqPath, '--no-input'], {
             onLine: (line) => {
               const m = line.match(/^Collecting\s+(\S+)/);
               if (m) {
@@ -345,7 +421,7 @@ async function runSetup() {
       await runCmd(venvPy(), ['-c', 'import scripts.make_assets; scripts.make_assets.main()'], { onLine: () => {} });
     } catch { /* no crítico */ }
 
-    try { fs.writeFileSync(VENV_OK(), 'ok'); } catch { /* noop */ }
+    try { fs.writeFileSync(VENV_OK(), currentHash); } catch { /* noop */ }
     sendSetup({ phase: 'done', title: 'Cerebro listo', detail: 'Arrancando JARVIS…', percent: 100 });
     setTimeout(() => {
       if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
@@ -378,6 +454,7 @@ function ensureBrainEnv() {
 // Ventanas
 // ------------------------------------------------------------------ //
 function createHud() {
+  if (hudWindow && !hudWindow.isDestroyed()) return hudWindow;
   hudWindow = new BrowserWindow({
     width: 960,
     height: 680,
@@ -415,6 +492,7 @@ function createHud() {
   if (process.env.NODE_ENV === 'dev') {
     hudWindow.webContents.openDevTools({ mode: 'detach' });
   }
+  return hudWindow;
 }
 
 // El mini JARVIS solo vive en la pizarra Win+J (overlay). No se crea ningún
@@ -445,10 +523,226 @@ function forceOrbRender() {
 
 function restoreMain() {
   hideOrb();
-  if (hudWindow) {
+  if (hudWindow && !hudWindow.isDestroyed()) {
+    if (hudWindow.isMinimized()) hudWindow.restore();
     hudWindow.show();
     hudWindow.focus();
+  } else {
+    createHud();
   }
+}
+
+// Coucou mantiene la ventana fija en el panel (720x320), pegada al techo del
+  // monitor y centrada en horizontal. Al plegarse no cambia de tamano: lo unico
+  // que se mueve es la region de entrada. Asi que se dimensiona una vez aqui.
+  function notchBounds(expanded) {
+    const { bounds } = screen.getPrimaryDisplay();
+    const width = expanded ? COUCOU_PANEL_W : COUCOU_STRIP_W;
+    const height = expanded ? COUCOU_PANEL_H : COUCOU_STRIP_H;
+    return {
+      x: bounds.x + Math.round((bounds.width - COUCOU_PANEL_W) / 2),
+      y: bounds.y,
+      width,
+      height,
+    };
+  }
+
+function setNotchShape(expanded) {
+    if (!notchWindow || notchWindow.isDestroyed() || process.platform !== 'win32') return;
+    const bounds = notchWindow.getBounds();
+    const width = expanded ? 720 : 288;
+    const height = Math.max(1, bounds.height);
+    // Radio real de Coucou: 14 plegado, 22 abierto. El height/2 que usaba
+    // antes convertia la compacta en una capsula en vez del rectángulo del repo.
+    const radius = expanded ? 22 : 14;
+    try {
+      notchWindow.setShape(roundedRectRows(width, height, radius,
+        Math.round((bounds.width - width) / 2), 0));
+    } catch (err) {
+    console.warn('[JARVIS] No pude redondear el Notch nativo:', err.message);
+  }
+}
+
+function notchPointInside(point) {
+      if (!notchWindow || notchWindow.isDestroyed()) return false;
+      // Con Coucou manda el rectangulo que la isla empuja: la ventana siempre
+      // mide 720 de ancho y el island solo ocupa la parte central.
+      if (coucouRect) {
+        const r = coucouRect;
+        return point.x >= r.x && point.x < r.x + r.w && point.y >= r.y && point.y < r.y + r.h;
+      }
+      return notchHitTest(point, notchWindow.getBounds());
+    }
+
+    // ¿El puntero está sobre la isla? El rectángulo lo manda el renderer.
+    function punteroSobreElNotch() {
+      if (!notchWindow || notchWindow.isDestroyed()) return false;
+      return notchPointInside(screen.getCursorScreenPoint());
+    }
+
+// El raton lo vigila el proceso principal, pero la maquina de estados es
+    // del renderer (como en Coucou, donde lo lleva Rust): aqui solo se decide
+    // si el raton atraviesa la ventana. El renderer recibe los eventos igual
+    // porque se pide 'forward' al activar el modo transparente.
+    function watchNotchPointer() {
+      if (notchPointerTimer) return;
+      let atras = null;
+      notchPointerTimer = setInterval(() => {
+        if (!notchWindow || notchWindow.isDestroyed() || !notchWindow.isVisible()) return;
+        const dentro = punteroSobreElNotch();
+        if (dentro === atras) return;
+        atras = dentro;
+        try {
+          // Encima: eventos normales. Fuera: se dejan pasar al escritorio,
+          // pero reenviados para que la isla siga viendo el raton.
+          notchWindow.setIgnoreMouseEvents(!dentro, { forward: true });
+        } catch (err) { /* la ventana pudo cerrarse */ }
+      }, 100);
+    }
+
+// Recoge el island a la capsula. Lo hace el proceso principal porque es quien
+// sabe de verdad donde esta el raton; el renderer solo pinta.
+function encogeElNotch() {
+  if (!notchWindow || notchWindow.isDestroyed() || !notchExpanded) return;
+  notchExpanded = false;
+  try {
+    notchWindow.webContents.send('notch:reset');
+    notchWindow.setBounds(notchBounds(false));
+    setNotchShape(false);
+    notchWindow.setIgnoreMouseEvents(true, { forward: true });
+  } catch (err) {
+    console.error('[JARVIS] No pude encoger el Notch:', err.message);
+  }
+}
+
+// ── Constantes de la isla de Coucou ─────────────────────────────────────────
+// island.rs las declara en el mismo sitio: PANEL 720x320 y la franja 240x6.
+const COUCOU_PANEL_W = 720;
+const COUCOU_PANEL_H = 320;
+const COUCOU_STRIP_W = 240;
+const COUCOU_STRIP_H = 6;
+const HIT_MARGIN = 14;
+let coucouRect = null;
+let coucouColapsada = false;
+function createNotch(expandOnReady = false) {
+  if (process.platform === 'win32' && notchHidden) return;
+  if (notchWindow && !notchWindow.isDestroyed()) {
+    showNotch(expandOnReady);
+    return;
+  }
+  try {
+    const win = new BrowserWindow({
+      // Coucou abre la ventana con el panel entero (720x320) y luego la isla
+        // empuja su rectangulo real; asi no hay un destello de ventana corta.
+        ...notchBounds(true),
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      focusable: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      hasShadow: false,
+      title: 'JARVIS Notch',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    notchWindow = win;
+    try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch { /* plataforma */ }
+    win.loadFile(path.join(__dirname, 'ui', 'notch', 'index.html'));
+    win.once('ready-to-show', () => {
+      if (notchWindow !== win || win.isDestroyed()) return;
+      setNotchShape(false);
+      win.setIgnoreMouseEvents(true, { forward: true });
+      win.showInactive();
+      watchNotchPointer();
+      if (expandOnReady) win.webContents.send('notch:restore');
+    });
+    win.on('closed', () => {
+      if (notchWindow !== win) return;
+      notchWindow = null;
+      notchExpanded = false;
+      notchHovered = false;
+    });
+  } catch (err) {
+    console.error('[JARVIS] No pude crear el Notch:', err.message);
+    notchWindow = null;
+  }
+}
+
+function hideNotch() {
+  notchHidden = true;
+  notchExpanded = false;
+  notchHovered = false;
+  if (notchWindow && !notchWindow.isDestroyed()) {
+    // Aviso al renderer: al ocultarse tiene que soltar sus temporizadores y
+    // parar la animacion. El notch espera este evento y antes no le llegaba,
+    // asi que se quedaba creyendo que estaba a la vista.
+    try { notchWindow.webContents.send('notch:hidden'); } catch { /* noop */ }
+    notchWindow.hide();
+  }
+}
+
+function showNotch(expand = false) {
+  notchHidden = false;
+  if (!notchWindow || notchWindow.isDestroyed()) {
+    createNotch(expand);
+    return !!notchWindow;
+  }
+  notchExpanded = false;
+  notchHovered = false;
+  notchWindow.setBounds(notchBounds(false));
+  setNotchShape(false);
+  notchWindow.setIgnoreMouseEvents(true, { forward: true });
+  notchWindow.showInactive();
+  // Si venia oculto, el renderer se enteraba y aqui se le avisa de que vuelve.
+  if (notchWindow.webContents.isLoading()) {
+    notchWindow.webContents.once('did-finish-load', () => {
+      if (notchWindow && !notchWindow.isDestroyed() && notchWindow.isVisible()) {
+        notchWindow.webContents.send(expand ? 'notch:restore' : 'notch:reset');
+      }
+    });
+  } else {
+    notchWindow.webContents.send(expand ? 'notch:restore' : 'notch:reset');
+  }
+  watchNotchPointer();
+  return true;
+}
+
+// El cierre del island lo lleva ahora el renderer (ui/notch/notch.js), con
+// los mismos tiempos que Coucou: abierto -> capsula a los 15 s y -> oculto a
+// los 60 s. Aqui ya no hay temporizadores que compitan con el suyo.
+
+function bootstrapOnce() {
+  if (bootstrapPromise) return bootstrapPromise;
+  bootstrapPromise = Promise.resolve().then(() => {
+    initDb();
+    migrateUserConfig();
+    restorePersistedKeys();
+    createTray();
+    createNotch();
+    return ensureBrainEnv();
+  }).then((needsBrainSetup) => {
+    if (!hasAnyApiKey() && !setupWizardSkipped()) {
+      createWizard();
+      return;
+    }
+    if (!needsBrainSetup || hasAnyApiKey() || setupWizardSkipped()) {
+      createHud();
+      startBrain();
+      waitBrainThenBridge();
+    }
+  }).catch((err) => {
+    console.error('[JARVIS] No se pudo iniciar la app:', err);
+    bootstrapPromise = null;
+  });
+  return bootstrapPromise;
 }
 
 function createWizard() {
@@ -469,6 +763,14 @@ function createWizard() {
   });
   wizardWindow.loadFile(path.join(__dirname, 'setup-wizard', 'index.html'));
   wizardWindow.setMenuBarVisibility(false);
+  wizardWindow.once('closed', () => {
+    wizardWindow = null;
+    if (!hudWindow) {
+      createHud();
+      startBrain();
+      waitBrainThenBridge();
+    }
+  });
 }
 
 // Pantalla de carga: se muestra solo si el brain necesita instalar sus dependencias.
@@ -597,9 +899,40 @@ function toggleOverlay() {
 }
 
 function registerOverlayHotkey() {
-  const ok = globalShortcut.register('Super+J', toggleOverlay);
-  console.log('[JARVIS] Atajo Win+J ' + (ok ? 'registrado.' : 'NO se pudo registrar.'));
-}
+    if (process.platform !== 'win32') return;
+    const ok = globalShortcut.register('Super+J', toggleOverlay);
+    console.log('[JARVIS] Atajo Win+J ' + (ok ? 'registrado.' : 'NO se pudo registrar.'));
+
+    /* Atajos del island, como los de Coucou (shortcut.island.*). Se guardan en
+       un objeto para poder avisar al renderer de cuál se pulsó; si no, el atajo
+       no tiene efecto porque la ventana está en otro proceso. */
+    const atajos = {
+      'Super+Shift+J': { evento: 'island:toggle', que: 'abrir o cerrar el island' },
+      'Super+Shift+1': { evento: 'island:tab', dato: 'home', que: 'ir a Inicio' },
+      'Super+Shift+2': { evento: 'island:tab', dato: 'chat', que: 'ir al chat' },
+      'Super+Shift+3': { evento: 'island:tab', dato: 'new', que: 'ir a Tarea' },
+      'Super+Shift+4': { evento: 'island:tab', dato: 'activity', que: 'ir a Actividad' },
+      'Super+Shift+Enter': { evento: 'island:send', que: 'enviar lo que este escrito' },
+      'Super+Shift+M': { evento: 'island:mute', que: 'silenciar los sonidos' },
+    };
+    globalShortcuts = {};
+    for (const [combo, cfg] of Object.entries(atajos)) {
+      const registrado = globalShortcut.register(combo, () => mandaAtajo(cfg));
+      globalShortcuts[combo] = { ...cfg, registrado };
+      if (!registrado) console.log('[JARVIS] Atajo ' + combo + ' (' + cfg.que + ') NO se pudo registrar.');
+    }
+    console.log('[JARVIS] Atajos del island: ' +
+      Object.values(globalShortcuts).filter((a) => a.registrado).length + ' de ' +
+      Object.keys(globalShortcuts).length + ' registrados.');
+  }
+
+  function mandaAtajo(cfg) {
+    if (!notchWindow || notchWindow.isDestroyed()) { showNotch(true); return; }
+    if (!notchWindow.isVisible()) { showNotch(true); }
+    try {
+      notchWindow.webContents.send(cfg.evento, cfg.dato || null);
+    } catch { /* noop */ }
+  }
 
 // ---- overlay ----
 let overlayBackend = null;
@@ -743,50 +1076,83 @@ function waitBrainThenBridge(attempts = 0) {
 // ------------------------------------------------------------------ //
 // Tray
 // ------------------------------------------------------------------ //
-function autostartKey() {
-  return ['HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', 'JARVIS'];
+function autostartEntryPath() {
+  const home = app.getPath('home');
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'LaunchAgents', 'com.jarvis.assistant.plist');
+  if (process.platform === 'linux') return path.join(home, '.config', 'autostart', 'jarvis.desktop');
+  return null;
 }
 
 function isAutostartOn() {
-  try {
-    const { execFileSync } = require('child_process');
-    const out = execFileSync('reg', ['query', ...autostartKey()], { encoding: 'utf8', windowsHide: true });
-    return out.includes(process.execPath);
-  } catch {
-    return false;
+  if (process.platform === 'win32') {
+    try {
+      const { execFileSync } = require('child_process');
+      const key = ['HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', 'JARVIS'];
+      return execFileSync('reg', ['query', ...key], { encoding: 'utf8', windowsHide: true }).includes(process.execPath);
+    } catch { return false; }
   }
+  const entry = autostartEntryPath();
+  return !!entry && fs.existsSync(entry);
 }
 
 function setAutostart(on) {
   try {
-    const { execFileSync } = require('child_process');
-    if (on) {
-      execFileSync('reg', ['add', ...autostartKey(), '/t', 'REG_SZ', '/d', `"${process.execPath}"`, '/f'],
-        { encoding: 'utf8', windowsHide: true });
+    if (process.platform === 'win32') {
+      const { execFileSync } = require('child_process');
+      const key = ['HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', 'JARVIS'];
+      if (on) {
+        execFileSync('reg', ['add', ...key, '/t', 'REG_SZ', '/d', `"${process.execPath}"`, '/f'],
+          { encoding: 'utf8', windowsHide: true });
+      } else {
+        execFileSync('reg', ['delete', ...key, '/f'], { encoding: 'utf8', windowsHide: true });
+      }
+      return true;
+    }
+    const entry = autostartEntryPath();
+    if (!entry) return false;
+    if (!on) {
+      if (fs.existsSync(entry)) fs.unlinkSync(entry);
+      return true;
+    }
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    if (process.platform === 'darwin') {
+      const escapeXml = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&apos;');
+      fs.writeFileSync(entry,
+        `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>com.jarvis.assistant</string><key>ProgramArguments</key><array><string>${escapeXml(process.execPath)}</string></array><key>RunAtLoad</key><true/></dict></plist>\n`, 'utf8');
     } else {
-      execFileSync('reg', ['delete', ...autostartKey(), '/f'], { encoding: 'utf8', windowsHide: true });
+      const quoteDesktop = (value) => String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+        .replace(/`/g, '\\`').replace(/\$/g, '\\$');
+      fs.writeFileSync(entry,
+        `[Desktop Entry]\nType=Application\nName=JARVIS\nExec="${quoteDesktop(process.execPath)}"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n`, 'utf8');
     }
     return true;
-  } catch (e) {
-    console.error('[JARVIS] autostart:', e && e.message);
+  } catch (err) {
+    console.error('[JARVIS] autostart:', err && err.message);
     return false;
   }
 }
 
 function createTray() {
   const iconPath = path.join(ASSETS_DIR, 'tray-icon.png');
-  tray = new Tray(fs.existsSync(iconPath) ? iconPath : emptyIcon());
-  tray.setToolTip('JARVIS');
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Mostrar/Activar', click: () => restoreMain() },
-    { label: 'Reiniciar brain', click: () => { brainProcess = null; startBrain(); } },
-    { label: 'Abrir carpeta del proyecto', click: () => shell.openPath(ROOT_DIR) },
-    { label: 'Iniciar con Windows', type: 'checkbox', checked: isAutostartOn(),
-      click: (item) => { if (!setAutostart(item.checked)) item.checked = !item.checked; } },
-    { type: 'separator' },
-    { label: 'Salir', click: () => app.quit() },
-  ]));
-  tray.on('click', () => restoreMain());
+  try {
+    tray = new Tray(fs.existsSync(iconPath) ? iconPath : emptyIcon());
+    tray.setToolTip('JARVIS');
+    const platformName = process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux';
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Mostrar/Activar', click: () => restoreMain() },
+      { label: 'Reiniciar brain', click: () => { brainProcess = null; startBrain(); } },
+      { label: 'Abrir carpeta del proyecto', click: () => shell.openPath(ROOT_DIR) },
+      { label: `Iniciar con ${platformName}`, type: 'checkbox', checked: isAutostartOn(),
+        click: (item) => { if (!setAutostart(item.checked)) item.checked = !item.checked; } },
+      { type: 'separator' },
+      { label: 'Salir', click: () => app.quit() },
+    ]));
+    tray.on('click', () => restoreMain());
+  } catch (err) {
+    tray = null;
+    console.warn('[JARVIS] No pude crear el icono de bandeja:', err.message);
+  }
 }
 
 function emptyIcon() {
@@ -800,30 +1166,7 @@ function emptyIcon() {
 // First-run
 // ------------------------------------------------------------------ //
 function bootstrap() {
-  initDb();
-  restorePersistedKeys();
-  createTray();
-
-  ensureBrainEnv().then(() => {
-    if (!hasAnyApiKey()) {
-      createWizard();
-    } else {
-      createHud();
-      startBrain();
-      waitBrainThenBridge();
-    }
-  });
-
-  // Al cerrar el wizard (guardó claves o saltó), abrimos el HUD y arrancamos el brain.
-  // Sin claves JARVIS igualmente funciona en modo limitado con el fallback local (Ollama).
-  wizardWindow?.on('closed', () => {
-    wizardWindow = null;
-    if (!hudWindow) {
-      createHud();
-      startBrain();
-      waitBrainThenBridge();
-    }
-  });
+  return bootstrapOnce();
 }
 
 function allowLocalCameraRequests() {
@@ -867,15 +1210,30 @@ function allowLocalCameraRequests() {
 }
 
 app.whenReady().then(() => {
+  // El notch se recoloca al cambiar resolucion o escala. Va aqui porque
+  // 'screen' no existe hasta que la app esta lista.
+  screen.on('display-metrics-changed', () => {
+    if (notchWindow && !notchWindow.isDestroyed()) {
+      notchWindow.setBounds(notchBounds(notchExpanded));
+      setNotchShape(notchExpanded);
+    }
+  });
   allowLocalCameraRequests();
   Menu.setApplicationMenu(null);
   // Agrupa todas las ventanas de JARVIS bajo un único icono en la barra de tareas.
-  app.setAppUserModelId('com.jarvis.assistant');
-  registerOverlayHotkey();
-  createOverlay(); // precarga la pizarra Win+J para abrir de forma instantánea
+  if (process.platform === 'win32') app.setAppUserModelId('com.jarvis.assistant');
+  if (process.platform === 'win32') {
+    registerOverlayHotkey();
+    createOverlay(); // pizarra de escritorio exclusiva de Windows
+  }
   bootstrap();
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) bootstrap();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      bootstrapPromise = null;
+      bootstrap();
+    } else if (process.platform === 'darwin') {
+      restoreMain();
+    }
   });
 });
 
@@ -896,6 +1254,8 @@ app.on('before-quit', () => {
   try { if (waBridgeTimer) clearTimeout(waBridgeTimer); } catch { /* ignore */ }
   try { if (waBridgeProc) waBridgeProc.kill(); } catch { /* ignore */ }
   try { if (brainProcess) brainProcess.kill(); } catch { /* ignore */ }
+  try { if (notchPointerTimer) clearInterval(notchPointerTimer); } catch { /* ignore */ }
+  try { if (db) db.close(); } catch { /* ignore */ }
 });
 
 // ------------------------------------------------------------------ //
@@ -904,6 +1264,11 @@ app.on('before-quit', () => {
 ipcMain.handle('history:get', (_e, limit = 20) => {
   return db.prepare('SELECT role, content, created_at FROM messages ORDER BY id DESC LIMIT ?')
     .all(limit).reverse();
+});
+
+ipcMain.handle('notch:jarvis-history', (event, limit = 100) => {
+  if (!notchWindow || event.sender !== notchWindow.webContents || notchWindow.isDestroyed()) return [];
+  return readJarvisConversation(brainDatabasePath(), limit);
 });
 
 ipcMain.handle('history:add', (_e, { role, content }) => {
@@ -919,9 +1284,97 @@ ipcMain.handle('window:toggleFullscreen', () => {
 
 ipcMain.handle('window:restore', () => restoreMain());
 
+ipcMain.handle('notch:set-expanded', (event, expanded, contentHeight) => {
+  if (!notchWindow || event.sender !== notchWindow.webContents || notchWindow.isDestroyed() || !notchWindow.isVisible()) return false;
+  notchExpanded = !!expanded;
+if (notchExpanded && Number.isFinite(Number(contentHeight))) {
+      notchContentHeight = Math.max(120, Math.min(Number(contentHeight), 900));
+    }
+    notchWindow.setBounds(notchBounds(notchExpanded));
+    setNotchShape(notchExpanded);
+    notchWindow.setAlwaysOnTop(true);
+    notchWindow.setIgnoreMouseEvents(!notchExpanded, notchExpanded ? undefined : { forward: true });
+  if (!notchExpanded) notchHovered = false;
+  return true;
+});
+
+ipcMain.handle('notch:hide', (event) => {
+  if (!notchWindow || event.sender !== notchWindow.webContents) return false;
+  hideNotch();
+  return true;
+});
+
+ipcMain.handle('notch:main', (event) => {
+  if (!notchWindow || event.sender !== notchWindow.webContents) return false;
+  restoreMain();
+  return true;
+});
+
+ipcMain.handle('notch:restore', (event) => {
+  if (!notchWindow || event.sender !== notchWindow.webContents) return false;
+  return showNotch(true);
+});
+
+ipcMain.handle('notch:toggle', () => {
+  if (notchWindow && !notchWindow.isDestroyed() && notchWindow.isVisible()) hideNotch();
+  else showNotch(true);
+  return true;
+});
+
+ipcMain.handle('notch:open', (event) => {
+  if (!notchWindow || event.sender !== notchWindow.webContents || notchWindow.isDestroyed()) return false;
+  return showNotch(true);
+});
+
+ipcMain.handle('notch:external', (event, rawUrl) => {
+  const trustedSender = (notchWindow && event.sender === notchWindow.webContents) ||
+    (wizardWindow && event.sender === wizardWindow.webContents);
+  if (!trustedSender || typeof rawUrl !== 'string') return false;
+  try {
+    const url = new URL(rawUrl);
+    if (!['https:', 'http:'].includes(url.protocol)) return false;
+    shell.openExternal(url.href);
+    return true;
+  } catch { return false; }
+});
+
+// El notch llama a openApp() para los accesos rapidos (OpenCode, Freebuff...)
+// y el puente no lo tenia: al pulsarlos, '.then' sobre undefined hacia fallar
+// la cadena entera y el Notch se quedaba a medias.
+ipcMain.handle('notch:open-app', (event, id) => {
+  if (!notchWindow || event.sender !== notchWindow.webContents) return false;
+  if (typeof id !== 'string' || !id.trim()) return false;
+  const busca = id.trim().toLowerCase();
+  let apps = [];
+  try { apps = listApps() || []; } catch { apps = []; }
+  const app = apps.find((a) => String(a.id || '').toLowerCase() === busca)
+    || apps.find((a) => String(a.name || '').toLowerCase() === busca)
+    || apps.find((a) => String(a.name || '').toLowerCase().includes(busca));
+  if (!app || !app.path) return false;
+  try {
+    shell.openPath(String(app.path));
+    return true;
+  } catch { return false; }
+});
+
+// OJO: esto NO puede quedarse aqui arriba. El modulo 'screen' de Electron
+// solo existe despues del evento 'ready'; registrarlo al cargar el script hacia
+// petar el arranque entero (no habia ventanas ni cerebro: se quedaba en un solo
+// proceso sin hacer nada). Va dentro de app.whenReady(), mas abajo.
+
 ipcMain.handle('setup:retry', () => {
   if (setupResolve) runSetup();
   return true;
+});
+
+ipcMain.handle('env:skip-wizard', (event) => {
+  if (!wizardWindow || event.sender !== wizardWindow.webContents) return { ok: false };
+  try {
+    markSetupWizardSkipped();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 ipcMain.handle('env:save', (_e, keys) => {
@@ -939,6 +1392,7 @@ ipcMain.handle('env:save', (_e, keys) => {
   fs.mkdirSync(path.dirname(ENV_FILE), { recursive: true });
   fs.writeFileSync(ENV_FILE, body, 'utf8');
   persistKeys(env);
+  if (hasApiKeyValues(env)) clearSetupWizardSkipped();
   return { ok: true, path: ENV_FILE, hasKeys: hasAnyApiKey() };
 });
 
@@ -973,3 +1427,95 @@ ipcMain.handle('overlay:apps', () => listApps());
 ipcMain.handle('overlay:recent', () => recentFiles());
 ipcMain.handle('overlay:dir', (_e, dir) => listDir(dir));
 ipcMain.handle('overlay:open', (_e, item) => { openOverlayItem(item); return true; });
+// ── Puente de Coucou (island real) ──────────────────────────────────────────
+// Coucou no redimensiona la ventana al plegar la isla: la ventana se queda
+// siempre en PANEL (720x320) pegada al techo del monitor y lo unico que cambia
+// es la region de entrada, que sigue al rectangulo que empuja la isla mas un
+// margen de 14 px (island.rs: refresh_click_through + HIT_MARGIN).
+
+function panelCentrado() {
+  const { bounds } = screen.getPrimaryDisplay();
+  return {
+    x: bounds.x + Math.round((bounds.width - COUCOU_PANEL_W) / 2),
+    y: bounds.y,
+    width: COUCOU_PANEL_W,
+    height: COUCOU_PANEL_H,
+  };
+}
+
+/** Aplica la region de entrada; es lo unico que Rust cambia al plegar. */
+function aplicaRegionEntrada() {
+  if (!notchWindow || notchWindow.isDestroyed() || process.platform !== 'win32') return;
+  let region;
+  if (coucouColapsada) {
+    region = [0, 0, COUCOU_STRIP_W, COUCOU_STRIP_H];
+  } else if (coucouRect && coucouRect.w > 0) {
+    const x0 = Math.max(0, coucouRect.x - HIT_MARGIN);
+    const y0 = Math.max(0, coucouRect.y - HIT_MARGIN);
+    const x1 = coucouRect.x + coucouRect.w + HIT_MARGIN;
+    const y1 = coucouRect.y + coucouRect.h + HIT_MARGIN;
+    region = roundedRectRows(Math.min(COUCOU_PANEL_W, x1 - x0), y1 - y0, 14,
+      x0, y0);
+  } else {
+    region = [];
+  }
+  try { notchWindow.setShape(region); } catch (err) { /* ventana cerrada */ }
+}
+
+ipcMain.handle('notch:island-rect', (event, x, y, width, height) => {
+  if (event.sender !== notchWindow.webContents) return false;
+  const w = Math.max(0, Math.round(width));
+  const h = Math.max(0, Math.round(height));
+  const antes = coucouRect;
+  coucouRect = { x: Math.round(x), y: Math.round(y), w, h };
+  // Solo cuando cambia de verdad: setShape en cada fotograma es lo que hacia
+  // que la ventana parpadeara y no llegara a plegarse.
+  if (!antes || antes.x !== coucouRect.x || antes.y !== coucouRect.y ||
+      antes.w !== coucouRect.w || antes.h !== coucouRect.h) {
+    aplicaRegionEntrada();
+  }
+  return true;
+});
+
+ipcMain.handle('notch:collapsed', (event, collapsed) => {
+  if (event.sender !== notchWindow.webContents) return false;
+  if (coucouColapsada === !!collapsed) return true;
+  coucouColapsada = !!collapsed;
+  aplicaRegionEntrada();
+  return true;
+});
+
+ipcMain.handle('notch:focus-window', (event, focused) => {
+  if (event.sender !== notchWindow.webContents) return false;
+  try {
+    if (focused) notchWindow.focus();
+    else notchWindow.blur();
+  } catch (err) { /* nada */ }
+  return true;
+});
+
+ipcMain.handle('notch:open-path', async (event, p) => {
+  if (event.sender !== notchWindow.webContents) return false;
+  try { return shell.openPath(p); } catch (err) { return String(err.message); }
+});
+
+ipcMain.handle('notch:save-png', async (event, data, name) => {
+  if (event.sender !== notchWindow.webContents) return false;
+  try {
+    const base64 = String(data).replace(/^data:image\/png;base64,/, '');
+    const dir = path.join(app.getPath('pictures'), 'JARVIS');
+    await fs.promises.mkdir(dir, { recursive: true });
+    const destino = path.join(dir, String(name || 'resumen') + '.png');
+    await fs.promises.writeFile(destino, Buffer.from(base64, 'base64'));
+    shell.showItemInFolder(destino);
+    return destino;
+  } catch (err) {
+    return 'error: ' + err.message;
+  }
+});
+
+ipcMain.handle('notch:quit', (event) => {
+  if (event.sender !== notchWindow.webContents) return false;
+  app.quit();
+  return true;
+});

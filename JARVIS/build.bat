@@ -1,7 +1,7 @@
 @echo off
 REM JARVIS - Empaquetado como instalador .exe (sección 11, bloque 11)
 setlocal
-cd /d "%~dp0.."
+cd /d "%~dp0"
 
 call scripts\setup_brain.bat
 if errorlevel 1 goto :error

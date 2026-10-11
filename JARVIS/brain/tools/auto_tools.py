@@ -95,6 +95,16 @@ def move_file_handler(params: dict) -> dict:
     dst = (params.get("dst", "") or "").strip().strip('"')
     if not src or not os.path.exists(src):
         raise ValueError(f"No existe: {src}")
+    # Mismo candado que el borrado: las claves y la memoria no se mueven de sitio.
+    try:
+        from tools.system_tools import _protegido
+        motivo = _protegido(src)
+    except Exception:
+        motivo = ""
+    if motivo:
+        raise PermissionError(
+            f"No muevo ese fichero porque {motivo}. Si lo quiere cambiar de "
+            f"sitio, hágalo usted a mano.")
     dst = os.path.abspath(os.path.expandvars(dst))
     if os.path.isdir(dst):
         dst = os.path.join(dst, os.path.basename(src))

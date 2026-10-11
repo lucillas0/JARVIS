@@ -46,6 +46,18 @@ def get_conn() -> sqlite3.Connection:
         os.makedirs(Config.BRAIN_DIR / "db", exist_ok=True)
         _conn = sqlite3.connect(Config.DB_PATH, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
+        # WAL + synchronous=NORMAL: antes cada mensaje se guardaba con
+        # escritura sincronizada y eran 20 milisegundos por mensaje, el 36%
+        # de todo lo que tardaba JARVIS en responder. Con el diario en WAL
+        # las escrituras van a un fichero aparte y no bloquean la lectura.
+        # Para un registro de conversación, perder como mucho el último
+        # mensaje si se apaga el equipo no cambia nada.
+        try:
+            _conn.execute("PRAGMA journal_mode=WAL")
+            _conn.execute("PRAGMA synchronous=NORMAL")
+            _conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            pass
         with _lock:
             _conn.executescript(SCHEMA)
             _conn.commit()

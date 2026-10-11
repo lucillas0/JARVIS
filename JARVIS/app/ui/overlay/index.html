@@ -13,7 +13,7 @@
 }
 </script>
 </head>
-<body>
+<body class="preboot">
   <!-- Fondo interactivo: soporta drop de archivos -->
   <div id="dropArea" class="drop-area">
     <div id="dropHint" class="drop-hint">Suelta aquí fotos, PDF, documentos… o usa FILES</div>
@@ -27,6 +27,22 @@
 
   <!-- Botón gestos de mano -->
   <button id="gesturesBtn" class="close-btn gestures-toggle" title="Activar gestos de mano" aria-pressed="false">👐</button>
+
+  <!-- Gestor de todo lo instalado, y terminal directa -->
+  <button id="appsMgrBtn" class="close-btn apps-mgr-toggle" title="Abrir cualquier programa instalado" aria-label="Programas instaladas">&#9636;</button>
+  <button id="termBtn" class="close-btn term-toggle" title="Abrir una terminal" aria-label="Abrir terminal">&gt;_</button>
+
+  <!-- Panel del gestor de programas -->
+  <div id="appsMgr" class="apps-mgr" hidden>
+    <div class="apps-mgr-head">
+      <span class="apps-mgr-title">PROGRAMAS INSTALADOS</span>
+      <input id="appsMgrSearch" class="apps-mgr-search" type="search" placeholder="Buscar un programa..." autocomplete="off" spellcheck="false" />
+      <span id="appsMgrCount" class="apps-mgr-count"></span>
+      <button id="appsMgrClose" class="apps-mgr-x" title="Cerrar">&#10005;</button>
+    </div>
+    <div id="appsMgrNota" class="apps-mgr-nota" hidden></div>
+    <div id="appsMgrList" class="apps-mgr-list"></div>
+  </div>
 
   <!-- Columna derecha: monitor + chat (flex, sin solapes) -->
   <div id="rightColumn" class="right-column">
@@ -69,23 +85,46 @@
     </div>
   </div>
 
+  <!-- App abierta dentro de la pizarra (webapp incrustada o ventana acoplada) -->
+  <div id="workspace" class="workspace" hidden>
+    <div class="ws-bar">
+      <span id="wsKind" class="ws-kind">APP</span>
+      <div id="wsTitle" class="ws-title">…</div>
+      <div class="ws-actions">
+        <button id="wsDetach" class="ws-btn" type="button" title="Soltar la app y abrirla en su propia ventana">⛶</button>
+        <button id="wsClose" class="ws-btn" type="button" title="Cerrar la app">✕</button>
+      </div>
+    </div>
+    <div id="wsHost" class="ws-host">
+      <div id="wsWait" class="ws-wait">Abriendo dentro de la pizarra…</div>
+    </div>
+  </div>
+
   <!-- Widget apps / archivos (izquierda) -->
   <div class="widget side-widget">
     <div class="widget-title">QUICK LAUNCH</div>
     <div class="side-tabs">
-      <button id="tabApps" class="side-tab active">APPS</button>
-      <button id="tabFiles" class="side-tab">FILES</button>
+      <button id="tabApps" class="side-tab active" type="button">APPS</button>
+      <button id="tabFiles" class="side-tab" type="button">FILES</button>
+    </div>
+    <div class="app-search-wrap">
+      <span class="app-search-ico" aria-hidden="true"></span>
+      <input id="appSearch" class="app-search" type="text" autocomplete="off"
+             spellcheck="false" placeholder="Buscar" aria-label="Buscar aplicaciones">
     </div>
     <div id="fileNav" class="file-nav" hidden>
-      <button id="navUp" class="nav-up" title="Subir un nivel">←</button>
+      <button id="navUp" class="nav-up" title="Subir un nivel" type="button">←</button>
       <div id="navPath" class="nav-path" title="Ruta">…</div>
     </div>
-    <div id="sideList" class="side-list"></div>
+    <div id="sideList" class="side-list files-list"></div>
   </div>
+
+  <!-- Destello del marco al arrancar -->
+  <div id="bootFrame" class="boot-frame"></div>
 
   <!-- Cámara + canvas de gestos (ocultos hasta activar) -->
   <video id="camVideo" muted playsinline class="camera-video"></video>
-  <canvas id="camOverlay" class="camera-overlay"></canvas>
+    <canvas id="camOverlay" width="320" height="240" class="camera-overlay"></canvas>
 
   <!-- Puntero de referencia de la mano (visible con gestos activos) -->
   <div id="handCursor" class="hand-cursor" hidden></div>
@@ -115,6 +154,16 @@
 
   <!-- Mini JARVIS: orbe vivo en la esquina inferior derecha -->
   <div id="orbStage" class="orb-stage"></div>
+
+  <!-- Estado de JARVIS: barra visible SIEMPRE, incluso con una web abierta -->
+  <div id="thinkTree" class="think-tree">
+    <div class="tt-root">
+      <span class="tt-dot"></span>
+      <span id="ttTitle">EN REPOSO</span>
+      <span id="ttLink" class="tt-link on" title="Enlace con el cerebro">EN LÍNEA</span>
+    </div>
+    <ul id="ttList" class="tt-list"></ul>
+  </div>
 
   <!-- Modo cámara a pantalla completa -->
   <div id="cameraMode" class="camera-mode" hidden>

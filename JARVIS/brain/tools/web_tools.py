@@ -9,12 +9,82 @@
 import logging
 import time
 import urllib.request
-from urllib.parse import quote, unquote
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 log = logging.getLogger("tools.web")
 
 _SEARCH_CACHE = {}
 _SEARCH_TTL = 600
+_QUICK_SEARCH_CACHE = {}
+_QUICK_SEARCH_TTL = 300
+_QUICK_SEARCH_TIMEOUT = 4
+
+
+class _DDGResultParser(HTMLParser):
+    """Extrae título, URL y fragmento del HTML ligero de DuckDuckGo."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results = []
+        self.current = None
+        self.last_result = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = (attrs.get("class") or "").split()
+        if self.current is None:
+            if tag == "a" and "result__a" in classes:
+                self.current = {"kind": "title", "href": attrs.get("href", ""),
+                                "tag": tag, "text": [], "depth": 0}
+            elif "result__snippet" in classes:
+                self.current = {"kind": "snippet", "href": "", "tag": tag,
+                                "text": [], "depth": 0}
+        elif tag not in ("br", "img", "meta", "input", "source", "wbr"):
+            self.current["depth"] += 1
+
+    def handle_data(self, data):
+        if self.current is not None:
+            self.current["text"].append(data)
+
+    def handle_endtag(self, tag):
+        if self.current is None:
+            return
+        if tag == self.current["tag"] and self.current["depth"] == 0:
+            item, self.current = self.current, None
+        else:
+            if tag not in ("br", "img", "meta", "input", "source", "wbr"):
+                self.current["depth"] = max(0, self.current["depth"] - 1)
+            return
+
+        text = " ".join(" ".join(item["text"]).split())
+        if item["kind"] == "snippet":
+            if self.last_result is not None and not self.last_result.get("snippet"):
+                self.last_result["snippet"] = text[:360]
+            return
+        href = item["href"]
+        try:
+            params = parse_qs(urlparse(href).query)
+            href = params.get("uddg", [href])[0]
+        except Exception:
+            pass
+        if not href.startswith("http") or not text:
+            return
+        result = {"title": text[:160], "url": href[:500], "snippet": ""}
+        self.results.append(result)
+        self.last_result = result
+        if len(self.results) > 8:
+            removed = self.results.pop(0)
+            if self.last_result is removed:
+                self.last_result = None
+
+
+def _parse_ddg_results(html: str) -> list[dict]:
+    parser = _DDGResultParser()
+    try:
+        parser.feed(html or "")
+    except Exception as e:
+        log.debug("parse DDG results: %s", e)
+    return parser.results[:6]
 
 
 def _simple_fetch(url: str, timeout: int = 20) -> str:
@@ -31,6 +101,19 @@ def _simple_fetch(url: str, timeout: int = 20) -> str:
             charset = resp.headers.get_content_charset()
         except Exception:
             charset = None
+        enc = (resp.headers.get("Content-Encoding") or "").lower()
+    # Algunos servidores envían gzip aunque no se pidan: si viene magic bytes,
+    # descomprimimos o el texto sale con caracteres rotos.
+    if raw[:2] == b"\x1f\x8b" or "gzip" in enc:
+        try:
+            import gzip
+            raw = gzip.decompress(raw)
+        except Exception:
+            try:
+                import zlib
+                raw = zlib.decompress(raw, 16 + zlib.MAX_WBITS)
+            except Exception:
+                pass
     if not charset:
         import re as _re
         head = raw[:4000].decode("ascii", errors="ignore")
@@ -43,38 +126,40 @@ def _simple_fetch(url: str, timeout: int = 20) -> str:
 
 
 def _html_to_text(html: str) -> str:
-    """HTML -> texto legible: fuera scripts, menús y relleno; dentro párrafos."""
-    import html as _html
-    import re as _re
-    t = _re.sub(r"(?is)<(script|style|noscript|template|svg|form|nav|header|footer|aside)[^>]*>.*?</\1>", " ", html)
-    t = _re.sub(r"(?is)<!--.*?-->", " ", t)
-    paras = _re.findall(r"(?is)<(p|h1|h2|h3|li|article|blockquote)[^>]*>(.*?)</\1>", t)
-    if paras:
-        chunks = []
-        for _, inner in paras:
-            c = _re.sub(r"(?is)<[^>]+>", " ", inner)
-            c = _html.unescape(c)
-            c = _re.sub(r"[ \t\xa0]+", " ", c).strip()
-            words = len(c.split())
-            if words >= 4:
-                chunks.append(c)
-        t = "\n".join(chunks)
-    else:
-        t = _re.sub(r"(?is)<[^>]+>", " ", t)
-        t = _html.unescape(t)
-    t = _re.sub(r"[ \t\xa0]+", " ", t)
-    t = _re.sub(r"\n\s*\n+", "\n", t)
-    lines = [l.strip() for l in t.split("\n")]
-    lines = [l for l in lines if len(l) > 2]
-    # recorta repeticiones (menús duplicados)
-    seen, out = set(), []
-    for l in lines:
+    """Texto legible: aísla el contenido principal y quita el cromo."""
+    import re as _r
+    h = html or ""
+    main = ""
+    for pat in (r'(?is)<main[^>]*>(.*?)</main>',
+                r'(?is)<article[^>]*>(.*?)</article>',
+                r'(?is)<div[^>]+id=["\']mw-content-text["\'][^>]*>(.*?)</div>\s*</div>',
+                r'(?is)<div[^>]+id=["\'](?:content|mainContent|post|entry)["\'][^>]*>(.*?)</div>'):
+        m = _r.search(pat, h)
+        if m and len(_r.sub(r"(?s)<[^>]+>", " ", m.group(1))) > 400:
+            main = m.group(1)
+            break
+    h = main or h
+    h = _r.sub(r"(?is)<(script|style|noscript|svg|head|form|table)[^>]*>.*?</\1>", " ", h)
+    h = _r.sub(r"(?is)<!--.*?-->", " ", h)
+    h = _r.sub(r"(?is)<nav[^>]*>.*?</nav>", " ", h)
+    h = _r.sub(r"(?is)<footer[^>]*>.*?</footer>", " ", h)
+    h = _r.sub(r"(?is)<(br|/p|/div|/li|/h[1-6]|/tr)[^>]*>", "\n", h)
+    h = _r.sub(r"(?s)<[^>]+>", " ", h)
+    import html as _h
+    h = _h.unescape(h)
+    h = _r.sub(r"[ \t\xa0]+", " ", h)
+    h = _r.sub(r"\n\s*\n\s*\n+", "\n\n", h)
+    lines = [l.strip() for l in h.split("\n")]
+    # Fuera migas de navegación y listas de idiomas: fragmentos muy cortos.
+    out = [l for l in lines if len(l) > 30]
+    seen, uniq = set(), []
+    for l in (out or lines):
         k = l[:60]
         if k in seen:
             continue
         seen.add(k)
-        out.append(l)
-    return "\n".join(out)
+        uniq.append(l)
+    return "\n".join(uniq)
 
 
 def web_fetch_handler(params: dict) -> dict:
@@ -201,6 +286,38 @@ def web_search_results_handler(params: dict) -> dict:
     return res
 
 
+def quick_web_search_handler(params: dict) -> dict:
+    """Búsqueda rápida: una sola petición con plazo corto, sin reintentos,
+    descargas de páginas ni llamadas a un LLM. Devuelve títulos, fragmentos y
+    enlaces para que JARVIS responda directamente al dato.
+    """
+    query = " ".join((params.get("query", "") or "").split())
+    if not query:
+        return {"results": [], "error": "Sin query."}
+    key = query.casefold()
+    now = time.time()
+    hit = _QUICK_SEARCH_CACHE.get(key)
+    if hit and now - hit[0] < _QUICK_SEARCH_TTL:
+        return {"results": hit[1][:4], "cached": True}
+
+    url = "https://html.duckduckgo.com/html/?q=" + quote(query)
+    try:
+        html = _simple_fetch(url, timeout=_QUICK_SEARCH_TIMEOUT)
+    except Exception as e:
+        log.info("búsqueda rápida agotó/falló (%s): %s", query[:80], e)
+        return {"results": [], "error": "timeout" if isinstance(e, TimeoutError)
+                else str(e)[:160]}
+
+    results = _parse_ddg_results(html)
+    if not results:
+        return {"results": [], "error": "Sin resultados en la respuesta rápida."}
+    _QUICK_SEARCH_CACHE[key] = (now, results)
+    if len(_QUICK_SEARCH_CACHE) > 100:
+        for old_key, _ in sorted(_QUICK_SEARCH_CACHE.items(), key=lambda kv: kv[1][0])[:30]:
+            _QUICK_SEARCH_CACHE.pop(old_key, None)
+    return {"results": results[:4], "cached": False}
+
+
 def _search_wiki(query: str) -> list[dict]:
     """Wikipedia API (sin claves): [{title, url}]."""
     import json as _js
@@ -278,6 +395,13 @@ def web_frontpage_handler(params: dict) -> dict:
 
 
 TOOLS = [
+    {"name": "web_search_quick",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"query": "str"},
+     "description": "Búsqueda web RÁPIDA: una petición con plazo corto; devuelve directamente títulos, fragmentos y enlaces SIN abrir páginas ni llamar al modelo. Úsala cuando el señor pida un resultado concreto o diga rápido.",
+     "label": "Búsqueda rápida",
+     "handler": quick_web_search_handler},
     {"name": "web_fetch",
      "risk_level": "low",
      "requires_confirmation": False,

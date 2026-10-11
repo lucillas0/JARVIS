@@ -71,9 +71,9 @@ class Config:
 
     # Voz
     WAKE_WORD = _get("WAKE_WORD", "jarvis").lower()
-    STT_MODEL = _get("STT_MODEL", "whisper-large-v3")
+    STT_MODEL = _get("STT_MODEL", "whisper-large-v3-turbo")
     TTS_VOICE = _get("TTS_VOICE", "es_ES-davefx-medium")
-    TTS_SPEED = float(_get("TTS_SPEED", "1.0"))
+    TTS_SPEED = float(_get("TTS_SPEED", "1.12"))
     RECALL_ENABLED = True
     CONVERSATION_SILENCE_SECONDS = float(_get("CONVERSATION_SILENCE_SECONDS", "2.5"))
     MIC_SAMPLE_RATE = int(_get("MIC_SAMPLE_RATE", "16000"))

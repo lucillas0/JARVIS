@@ -53,9 +53,9 @@ export function createOrbScene(container, opts = {}) {
 
     bloom = new UnrealBloomPass(
       new THREE.Vector2(width, height),
-      2.1,   // strength
-      0.45,  // radius
-      0.15,  // threshold
+      1.45,  // strength (se recalcula cada fotograma abajo)
+      0.40,  // radius
+      0.28,  // threshold: antes 0.15, brillaba casi todo y el halo era lechoso
     );
     composer.addPass(bloom);
 
@@ -114,8 +114,13 @@ export function createOrbScene(container, opts = {}) {
   const C_HOT = 0x8fc9e0;
 
   // ——— ORB ROOT ———
+  // introRoot envuelve a orbGroup solo para poder escalar el orbe entero durante
+  // la secuencia de construcción sin pelear con setCompact()/setMode(), que
+  // también tocan la escala de orbGroup.
+  const introRoot = new THREE.Group();
   const orbGroup = new THREE.Group();
-  scene.add(orbGroup);
+  scene.add(introRoot);
+  introRoot.add(orbGroup);
 
   function lineMat(color, opacity = 1) {
     return new THREE.LineBasicMaterial({
@@ -646,6 +651,199 @@ export function createOrbScene(container, opts = {}) {
     controls.update();
   }
 
+  // ——— INTRO: el orbe se construye solo ———
+  // En vez de aparecer ya montado, cada capa entra con su propio retardo y las
+  // líneas se dibujan punto a punto (drawRange). Al terminar, el orbe sigue su
+  // animación normal como si nada. Todo el coste se paga una sola vez.
+  const build = [];
+  let introActive = true;
+  let introArmed = false;
+  let introStarted = false;
+  let introStart = 0;
+  let introScale = 1;
+
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+  const easeOutBack = (x) => {
+    const c = 1.70158;
+    const u = x - 1;
+    return 1 + (c + 1) * u * u * u + c * u * u;
+  };
+
+  function regLine(obj, start, dur, step) {
+    const g = obj.geometry;
+    const attr = g && g.getAttribute && g.getAttribute('position');
+    if (!attr) return;
+    g.setDrawRange(0, 0);
+    build.push({
+      kind: 'line', obj, geo: g, total: attr.count,
+      step: step || (obj.isLineSegments ? 2 : 1),
+      start, dur,
+      mat: obj.material, base: obj.material ? obj.material.opacity : 1,
+    });
+  }
+
+  function regFade(obj, start, dur, withScale) {
+    const mat = obj.material;
+    if (!mat) return;
+    // La escala base se guarda porque las sprites de texto la fijan con su
+    // relación de aspecto: poner scale=1 a pelo las deformaría.
+    const s = withScale ? obj.scale.clone() : null;
+    build.push({
+      kind: 'static', obj, start, dur, withScale: !!withScale, baseScale: s,
+      mat, base: mat.opacity,
+    });
+  }
+
+  // Estas propiedades las recalcula el bucle principal cada frame, así que la
+  // intro solo puede multiplicar: se aplica al final de animate().
+  function regDynamic(obj, start, dur, withScale) {
+    build.push({
+      kind: 'dynamic', obj, start, dur, withScale: !!withScale,
+      mat: obj.material || null,
+    });
+  }
+
+  function regPoints(obj, start, dur) {
+    const g = obj.geometry;
+    const attr = g && g.getAttribute && g.getAttribute('position');
+    if (!attr) return;
+    g.setDrawRange(0, 0);
+    build.push({
+      kind: 'points', obj, geo: g, total: attr.count, start, dur,
+      mat: obj.material, base: obj.material ? obj.material.opacity : 1,
+    });
+  }
+
+  // — Orden de construcción: núcleo → alma → cáscara → paneles → arcos →
+  //   partículas → código. Cada capa se solapa con la siguiente.
+  regDynamic(coreSphere, 0.00, 0.55, true);
+  regDynamic(glowSphere, 0.05, 0.60, true);
+  regDynamic(icoWire, 0.10, 0.55, true);
+
+  innerCore.children.forEach((ln, i) => regLine(ln, 0.16 + i * 0.006, 0.50));
+  regDynamic(innerCore, 0.16, 0.70, true);
+
+  outerShell.children.forEach((ln, i) => {
+    if (ln.isLineSegments) regLine(ln, 0.74 + i * 0.018, 0.40, 2);
+    else regLine(ln, 0.44 + i * 0.0022, 0.60);
+  });
+
+  panelGroup.children.forEach((panel, i) => {
+    regFade(panel, 0.90 + i * 0.030, 0.45, true);
+  });
+
+  shell2.children.forEach((ln, i) => regLine(ln, 1.34 + i * 0.009, 0.55));
+
+  debris.forEach((d, i) => regFade(d, 1.60 + i * 0.011, 0.45, true));
+  regPoints(dustPoints, 1.74, 0.95);
+
+  [...textOuter.children, ...textInner.children, ...textAmbient.children]
+    .forEach((sp, i) => regFade(sp, 1.98 + i * 0.0012, 0.60, true));
+
+  regDynamic(scanRing1, 1.30, 0.60, false);
+  regDynamic(scanRing2, 1.45, 0.60, false);
+
+  // El parpadeo de paneles pelearía con su entrada: se corta mientras dura.
+  let introDone = false;
+
+  // Estado inicial invisible: sin esto, el primer frame pinta el orbe entero
+  // durante un instante antes de que la intro empiece a apagarlo.
+  function primeIntro() {
+    for (const b of build) {
+      if (b.start0 === undefined) { b.start0 = b.start; b.dur0 = b.dur; }
+      if (b.geo) b.geo.setDrawRange(0, b.step || 1);
+      if (b.mat) b.mat.opacity = 0;
+      if (b.baseScale) b.obj.scale.set(0, 0, 0);
+    }
+    introRoot.scale.setScalar(0.18);
+  }
+  primeIntro();
+
+  function playIntro(opts) {
+    const o = opts || {};
+    introScale = o.speed && o.speed > 0 ? 1 / o.speed : 1;
+    for (const b of build) {
+      if (b.start0 === undefined) { b.start0 = b.start; b.dur0 = b.dur; }
+      b.start = b.start0 * introScale;
+      b.dur = b.dur0 * introScale;
+    }
+    introActive = true;
+    introArmed = true;
+    introStarted = true;
+    introDone = false;
+    introStart = null;
+    panelGroup.children.forEach((p) => { p.visible = true; });
+    primeIntro();
+  }
+  function skipIntro() {
+    if (introDone) return;
+    for (const b of build) {
+      if (b.geo) b.geo.setDrawRange(0, Infinity);
+      if (b.mat) b.mat.opacity = b.base;
+      if (b.baseScale) b.obj.scale.copy(b.baseScale);
+    }
+    introRoot.scale.setScalar(1);
+    introActive = false;
+    introDone = true;
+  }
+
+  // Pizarra oculta: el orbe se apaga del todo hasta la próxima apertura.
+  function parkIntro() {
+    introArmed = false;
+    introActive = true;
+    introDone = false;
+    introStarted = false;
+    introStart = null;
+    for (const b of build) {
+      if (b.start0 === undefined) { b.start0 = b.start; b.dur0 = b.dur; }
+      b.start = b.start0;
+      b.dur = b.dur0;
+    }
+    primeIntro();
+  }
+
+  function updateIntro(t) {
+    if (!introArmed) {
+      // Antes de que llegue el arranque, el orbe se mantiene completamente
+      // apagado: si no, el núcleo y el brillo se verían un instante y la
+      // pizarra aparecería ya montada antes de la animación.
+      for (const b of build) {
+        if (b.geo) b.geo.setDrawRange(0, b.step || 1);
+        if (b.mat) b.mat.opacity = 0;
+        if (b.kind === 'dynamic' && b.withScale) b.obj.scale.setScalar(0);
+      }
+      introRoot.scale.setScalar(0.18);
+      return;
+    }
+    if (introStart === null) introStart = t;
+    const el = t - introStart;
+    let alive = false;
+    for (const b of build) {
+      const p = easeOutCubic(clamp01((el - b.start) / b.dur));
+      if (el < b.start + b.dur) alive = true;
+      if (b.kind === 'line') {
+        b.geo.setDrawRange(0, Math.max(b.step, Math.floor(b.total * p / b.step) * b.step));
+        if (b.mat) b.mat.opacity = b.base * p;
+      } else if (b.kind === 'points') {
+        b.geo.setDrawRange(0, Math.max(1, Math.floor(b.total * p)));
+        if (b.mat) b.mat.opacity = b.base * p;
+      } else if (b.kind === 'static') {
+        if (b.mat) b.mat.opacity = b.base * p;
+        if (b.withScale && b.baseScale) {
+          const k = 0.55 + 0.45 * p;
+          b.obj.scale.set(b.baseScale.x * k, b.baseScale.y * k, b.baseScale.z * k);
+        }
+      } else if (b.kind === 'dynamic') {
+        if (b.mat) b.mat.opacity *= p;
+        if (b.withScale) b.obj.scale.multiplyScalar(0.6 + 0.4 * p);
+      }
+    }
+    // El orbe entero se assembla desde dentro hacia fuera.
+    introRoot.scale.setScalar(0.18 + 0.82 * easeOutBack(clamp01(el / (0.9 * introScale))));
+    if (!alive) { skipIntro(); }
+  }
+
   // ANIMATION
   const clock = new THREE.Clock();
   let flickerTimer = 0;
@@ -693,18 +891,22 @@ export function createOrbScene(container, opts = {}) {
     const wave3 = Math.pow(Math.max(0, Math.sin(t * 0.4)), 5);
     const wave4 = Math.pow(Math.max(0, Math.sin(t * 0.7 + 2)), 8);
     const fadeOut = Math.pow(Math.max(0, Math.sin(t * 0.25)), 3);
-    const surge = wave3 * 1.5 + wave4 * 2.0 + boost;
+    // La respiración (las oleadas `surge`) se ha calmado a la mitad: el orbe
+    // sigue vivo, pero ya no lanza destellos que revientan el bloom. Antes el
+    // núcleo triplicaba su tamaño y el halo crecía casi 4x, y eso era el
+    // fogonazo que tanto molestaba.
+    const surge = wave3 * 0.75 + wave4 * 1.0 + boost * 0.5;
     const coreScale = (1 + surge + Math.sin(t * 5) * 0.05) * (1 + speakPulse * 0.6);
     coreSphere.scale.setScalar(coreScale);
     const coreOpacity = Math.max(
       0,
-      (0.08 + wave1 * 0.05 + surge * 0.2) * (1 - fadeOut * 0.95) + level * 0.25 + speakPulse * 0.3,
+      (0.08 + wave1 * 0.04 + surge * 0.1) * (1 - fadeOut * 0.95) + level * 0.15 + speakPulse * 0.2,
     );
-    coreSphereMat.opacity = Math.min(0.65, coreOpacity);
-    glowSphere.scale.setScalar((1 + surge * 0.8) * (1 + speakPulse * 0.9));
-    glowSphereMat.opacity = Math.max(0, (0.03 + surge * 0.08) * (1 - fadeOut * 0.9) + level * 0.1 + speakPulse * 0.12);
-    icoWire.scale.setScalar((1 + surge * 0.6) * (1 + speakPulse * 0.7));
-    icoWireMat.opacity = Math.min(1, 0.5 + surge * 0.4 + level * 0.3 + speakPulse * 0.45);
+    coreSphereMat.opacity = Math.min(0.5, coreOpacity);
+    glowSphere.scale.setScalar((1 + surge * 0.35) * (1 + speakPulse * 0.5));
+    glowSphereMat.opacity = Math.max(0, (0.018 + surge * 0.035) * (1 - fadeOut * 0.9) + level * 0.05 + speakPulse * 0.06);
+    icoWire.scale.setScalar((1 + surge * 0.3) * (1 + speakPulse * 0.5));
+    icoWireMat.opacity = Math.min(0.85, 0.42 + surge * 0.2 + level * 0.2 + speakPulse * 0.3);
     innerCore.scale.setScalar(1 + (speaking ? Math.sin(t * 7) * 0.035 * (0.5 + level) : 0));
 
     debris.forEach((d) => {
@@ -753,9 +955,11 @@ export function createOrbScene(container, opts = {}) {
     flickerTimer += 0.016;
     if (flickerTimer > 0.1) {
       flickerTimer = 0;
-      panelGroup.children.forEach((p) => {
-        if (Math.random() > 0.95) p.visible = !p.visible;
-      });
+      if (!introActive) {
+        panelGroup.children.forEach((p) => {
+          if (Math.random() > 0.95) p.visible = !p.visible;
+        });
+      }
     }
 
     if (speaking) {
@@ -770,9 +974,16 @@ export function createOrbScene(container, opts = {}) {
 
     if (bloom) {
       const compactBloom = compact ? 0.45 : 1;
-      bloom.strength = (2.1 + Math.sin(t * 0.8) * 0.4 + level * 1.2 + (active ? 0.8 : 0) + speakPulse * 0.9) * compactBloom;
+      // El bloom es el responsable del fogonazo: aquí va bastante más contenido
+      // y, sobre todo, la oscilación de la respiración cae de 0.4 a 0.12. Antes
+      // el brillo latía tanto que parecía un fogonazo y no una respiración.
+      bloom.strength = (1.45 + Math.sin(t * 0.8) * 0.12 + level * 0.6 + (active ? 0.35 : 0) + speakPulse * 0.45) * compactBloom;
     }
     if (chromaticPass) chromaticPass.uniforms.uTime.value = t;
+
+    // La construcción va al final: así parte de los valores que el bucle acaba
+    // de calcular y solo los atenúa, en vez de pelearse con ellos.
+    if (introActive) updateIntro(t);
 
     controls.update();
     if (composer) composer.render();
@@ -844,6 +1055,11 @@ export function createOrbScene(container, opts = {}) {
         camera.position.set(0, 0.5, 6.4);
       }
     },
+    playIntro,
+    skipIntro,
+    parkIntro,
+    isIntroPlaying: () => introActive,
+    isIntroStarted: () => introStarted,
     dispose,
   };
 }

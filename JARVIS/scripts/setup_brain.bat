@@ -62,13 +62,29 @@ if not exist .env (
   echo [JARVIS] Se creo brain\.env a partir de .env.example
 )
 
-echo [JARVIS] Instalando dependencias del brain (primera vez puede tardar)...
-%PY% -m pip install --upgrade pip >nul 2>&1
+REM Instalar solo si cambió requirements.txt; start.bat y build.bat comparten este venv.
+set REQUIREMENTS_HASH=
+for /f "usebackq delims=" %%H in (`%PY% -c "import hashlib; print(hashlib.sha256(open('requirements.txt','rb').read()).hexdigest())"`) do set REQUIREMENTS_HASH=%%H
+if not defined REQUIREMENTS_HASH (
+  echo [JARVIS] ERROR calculando la huella de requirements.txt.
+  exit /b 1
+)
+set INSTALLED_HASH=
+if exist venv\requirements.sha256 set /p INSTALLED_HASH=<venv\requirements.sha256
+if not "%INSTALLED_HASH%"=="%REQUIREMENTS_HASH%" goto :install_requirements
+echo [JARVIS] Dependencias ya instaladas; se omite pip.
+goto :requirements_ready
+
+:install_requirements
+echo [JARVIS] Instalando dependencias del brain...
 %PY% -m pip install -r requirements.txt
 if errorlevel 1 (
   echo [JARVIS] ERROR instalando dependencias del brain.
   exit /b 1
 )
+>venv\requirements.sha256 echo %REQUIREMENTS_HASH%
+
+:requirements_ready
 
 REM Genera iconos e inicializa la base de datos
 %PY% -c "import scripts.make_assets; scripts.make_assets.main()" >nul 2>&1

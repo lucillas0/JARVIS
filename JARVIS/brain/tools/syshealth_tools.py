@@ -225,10 +225,20 @@ def vt_scan_url_handler(params: dict) -> dict:
             if st == "completed":
                 stats = an.get("data", {}).get("attributes", {}).get("stats", {})
                 return {"url": url, "malicious": int(stats.get("malicious", 0) or 0),
-                        "stats": stats}
+                        "stats": stats, "link": _vt_url_link(url)}
         except Exception as e:
             log.debug("vt poll: %s", e)
-    return {"url": url, "pending": True, "analysis_id": aid}
+    return {"url": url, "pending": True, "analysis_id": aid,
+            "link": _vt_url_link(url)}
+
+
+def _vt_url_link(url: str) -> str:
+    """Enlace a la ficha de esa URL en la web de VirusTotal."""
+    import base64
+    import urllib.parse
+    # Es el mismo identificador que usa la web: base64url del URL, sin relleno.
+    ident = base64.urlsafe_b64encode(url.strip().encode()).decode().rstrip("=")
+    return f"https://www.virustotal.com/gui/url/{ident}"
 
 
 def mbam_open_handler(params: dict) -> dict:
