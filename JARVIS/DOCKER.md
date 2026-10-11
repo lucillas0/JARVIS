@@ -13,12 +13,14 @@ servidor se encarga de pensar, recordar y responder.
 | `docker-compose.yml` | El proyecto. Es el que lee Container Manager al crear el proyecto. |
 | `Dockerfile` | Imagen mínima: Python + el cerebro, sin nada de escritorio. |
 
+Este es el camino para el **servidor**. Si lo que quieres es instalarlo en tu PC, usa instalar.bat / instalar.sh y mira INSTALAR.md.
+
 ## Lo más rápido
 
 ```sh
 cp configuracion.env.example .env
 # Edita .env y pega al menos una clave: Groq, Gemini u OpenRouter
-./instalar.sh
+./instalar-docker.sh
 ```
 
 El script hace el resto: crea `data/` y `assets/`, ajusta los permisos, construye
@@ -51,18 +53,18 @@ Detalles que importan en Synology:
 Para repasar los pasos desde la consola:
 
 ```sh
-./instalar.sh --registrar
+./instalar-docker.sh --registrar
 ```
 
 ## Comandos
 
 ```sh
-./instalar.sh              # instala y arranca
-./instalar.sh --puerto 9000
-./instalar.sh --reconstruir  # rehace la imagen desde cero
-./instalar.sh --estado       # como va
-./instalar.sh --registros    # log en vivo
-./instalar.sh --parar
+./instalar-docker.sh              # instala y arranca
+./instalar-docker.sh --puerto 9000
+./instalar-docker.sh --reconstruir  # rehace la imagen desde cero
+./instalar-docker.sh --estado       # como va
+./instalar-docker.sh --registros    # log en vivo
+./instalar-docker.sh --parar
 ```
 
 ## Configuración
