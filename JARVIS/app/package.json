@@ -85,7 +85,7 @@
       "target": [
         "nsis"
       ],
-      "icon": "assets/icon.ico",
+      "icon": "../assets/icon.ico",
       "signAndEditExecutable": false,
       "artifactName": "JARVIS-${version}-win-${arch}.${ext}"
     },
@@ -96,7 +96,7 @@
         "rpm",
         "tar.gz"
       ],
-      "icon": "assets/linux-icons",
+      "icon": "../assets/linux-icons",
       "category": "Utility",
       "synopsis": "Asistente personal de escritorio con voz",
       "description": "JARVIS es un asistente personal con voz. Habla, escucha y responde, y tiene una isla en la barra superior que se pliega sola.",
@@ -116,7 +116,7 @@
         "dmg",
         "zip"
       ],
-      "icon": "assets/icon.icns",
+      "icon": "../assets/icon.icns",
       "category": "public.app-category.productivity",
       "darkModeSupport": true,
       "artifactName": "JARVIS-${version}-mac-${arch}.${ext}",
