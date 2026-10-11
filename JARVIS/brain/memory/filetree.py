@@ -150,6 +150,55 @@ def search(query: str, limit: int = 8) -> list:
     return out
 
 
+def find_fast(query: str, limit: int = 6, budget_sec: float = 8.0) -> list:
+    """Busca en disco ahora mismo, sin esperar al índice.
+
+    Primero el índice (instantáneo) y, si no acierta, recorre las carpetas
+    personales con presupuesto de tiempo para responder enseguida.
+    """
+    hits = search(query, limit=limit)
+    if hits:
+        base0 = os.path.basename((query or "").strip('"').strip("'")).lower()
+        if base0:
+            hits.sort(key=lambda p: (os.path.basename(p).lower() != base0,))
+        return hits
+    q = (query or "").strip().strip('"').strip("'")
+    if not q:
+        return []
+    base = os.path.basename(q)
+    low_q = q.lower()
+    low_b = base.lower()
+    has_ext = "." in base
+    roots = [os.path.expanduser("~") + "\\Desktop",
+             os.path.expanduser("~") + "\\Documents",
+             os.path.expanduser("~") + "\\Downloads",
+             os.path.expanduser("~") + "\\OneDrive"]
+    for d in list(get_roots()):
+        if os.path.isdir(d) and d not in roots:
+            roots.append(d)
+    t0 = time.time()
+    out = []
+    for root in roots:
+        if not os.path.isdir(root) or time.time() - t0 > budget_sec:
+            continue
+        for dp, dn, fns in os.walk(root):
+            dn[:] = [d for d in dn
+                      if d not in ("node_modules", "venv", ".git", "__pycache__",
+                                   "AppData", "$Recycle.Bin", "System Volume Information")]
+            if time.time() - t0 > budget_sec:
+                break
+            for fn in fns:
+                lfn = fn.lower()
+                if lfn == low_b or (has_ext and lfn.startswith(low_b)) \
+                        or lfn == low_q or low_q in lfn:
+                    p = os.path.join(dp, fn)
+                    if p not in out:
+                        out.append(p)
+                        if len(out) >= limit:
+                            return out
+    return out
+
+
 def stats() -> dict:
     d = _load()
     return {"roots": d.get("roots", []), "files": len(d.get("entries", {})),

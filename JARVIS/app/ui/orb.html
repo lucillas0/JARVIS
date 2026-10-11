@@ -2,7 +2,8 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<title>JARVIS · Orbe</title>
+<title>J.A.R.V.I.S.</title>
+<link rel="stylesheet" href="styles.css" />
 <script type="importmap">
 {
   "imports": {
@@ -12,40 +13,30 @@
 }
 </script>
 <style>
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0;
-    height: 100%;
-    background: transparent;
-    overflow: hidden;
-    user-select: none;
-    font-family: "Courier New", monospace;
-  }
-  .orb {
-    position: fixed;
-    inset: 0;
-    background: transparent;
-    cursor: pointer;
-    -webkit-app-region: drag;
-  }
-  .orb .stage {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  #orbContainer { width: 100%; height: 100%; }
-  .orb canvas { display: block; }
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  #orbContainer { position: fixed; inset: 0; }
 </style>
 </head>
 <body>
-  <div id="app" class="orb">
-    <div class="stage">
-      <div id="orbContainer"></div>
-    </div>
+  <!-- El renderer del orbe busca este contenedor (ver orb-renderer.js). -->
+  <div id="orbContainer"></div>
+
+  <!--
+    Un clic en el orbe devuelve a la ventana principal. Con la cámara se puede
+    hacer lo mismo con la mano: doble pellizco rápido.
+  -->
+  <div id="handLayer" class="hand-layer">
+    <video id="camVideo" muted playsinline class="camera-video"></video>
+    <canvas id="camOverlay" width="320" height="240" class="camera-overlay"></canvas>
+    <div id="cameraStatus" class="camera-status">Gestos apagados</div>
+    <div id="handCursor" class="hud-hand-cursor" hidden></div>
+    <button id="gesturesBtn" class="orb-gestures-btn" type="button" aria-pressed="false">
+      👐 GESTOS
+    </button>
   </div>
 
+  <script src="gestures.js"></script>
   <script type="module" src="orb-renderer.js"></script>
+  <script src="orb-gestures.js"></script>
 </body>
 </html>

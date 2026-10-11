@@ -1,12 +1,20 @@
-/* Mini JARVIS en el overlay Win+J: orbe compacto de bajo coste (modo lite),
-   conectado al brain. Se crea al cargar la página. */
+/* JARVIS en el overlay Win+J: el MISMO orbe que el de la ventana principal.
+   Se renderiza con el mismo pipeline (bloom + aberración cromática) dentro de
+   su propio marco, y se construye capa a capa con la misma secuencia. */
 import { createOrbScene } from '../ultron-orb.js';
 
 const stage = document.getElementById('orbStage');
-const orb = createOrbScene(stage, { transparent: true, lite: true });
+const orb = createOrbScene(stage, { transparent: false, lite: true });
 orb.setCompact(true);
 orb.setMode('idle');
 orb.setLevel(0);
+
+// El orbe nace oculto y lo construye app.js al mostrar la pizarra, para que
+// la secuencia no se pierda antes de abrirse. Aquí solo se queda disponible.
+// (Antes había un temporizador que lo construía solo a los 3,5 s de cargar la
+// página: como la ventana se reutiliza oculta, el orbe quedaba ya montado y
+// al abrir se veía completo un instante antes de la animación.)
+window.__jarvisOrb = orb;
 
 // Conexión independiente al WS del brain (puerto 8000)
 let ws = null;

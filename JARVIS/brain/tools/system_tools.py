@@ -7,10 +7,12 @@ Cada herramienta lleva su nivel de riesgo; las sensibles pasan por el doble
 canal del Risk Engine.
 """
 import ctypes
+import json
 import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +22,373 @@ log = logging.getLogger("tools.system")
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 APPCMDS = {"shell:appsFolder"}
+
+
+# ----------------------------------------------------------------------------- #
+# Índice de aplicaciones
+#
+# Antes, resolver "abre spotify" recorría, en cada petición: dos where.exe, dos
+# walks completos del menú Inicio y una búsqueda por todo el disco. Tardaba
+# segundos y encima se repetía idéntico para siempre. Ahora se indexa TODO una
+# sola vez (menú Inicio, escritorio y PATH), se guarda en disco y se resuelve
+# con una consulta de diccionario: inmediata y sin subprocesos.
+#
+# El índice se construye en un hilo aparte para que nada de esto retrase el
+# arranque, y la versión guardada en disco se carga al instante.
+# ----------------------------------------------------------------------------- #
+_APP_INDEX: dict[str, str] = {}       # clave normalizada -> ruta completa
+_RESOLVED: dict[str, str] = {}       # lo ya resuelto en memoria (atajo total)
+_INDEX_LOCK = threading.Lock()
+_INDEX_TS = 0.0
+_INDEX_BUILT = False
+_INDEX_BUILDING = False
+_INDEX_THREAD = None
+
+# Nombres que nunca deben ganarle a un atajo del menú Inicio.
+_APP_ALIASES = {
+    # Como se dicen en castellano. En el menú de Windows los programas
+    # aparecen en inglés o con el nombre de la empresa, y el señor los pide
+    # en español: "abre calculadora" no encontraba nada.
+    "calculadora": ["calculator", "calc", "applicationframehost"],
+    "calculadora basica": ["calculator", "calc"],
+    "bloc de notas": ["notepad", "notepad++"],
+    "notepad mas": ["notepad++", "notepad"],
+    "paint": ["paint", "mspaint"],
+    "examinador de archivos": ["explorer", "fileresource"],
+    "explorador de archivos": ["explorer", "fileresource"],
+    "administrador de tareas": ["taskmgr", "taskmanager"],
+    "configuracion": ["control", "controlpanel", "msconfig"],
+    "ajustes": ["control", "controlpanel", "msconfig"],
+    "registro": ["regedit"],
+    "editor de texto": ["notepad"],
+    "linea de ordenes": ["cmd", "windowsterminal", "wt"],
+    "consola": ["cmd", "windowsterminal", "wt"],
+    "prompt": ["cmd"],
+    "word": ["winword", "word"],
+    "hoja de calculo": ["excel", "winword"],
+    "presentacion": ["powerpoint", "winword"],
+    "correo": ["outlook", "thunderbird"],
+    "correo electronico": ["outlook", "thunderbird"],
+    "musica": ["spotify"],
+    "navegador": ["firefox", "googlechrome", "brave"],
+    "firefox": ["firefox"],
+    "brave": ["brave"],
+    "edge": ["msedge", "edge"],
+    "captura de pantalla": ["snippingtool", "screencl sketch"],
+    "virtualbox": ["virtualbox", "oraclevmvirtualbox", "vbox"],
+    "vbox": ["virtualbox", "oraclevmvirtualbox", "vbox"],
+    "spotify": ["spotify"],
+    "google": ["googlechrome", "chrome"],
+    "chrome": ["googlechrome", "chrome"],
+    "gmail": ["gmail", "googlechrome"],
+    "word": ["winword", "word"],
+    "excel": ["excel", "winword"],
+    "powerpoint": ["powerpoint", "winword"],
+    "notepad": ["notepad"],
+    "paint": ["paint", "mspaint"],
+    "calc": ["calc"],
+    "calculator": ["calculator", "calc"],
+    "explorer": ["explorer"],
+    "terminal": ["windowsterminal", "wt", "cmd", "powershell"],
+    "powershell": ["powershell", "windowsterminal", "cmd"],
+    "cmd": ["cmd"],
+    "vscode": ["code", "visualstudiocode"],
+    "code": ["code", "visualstudiocode"],
+    "firefox": ["firefox"],
+    "brave": ["brave"],
+    "edge": ["msedge", "microsoftedge"],
+    "discord": ["discord"],
+    "telegram": ["telegram"],
+    "steam": ["steam"],
+    "obs": ["obs64", "obsstudio"],
+    "obsstudio": ["obs64", "obsstudio"],
+    "putty": ["putty"],
+    "winscp": ["winscp"],
+    "filezilla": ["filezilla"],
+    "vlc": ["vlc"],
+    "photos": ["microsoft.windows.photos", "photos"],
+    "photoshop": ["photoshop"],
+    "gimp": ["gimp-2.10", "gimp"],
+    "notion": ["notion"],
+    "postman": ["postman"],
+    "docker": ["dockerdesktop", "docker"],
+    "androidstudio": ["studio64", "androidstudio"],
+    "idea": ["idea64", "intellij"],
+    "pycharm": ["pycharm64", "pycharm"],
+    "narrator": ["narrator", "narrator.exe"],
+    "voiceaccess": ["voiceaccess", "voiceaccess.exe"],
+}
+
+
+def _app_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+# Los apodos se_NORMALIZAN_: se escriben como los dice el señor ("bloc de
+# notas") pero se buscan sin espacios ni mayusculas ("blocdenotas"). Con las
+# claves en crudo, ningún apodo en castellano llegaba a funcionar nunca.
+_ALIASES_NORMAL: dict = {}
+for _alias, _destinos in _APP_ALIASES.items():
+    _ALIASES_NORMAL.setdefault(_app_key(_alias), []).extend(_destinos)
+
+
+def _index_file() -> Path:
+    try:
+        from config import DATA_DIR
+        return Path(DATA_DIR) / "app-index.json"
+    except Exception:
+        return Path(os.environ.get("APPDATA", ".")) / "JARVIS" / "app-index.json"
+
+
+def _load_index() -> None:
+    global _INDEX_TS
+    try:
+        raw = _index_file().read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict) and isinstance(data.get("apps"), dict):
+            _APP_INDEX.update({str(k): str(v) for k, v in data["apps"].items()})
+            _INDEX_TS = float(data.get("ts") or 0)
+    except Exception:
+        pass
+
+
+def _save_index() -> None:
+    try:
+        _index_file().write_text(
+            json.dumps({"ts": time.time(), "apps": _APP_INDEX}, ensure_ascii=False),
+            encoding="utf-8")
+    except Exception as e:
+        log.debug("app-index save: %s", e)
+
+
+_NO_ES_PROGRAMA = re.compile(
+    r"\b(pdf|manual|readme|ayuda|help|guia|document|licen[cs]e|licencia|"
+    r"release\s?notes|notes|changelog|uninstall|release|notes|web)\b", re.I)
+
+
+def _add_app(path: str) -> None:
+    """Indexa un .lnk/.exe por TODOS los nombres con los que se le suele pedir."""
+    stem = Path(path).stem
+    # Un acceso directo a un manual o a un PDF no es un programa: si se indexa,
+    # "abre userver26" acababa abriendo el manual en PDF de VirtualBox.
+    if _NO_ES_PROGRAMA.search(stem):
+        return
+    keys = {_app_key(stem)}
+    # "Google Chrome" -> googlechrome, chrome ; "Spotify" -> spotify
+    parts = [p for p in re.split(r"[\s_\-]+", stem) if p]
+    if len(parts) > 1:
+        keys.add(_app_key("".join(parts)))
+        keys.add(_app_key(parts[-1]))
+        keys.add(_app_key(parts[0]))
+    for k in keys:
+        if k and k not in _APP_INDEX:
+            _APP_INDEX[k] = path
+
+
+def _build_index() -> None:
+    global _INDEX_TS, _INDEX_BUILT, _INDEX_BUILDING
+    added = 0
+    # 1) Menú Inicio, escritorio y descargas
+    bases = [
+        Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+        Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+        Path.home() / "Desktop",
+        Path.home() / "Downloads",
+    ]
+    for base in bases:
+        if not base.is_dir():
+            continue
+        try:
+            for p in base.rglob("*"):
+                if p.suffix.lower() in (".lnk", ".exe", ".bat", ".cmd"):
+                    n = len(_APP_INDEX)
+                    _add_app(str(p))
+                    added += len(_APP_INDEX) - n
+        except Exception as e:
+            log.debug("app-index %s: %s", base, e)
+    # 2) Carpetas de programas: apps que instalan fuera del menú Inicio.
+    #    Solo dos niveles: es lo justo para "<App>\<App>.exe" sin slowear.
+    prog = [
+        Path(os.environ.get("ProgramFiles", "") or "C:/Program Files"),
+        Path(os.environ.get("ProgramFiles(x86)", "") or "C:/Program Files (x86)"),
+        Path(os.environ.get("LOCALAPPDATA", "")),
+        Path(os.environ.get("APPDATA", "")),
+    ]
+    for root in prog:
+        if not root.is_dir():
+            continue
+        try:
+            kids = list(root.iterdir())
+        except Exception:
+            continue
+        for kid in kids:
+            n = len(_APP_INDEX)
+            if kid.is_file() and kid.suffix.lower() in (".exe", ".lnk", ".bat", ".cmd"):
+                _add_app(str(kid))
+            elif kid.is_dir():
+                try:
+                    for p in kid.iterdir():
+                        if p.suffix.lower() in (".exe", ".lnk", ".bat", ".cmd"):
+                            _add_app(str(p))
+                except Exception:
+                    pass
+            added += len(_APP_INDEX) - n
+    # 3) PATH: sin lanzar where.exe, se recorre el propio PATH
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        d = d.strip().strip('"')
+        if not d or not Path(d).is_dir():
+            continue
+        try:
+            for p in Path(d).iterdir():
+                if p.suffix.lower() in (".exe", ".bat", ".cmd"):
+                    n = len(_APP_INDEX)
+                    _add_app(str(p))
+                    added += len(_APP_INDEX) - n
+        except Exception:
+            pass
+    # 4) Alias conocidos, para que "virtualbox" gane al atajo equivocado
+    for alias, targets in _APP_ALIASES.items():
+        for t in targets:
+            if t in _APP_INDEX:
+                _APP_INDEX[alias] = _APP_INDEX[t]
+                break
+    with _INDEX_LOCK:
+        _INDEX_TS = time.time()
+        _INDEX_BUILT = True
+        _INDEX_BUILDING = False
+    _save_index()
+    log.info("app-index: %d nombres desde %d accesos", len(_APP_INDEX), added)
+
+
+def _ensure_index() -> None:
+    """Construye el índice en segundo plano si aún no está. No bloquea nunca."""
+    global _INDEX_BUILDING, _INDEX_THREAD
+    if _INDEX_BUILT or _INDEX_BUILDING:
+        return
+    with _INDEX_LOCK:
+        if _INDEX_BUILT or _INDEX_BUILDING:
+            return
+        _INDEX_BUILDING = True
+    _INDEX_THREAD = threading.Thread(target=_build_index, name="app-index", daemon=True)
+    _INDEX_THREAD.start()
+
+
+def index_ready() -> bool:
+    return _INDEX_BUILT and bool(_APP_INDEX)
+
+
+def refresh_index() -> None:
+    """Reindexa a mano (después de instalar una app nueva)."""
+    global _INDEX_BUILDING, _INDEX_THREAD
+    with _INDEX_LOCK:
+        _INDEX_BUILDING = True
+    _INDEX_THREAD = threading.Thread(target=_build_index, name="app-index", daemon=True)
+    _INDEX_THREAD.start()
+
+
+# Programas de Windows que no aparecen en el menú de inicio, así que el
+# índice no los ve. Sin esto, "abre el explorador de archivos" no encontraba
+# nada, porque explorer.exe vive en System32 y no en ningún acceso directo.
+_WINDOWS_APPS = {
+    "notepad": "notepad.exe",
+    "taskmgr": "taskmgr.exe",
+    "taskmanager": "taskmgr.exe",
+    "explorer": "explorer.exe",
+    "explorerfiles": "explorer.exe",
+    "control": "control.exe",
+    "controlpanel": "control.exe",
+    "msconfig": "msconfig.exe",
+    "regedit": "regedit.exe",
+    "cmd": "cmd.exe",
+    "calc": "calc.exe",
+    "calculator": "calc.exe",
+    "mspaint": "mspaint.exe",
+    "paint": "mspaint.exe",
+    "charmap": "charmap.exe",
+    "wf.msc": "wf.msc",
+    "services": "services.msc",
+    "eventvwr": "eventvwr.msc",
+    "diskmgmt": "diskmgmt.msc",
+    "devmgmt": "devmgmt.msc",
+    "compmgmt": "compmgmt.msc",
+    "cleanmgr": "cleanmgr.exe",
+    "snippingtool": "SnippingTool.exe",
+    "msinfo32": "msinfo32.exe",
+    "dxdiag": "dxdiag.exe",
+    "systempropertiescomputername": "sysdm.cpl",
+    "shutdown": "shutdown.exe",
+    "powershell": "powershell.exe",
+}
+
+
+def _ruta_windows(clave: str) -> str:
+    exe = _WINDOWS_APPS.get(clave)
+    if not exe:
+        return ""
+    for carpeta in (os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                                 "System32"),
+                    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "")):
+        ruta = os.path.join(carpeta, exe)
+        if os.path.exists(ruta):
+            return ruta
+    return ""
+
+
+def _index_lookup(name: str) -> str | None:
+    """Busca en el índice: alias exactos, alias configurados y prefijo único."""
+    key = _app_key(name)
+    if not key:
+        return None
+    hit = _APP_INDEX.get(key)
+    if hit:
+        return hit
+    for target in _ALIASES_NORMAL.get(key, ()):
+        hit = _APP_INDEX.get(_app_key(target))
+        if hit:
+            return hit
+    # Prefijo único: "virtu" -> VirtualBox, sin abrir Neptune a propósito.
+    # Con cobertura: si no, "userver26" se tragaba el "user" del manual en PDF
+    # de VirtualBox y le abría un documento en vez de encender la máquina.
+    if len(key) >= 4:
+        cands = []
+        for k, v in _APP_INDEX.items():
+            if len(k) < 4:
+                continue
+            corto, largo = (k, key) if len(k) <= len(key) else (key, k)
+            if not (corto.startswith(key) or key.startswith(k)):
+                continue
+            if min(len(corto), len(largo)) / max(len(corto), len(largo)) < 0.6:
+                continue
+            cands.append(v)
+        if len(set(cands)) == 1:
+            return cands[0]
+    # Y por ultimo los programas de Windows que no estan en el indice.
+    return _ruta_windows(key) or None
+
+
+def lookup_app(name: str) -> str | None:
+    """Ruta de una app por su nombre, o None si no está en el índice.
+    Es la vía rápida: NO barre el disco. La usan las rutas rápidas de main.py
+    para responder 'abre X' sin pasar por el modelo."""
+    if not name:
+        return None
+    _ensure_index()
+    # Si el índice se está montando y esto falla, es que aún no ha llegado: se
+    # espera a que termine antes de rendirse, para no caer en la ruta lenta.
+    th = _INDEX_THREAD
+    if not _INDEX_BUILT and th is not None and th.is_alive():
+        th.join(timeout=3.0)
+    hit = _index_lookup(name)
+    if hit:
+        _RESOLVED[name.strip().lower()] = hit
+    return hit
+
+
+# Se carga el disco al importar el módulo (instantáneo) y se refresca en segundo
+# plano por si desde la última ejecución se instaló algo nuevo.
+_load_index()
+_ensure_index()
+
 
 
 # ----------------------------------------------------------------------------- #
@@ -92,20 +461,38 @@ def _os_start(path: str) -> subprocess.CompletedProcess:
 # 1) Abrir apps y archivos con búsqueda en todo el disco
 # ----------------------------------------------------------------------------- #
 def _resolve_open_target(name: str) -> str:
-    """Resuelve un nombre a: .exe en PATH, .lnk en menú inicio/escritorio,
-    archivo por nombre en disco, o el comando tal cual."""
+    """Resuelve un nombre a la ruta de su ejecutable. Sin pensar: primero el
+    índice (que ya está construido), después la ruta literal, y solo como
+    último recurso la búsqueda lenta por el disco. El resultado se memoriza,
+    así que la segunda vez que pida la misma app es instantáneo."""
     name = name.strip().strip('"').strip("'")
-    lower = name.lower()
+    if not name:
+        return name
+    low = name.lower()
+    memo = _RESOLVED.get(low)
+    if memo:
+        return memo
 
-    # 1. Si es una ruta existente literal
-    if os.path.exists(name):
-        return os.path.abspath(name)
+    # 1) Ruta existente literal: lo más rápido y lo más exacto.
+    try:
+        if os.path.exists(name):
+            return os.path.abspath(name)
+    except Exception:
+        pass
 
-    # 2. Comando directo (npm, calc, etc.)
+    # 2) El índice: una consulta de diccionario, sin subprocesos ni disco.
+    _ensure_index()
+    hit = _index_lookup(name)
+    if hit:
+        _RESOLVED[low] = hit
+        return hit
+
+    # 3) Comando directo (npm, calc, etc.) que no esté en el índice.
     if _command_exists(name) or _command_exists(f"{name}.exe"):
+        _RESOLVED[low] = name
         return name
 
-    # 3. Buscar .lnk/.exe en Start Menu y escritorio
+    # 4) Búsqueda en el menú Inicio (barata: son pocas carpetas).
     paths = [
         Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
         Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
@@ -116,12 +503,14 @@ def _resolve_open_target(name: str) -> str:
             continue
         candidates = list(base.rglob(f"*{name}*.lnk")) + list(base.rglob(f"*{name}*.exe"))
         if candidates:
+            _RESOLVED[low] = str(candidates[0])
             return str(candidates[0])
 
-    # 4. Búsqueda en todo el disco por nombre de archivo (rápida sobre directorios clave)
+    # 5) Barrido del disco: lento, pero solo la primera vez. Se memoriza igual.
     for drive in _fixed_drives():
         hits = _search_disk(drive, name)
         if hits:
+            _RESOLVED[low] = hits[0]
             return hits[0]
 
     return name
@@ -702,7 +1091,7 @@ TOOLS = [
      "risk_level": "low",
      "requires_confirmation": False,
      "parameters": {"query": "str"},
-      "description": "Abre una búsqueda en el navegador (SOLO visual, no devuelve contenido). Si piden buscar, analizar o resumir, usa web_search_results + web_fetch.",
+      "description": "Abre el navegador (SOLO visual, no devuelve contenido). Úsalo únicamente si el señor pide abrir o ver una página. Si pide buscar, investigar o resumir, usa web_search_results + web_fetch y NO abras nada.",
      "label": "Buscando en la web",
      "handler": web_search_handler},
     {"name": "spotify_play",
@@ -822,6 +1211,15 @@ NAV_TOOLS = [
 ]
 
 # Herramientas sensibles: borrar archivos requiere doble confirmación.
+def analizar_archivo_handler(params: dict) -> dict:
+    """Qué es un archivo, de qué va y qué tiene dentro. Sin preguntar a nadie."""
+    ruta = (params.get("path") or params.get("file") or "").strip().strip('"')
+    if not ruta:
+        return {"error": "Falta la ruta del archivo."}
+    import file_analysis as fa
+    return fa.analizar(ruta)
+
+
 SENSITIVE_TOOLS = [
     {"name": "delete_file",
      "risk_level": "sensitive",
@@ -833,11 +1231,59 @@ SENSITIVE_TOOLS = [
      "handler": lambda params: (_delete_file(params), {"deleted": params["path"]})[1]},
 ]
 
+# Lectura y análisis de archivos: rápido y sin riesgo.
+FILE_TOOLS = [
+    {"name": "analizar_archivo",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"path": "str: ruta del archivo"},
+     "description": "Analiza un archivo del equipo: de qué tipo es, cómo está "
+                    "organizado y qué contiene. Vale para PDF, Word, Excel, "
+                    "PowerPoint, código, texto e imágenes. Úsala cuando el "
+                    "señor pase o mencione un archivo.",
+     "label": "Analizando el archivo",
+     "handler": analizar_archivo_handler},
+]
+
+
+# Ficheros que sostienen a JARVIS: borrarlos deja al asistente sin claves, sin
+# memoria o sin codigo. Ni una palabra, ni un modelo, ni arranca. Si de verdad
+# hay que quitarlos, se hace a mano desde el explorador de archivos.
+_NO_BORRABLE = (
+    "keys.env", ".env", "jarvis.db", "error_log.db", "auth.json", "creds.json",
+    "mobile_mcp_token.txt", "profile.json", "protocols.json", "projects.json",
+)
+_NO_BORRABLE_DIRS = ("node_modules", "venv", ".venv", "dist-installer",
+                     "win-unpacked", "resources", "site-packages")
+
+
+def _protegido(path: str) -> str:
+    """Devuelve el motivo si el fichero no se puede tocar, o '' si se puede."""
+    import fnmatch
+    p = os.path.abspath(os.path.expandvars(path))
+    perfil = os.path.abspath(os.path.expanduser("~")).lower()
+    if not p.lower().startswith(perfil):
+        return f"está fuera de su carpeta de usuario ({perfil})"
+    base = os.path.basename(p).lower()
+    for patron in _NO_BORRABLE:
+        if fnmatch.fnmatch(base, patron):
+            return f"es {base}, y sin él JARVIS se queda sin eso"
+    partes = [x.lower() for x in p.split(os.sep)]
+    for d in _NO_BORRABLE_DIRS:
+        if d in partes:
+            return f"está dentro de {d}/, que es parte del programa"
+    return ""
+
 
 def _delete_file(params: dict) -> dict:
     path = os.path.expandvars(params.get("path", ""))
     if not path or not os.path.exists(path):
         raise FileNotFoundError(f"No existe el archivo: {path}")
+    motivo = _protegido(path)
+    if motivo:
+        raise PermissionError(
+            f"No borro ese fichero porque {motivo}. Si de verdad lo quiere "
+            f"quitar, hágalo usted a mano desde el explorador de archivos.")
     os.remove(path)
     return {"deleted": path}
 

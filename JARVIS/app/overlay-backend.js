@@ -1,4 +1,19 @@
-ew-Object -ComObject WScript.Shell;',
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+let lastCpuInfo = null;
+let appsCache = null;
+let appsCacheAt = 0;
+
+function listAppsPs() {
+  const roots = [
+    process.env.APPDATA && path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+    process.env.PROGRAMDATA && path.join(process.env.PROGRAMDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+  ].filter(Boolean);
+  const script = [
+    '$sh = New-Object -ComObject WScript.Shell;',
     '$roots = @(' + roots.map((r) => "'" + r.replace(/'/g, "''") + "'").join(',') + ');',
     'foreach ($root in $roots) {',
     '  Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -Depth 2 -File -ErrorAction SilentlyContinue | ForEach-Object {',
@@ -63,16 +78,37 @@ function listAppsFallback() {
 
 function listApps() {
   if (appsCache && Date.now() - appsCacheAt < 5 * 60 * 1000) return appsCache;
-  let apps = null;
-  try {
-    apps = listAppsPs();
-  } catch {
-    apps = null;
+  let apps = [];
+  if (process.platform === 'win32') {
+    try { apps = listAppsPs(); } catch { apps = listAppsFallback(); }
   }
-  if (!apps) apps = listAppsFallback();
   const home = os.homedir();
-  for (const p of [path.join(home, 'Desktop'), path.join(home, 'Downloads'), path.join(home, 'Pictures')]) {
+  for (const p of [path.join(home, 'Desktop'), path.join(home, 'Downloads'), path.join(home, 'Pictures'), path.join(home, 'Applications')]) {
     if (fs.existsSync(p)) apps.push({ name: path.basename(p), path: p, type: 'folder', kind: 'quick' });
+  }
+  if (process.platform === 'darwin') {
+    for (const dir of ['/Applications', path.join(home, 'Applications')]) {
+      let names = [];
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const item of names) {
+        if (item.name.endsWith('.app')) apps.push({ name: item.name.slice(0, -4), path: path.join(dir, item.name), type: 'app' });
+      }
+    }
+  }
+  if (process.platform === 'linux') {
+    for (const dir of ['/usr/share/applications', path.join(home, '.local', 'share', 'applications')]) {
+      let names = [];
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const item of names) {
+        if (!item.isFile() || !item.name.endsWith('.desktop')) continue;
+        const file = path.join(dir, item.name);
+        let content = '';
+        try { content = fs.readFileSync(file, 'utf8'); } catch { continue; }
+        const name = content.match(/^Name=(.+)$/m)?.[1];
+        const exec = content.match(/^Exec=([^\n%]+)/m)?.[1]?.trim().replace(/^"|"$/g, '');
+        if (name && exec) apps.push({ name, path: exec, target: exec, type: 'app' });
+      }
+    }
   }
   appsCache = apps.slice(0, 60);
   appsCacheAt = Date.now();
@@ -125,9 +161,12 @@ const HOME_DIRS = [
   path.join(os.homedir(), 'Pictures'),
   path.join(os.homedir(), 'Desktop'),
   path.join(os.homedir(), 'Downloads'),
+  path.join(os.homedir(), 'Movies'),
+  path.join(os.homedir(), 'Music'),
 ];
 
 function fixedDrives() {
+  if (process.platform !== 'win32') return [{ name: '/', path: '/', type: 'folder', kind: 'drive' }];
   // Unidades listas (C:, D:…): readdir barato por letra.
   const out = [];
   for (let code = 67; code <= 90; code++) {

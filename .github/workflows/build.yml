@@ -1,0 +1,154 @@
+# Compila JARVIS para Windows, Linux y macOS.
+#
+# Cada SO se compila en su propio runner: un .dmg para macOS no se puede
+# generar desde Windows, y un AppImage necesita el toolchain de Linux. El
+# nombre de la Release trae la arquitectura para no liar los ficheros.
+
+name: build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version a publicar (vacio = la del package.json)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  iconos:
+    name: Iconos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generar iconos de Linux y macOS
+        run: |
+          python -m pip install --quiet pillow
+          node app/scripts/generar-iconos.mjs .
+
+  windows:
+    name: Windows (x64)
+    needs: iconos
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --prefix app
+      - run: npm --prefix app run dist:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-windows
+          path: JARVIS/dist-installer/*.exe
+
+  linux:
+    name: Linux (x64)
+    needs: iconos
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependencias de AppImage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
+      - run: npm ci --prefix app
+      - run: npm --prefix app run dist:linux:todo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-linux
+          path: |
+            JARVIS/dist-installer/*.AppImage
+            JARVIS/dist-installer/*.deb
+            JARVIS/dist-installer/*.rpm
+            JARVIS/dist-installer/*.tar.gz
+
+  macos-arm:
+    name: macOS (Apple Silicon)
+    needs: iconos
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --prefix app
+      - run: npm --prefix app run dist:mac:arm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-macos-arm64
+          path: JARVIS/dist-installer/*.dmg
+
+  macos-intel:
+    name: macOS (Intel)
+    needs: iconos
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --prefix app
+      - run: npm --prefix app run dist:mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-macos-x64
+          path: JARVIS/dist-installer/*.dmg
+
+  release:
+    name: Publicar release
+    needs: [windows, linux, macos-arm, macos-intel]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefactos
+          merge-multiple: true
+      - name: Etiquetar los ficheros
+        run: |
+          cd artefactos
+          for f in *; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *-arm64*|*x64*|*arm*|*intel*) : ;;
+              *arm64*) : ;;
+              *) mv "$f" "$(echo "$f" | sed 's/-\(x64\|arm64\)\./-x64./')" ;;
+            esac
+          done
+          ls -la
+      - name: Crear la release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: JARVIS ${{ inputs.version || github.ref_name }}
+          tag_name: ${{ inputs.version || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artefactos/*.exe
+            artefactos/*.AppImage
+            artefactos/*.deb
+            artefactos/*.rpm
+            artefactos/*.tar.gz
+            artefactos/*.dmg

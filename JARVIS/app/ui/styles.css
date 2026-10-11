@@ -1,55 +1,4 @@
- mult;
-              }
-            } else if (mult.length) {
-              xPos += animatorProps.t.v * mult[0];
-            } else {
-              xPos += animatorProps.t.v * mult;
-            }
-          }
-        }
-      }
-      if (documentData.strokeWidthAnim) {
-        sw = documentData.sw || 0;
-      }
-      if (documentData.strokeColorAnim) {
-        if (documentData.sc) {
-          sc = [documentData.sc[0], documentData.sc[1], documentData.sc[2]];
-        } else {
-          sc = [0, 0, 0];
-        }
-      }
-      if (documentData.fillColorAnim && documentData.fc) {
-        fc = [documentData.fc[0], documentData.fc[1], documentData.fc[2]];
-      }
-      for (j = 0; j < jLen; j += 1) {
-        animatorProps = animators[j].a;
-        if (animatorProps.a.propType) {
-          animatorSelector = animators[j].s;
-          mult = animatorSelector.getMult(letters[i].anIndexes[j], textData.a[j].s.totalChars);
-
-          if (mult.length) {
-            matrixHelper.translate(-animatorProps.a.v[0] * mult[0], -animatorProps.a.v[1] * mult[1], animatorProps.a.v[2] * mult[2]);
-          } else {
-            matrixHelper.translate(-animatorProps.a.v[0] * mult, -animatorProps.a.v[1] * mult, animatorProps.a.v[2] * mult);
-          }
-        }
-      }
-      for (j = 0; j < jLen; j += 1) {
-        animatorProps = animators[j].a;
-        if (animatorProps.s.propType) {
-          animatorSelector = animators[j].s;
-          mult = animatorSelector.getMult(letters[i].anIndexes[j], textData.a[j].s.totalChars);
-          if (mult.length) {
-            matrixHelper.scale(1 + ((animatorProps.s.v[0] - 1) * mult[0]), 1 + ((animatorProps.s.v[1] - 1) * mult[1]), 1);
-          } else {
-            matrixHelper.scale(1 + ((animatorProps.s.v[0] - 1) * mult), 1 + ((animatorProps.s.v[1] - 1) * mult), 1);
-          }
-        }
-      }
-      for (j = 0; j < jLen; j += 1) {
-        animatorProps = animators[j].a;
-        animatorSelector = animators[j].s;
-        mult = animatorSelector.getMult(letters[i].anIndexes[j], textData.a[j].s.totalChar* {
+* {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
@@ -78,46 +27,6 @@ body {
 
 .orb-root canvas {
   display: block;
-}
-
-.camera-panel {
-  position: fixed;
-  right: 24px;
-  bottom: 172px;
-  z-index: 30;
-  width: min(320px, 32vw);
-  padding: 8px;
-  border: 1px solid rgba(93, 166, 204, 0.5);
-  border-radius: 10px;
-  background: rgba(4, 12, 20, 0.82);
-  box-shadow: 0 0 20px rgba(60, 126, 163, 0.3);
-  display: none;
-}
-.camera-panel.visible { display: block; }
-.camera-video {
-  display: block;
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: cover;
-  background: #000;
-  border-radius: 6px;
-  transform: scaleX(-1);
-}
-.camera-overlay {
-  position: absolute;
-  inset: 8px 8px auto;
-  width: calc(100% - 16px);
-  height: auto;
-  aspect-ratio: 4 / 3;
-  pointer-events: none;
-  transform: scaleX(-1);
-}
-.camera-status {
-  padding: 6px 2px 0;
-  text-align: center;
-  color: #8fc9e0;
-  font-size: 10px;
-  letter-spacing: .12em;
 }
 
 /* Film grain overlay */
@@ -236,6 +145,118 @@ body {
   color: #8fc9e0;
 }
 
+/* Árbol de lo que está haciendo JARVIS */
+.think-tree {
+  position: fixed;
+  left: 26px;
+  bottom: 120px;
+  z-index: 25;
+  width: 340px;
+  pointer-events: none;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-shadow: 0 0 7px rgba(93, 166, 204, 0.6);
+}
+.tt-root {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #8fc9e0;
+  font-weight: bold;
+  font-size: 13px;
+  text-transform: uppercase;
+}
+.tt-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4caf50;
+  box-shadow: 0 0 9px currentColor;
+  flex: 0 0 auto;
+}
+.think-tree.think .tt-root {
+  color: #ffc107;
+}
+.think-tree.think .tt-dot {
+  background: #ffc107;
+  animation: ttPulse 0.9s ease-in-out infinite;
+}
+.think-tree.speak .tt-root {
+  color: #5da6cc;
+}
+.think-tree.speak .tt-dot {
+  background: #5da6cc;
+  animation: ttPulse 0.5s ease-in-out infinite;
+}
+.think-tree.busy .tt-root {
+  color: #ff7043;
+}
+.think-tree.busy .tt-dot {
+  background: #ff7043;
+  animation: ttPulse 0.7s ease-in-out infinite;
+}
+.tt-list {
+  list-style: none;
+  margin: 7px 0 0 4px;
+  padding: 0;
+  border-left: 1px solid rgba(93, 166, 204, 0.35);
+}
+.tt-list li {
+  position: relative;
+  padding: 2px 0 2px 15px;
+  color: rgba(143, 201, 224, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tt-list li::before {
+  content: "└";
+  position: absolute;
+  left: 0;
+  color: rgba(93, 166, 204, 0.5);
+}
+.tt-list li.done {
+  color: rgba(76, 175, 80, 0.75);
+  text-decoration: line-through;
+}
+.tt-list li.fail {
+  color: #f44336;
+}
+.tt-list li.now {
+  color: #ffc107;
+}
+@keyframes ttPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.mic-transcript {
+  max-width: 280px;
+  min-height: 18px;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #8fc9e0;
+  text-shadow: 0 0 6px rgba(93, 166, 204, 0.7);
+  text-align: right;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.9;
+}
+.mic-transcript.muted {
+  color: #f44336;
+  text-shadow: 0 0 6px rgba(244, 67, 54, 0.7);
+}
+#micBtn[aria-pressed="false"] {
+  border-color: rgba(244, 67, 54, 0.7);
+  color: #ff8a8a;
+}
+
 .hud-row {
   display: flex;
   gap: 8px;
@@ -267,45 +288,179 @@ body {
   text-shadow: 0 0 8px rgba(255, 60, 30, 0.7);
 }
 
-/* ——— Panel de acción en curso (centro-derecha, esquemático) ——— */
-.action-panel {
-  position: fixed;
-  top: 50%;
-  right: 28px;
-  transform: translateY(-50%);
-  z-index: 20;
-  visibility: hidden;
-  opacity: 0;
-  transition:
-    opacity 0.25s ease,
-    visibility 0.25s ease;
-  gap: 12px;
-  align-items: center;
-  padding: 14px 18px;
-  border: 1px solid rgba(93, 166, 204, 0.5);
+/* Panel de la cámara de gestos. No tenía ningún estilo: por eso el rótulo
+   "SHOW HANDS" salía suelto en mitad del orbe. Va en la esquina inferior
+   izquierda, discreto, y el rótulo solo se pinta si detecta manos. */
+.camera-panel {
+  position: absolute;
+  left: 24px;
+  bottom: 24px;
+  z-index: 5;
+  display: none;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(6, 14, 23, 0.55);
+  border: 1px solid rgba(127, 184, 216, 0.18);
+}
+.camera-panel.visible {
+  display: block;
+}
+/* La caja se agranda a 320x240: a 208x156 la mano sale tan pequeña que
+   MediaPipe a menudo no la encuentra, y por eso en la ventana normal
+   'no detectaba los dedos'. */
+.camera-video,
+.camera-overlay {
+  display: block;
+  width: 320px;
+  height: 240px;
   border-radius: 6px;
-  background: rgba(8, 18, 28, 0.72);
-  backdrop-filter: blur(4px);
-  box-shadow: 0 0 22px rgba(60, 126, 163, 0.22);
-  max-width: 380px;
-  flex-direction: column;
+}
+.camera-overlay {
+  margin-top: -240px;
+}
+.camera-status {
+  margin-top: 6px;
+  min-height: 14px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: rgba(143, 201, 224, 0.75);
+}
+.camera-status:empty {
+  display: none;
+}
+.camera-status.ok {
+  color: #8fe0b0;
+}
+.camera-status.pinch {
+  color: #ffd479;
 }
 
-.action-panel.visible {
-  visibility: visible;
+/* Puntero de la mano en la ventana normal (modo tableta). */
+.hud-hand-cursor {
+  position: fixed;
+  z-index: 30;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border: 2px solid rgba(143, 201, 224, 0.95);
+  border-radius: 50%;
+  box-shadow: 0 0 12px rgba(93, 166, 204, 0.85);
+  pointer-events: none;
+  transition: left 0.06s linear, top 0.06s linear;
+}
+.hud-hand-cursor[hidden] {
+  display: none;
+}
+.hud-hand-cursor.pinching {
+  border-color: #ffd479;
+  box-shadow: 0 0 18px rgba(255, 212, 121, 0.95);
+}
+.hud-hand-cursor.clicking {
+  animation: hudHandClick 0.22s ease-out;
+}
+@keyframes hudHandClick {
+  0% { transform: scale(1); }
+  45% { transform: scale(0.6); }
+  100% { transform: scale(1); }
+}
+.hud-hint {
+  position: fixed;
+  left: 50%;
+  top: 76px;
+  transform: translateX(-50%) translateY(-6px);
+  z-index: 40;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(4, 18, 28, 0.9);
+  border: 1px solid rgba(93, 166, 204, 0.45);
+  color: #b9e6f5;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.hud-hint.show {
   opacity: 1;
-  display: flex;
+  transform: translateX(-50%) translateY(0);
 }
 
-.action-steps {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
+/* ---- Capa de gestos del orbe: plegada por defecto, no molesta ---- */
+.hand-layer {
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  z-index: 20;
+  display: none;
+  padding: 6px;
+  border-radius: 10px;
+  background: rgba(4, 16, 24, 0.72);
+  border: 1px solid rgba(93, 166, 204, 0.35);
+}
+.hand-layer.on {
+  display: block;
+}
+.hand-layer .camera-video,
+.hand-layer .camera-overlay {
+  width: 176px;
+  height: 132px;
+  border-radius: 6px;
+  opacity: 0.92;
+}
+.hand-layer .camera-overlay {
+  margin-top: -132px;
+}
+.orb-gestures-btn {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(93, 166, 204, 0.45);
+  background: rgba(10, 30, 44, 0.8);
+  color: #b9e6f5;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.orb-gestures-btn[aria-pressed="true"] {
+  border-color: #8fc9e0;
+  color: #e6f7ff;
 }
 
-.action-step {
-  display: flex;
-  align-items: center;
-  gap: 6px;
- 
+/* Orbe Ultron (portado de SAGAR-TAMANG/ultron-by-sagar-builds, lib/orbScene.ts)
+   a JavaScript vanilla. Se carga como ES module vía import map (three + addons
+   se sirven desde vendor/, copiados de app/node_modules/three r160). */
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+const HOME_POSITION = new THREE.Vector3(0, 0.5, 4.6);
+const MIN_DISTANCE = 0.6;
+const MAX_DISTANCE = 40;
+
+export function createOrbScene(container, opts = {}) {
+  const width = container.clientWidth || window.innerWidth || 300;
+  const height = container.clientHeight || window.innerHeight || 300;
+  const transparent = opts.transparent === true;
+  const lite = opts.lite === true; // orbe compacto de bajo coste (overlay, flotante)
+
+  // ——— SCENE ———
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 500);
+  camera.position.copy(HOME_POSITION);
+
+  const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: transparent,
+    premultipliedAlpha: false,
+  });
+  renderer.setSize(width, height);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, lite ? 1.25 : 1.5));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.9;
+  if (t

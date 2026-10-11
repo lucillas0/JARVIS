@@ -43,18 +43,27 @@ def _campus_creds():
 def campus_open_handler(params: dict) -> dict:
     """Abre el campus en el navegador y mete el login por UI.
 
-    Ya logueado → solo abre. Devuelve {url, logged_in}.
+    Ya logueado -> solo abre. Devuelve {url, logged_in}.
+
+    Con {"login": False} solo abre la página y devuelve enseguida: la
+    automatización de ventanas tarda seis segundos y el señor lo único que
+    quiere es ver la página. El login se procura aparte, en segundo plano.
     """
     import webbrowser
     base = _campus_base()
-    url = base + "/login/index.php"
+    solo_abrir = not params.get("login", True)
+    url = (base + "/my/courses.php" if solo_abrir
+           else base + "/login/index.php")
+    try:
+        webbrowser.open(url, new=2)
+    except Exception as e:
+        raise RuntimeError(f"No pude abrir el navegador: {e}")
+    if solo_abrir:
+        return {"url": url, "logged_in": False,
+                "note": "Entro en su sesión."}
     try:
         from pywinauto import Desktop
     except Exception:
-        try:
-            webbrowser.open(url, new=2)
-        except Exception as e:
-            raise RuntimeError(f"No pude abrir el navegador: {e}")
         return {"url": url, "logged_in": False,
                 "note": "Abierto; mete el login a mano (sin UI automation aquí)."}
     wins = []
@@ -300,6 +309,59 @@ def campus_open_handler(params: dict) -> dict:
     return {"url": url, "logged_in": logged}
 
 
+def campus_courses_handler(params: dict) -> dict:
+    """Índice completo de "Mis cursos" (tareas, notas, avisos, secciones)."""
+    from integrations import campus_index as ix
+    return ix.resumen()
+
+
+def campus_search_handler(params: dict) -> dict:
+    """Busca una palabra en todo el campus: cursos, tareas, notas, avisos."""
+    from integrations import campus_index as ix
+    q = (params.get("query") or params.get("q") or "").strip()
+    if not q:
+        return {"error": "Falta la palabra a buscar."}
+    return {"query": q, "resultados": ix.buscar(q, limite=12)}
+
+
+def campus_course_handler(params: dict) -> dict:
+    """Todo lo indexado de un curso concreto."""
+    from integrations import campus_index as ix
+    nombre = (params.get("course") or params.get("nombre") or "").strip()
+    if not nombre:
+        return {"error": "Falta el nombre del curso."}
+    return {"curso": nombre, "detalle": ix.detalle(nombre)}
+
+
+def campus_refresh_handler(params: dict) -> dict:
+    """Vuelve a leer el Moodle (tareas nuevas, notas nuevas)."""
+    from integrations import campus_index as ix
+    ix.construir(forzar=True)
+    return {"ok": True, "detalle": ix.resumen()}
+
+
+def campus_notas_handler(params: dict) -> dict:
+    """Los apuntes de un tema: lee el contenido de los cursos y devuelve el pasaje."""
+    from integrations import campus_apuntes as ap
+    q = (params.get("topic") or params.get("query") or params.get("tema")
+         or "").strip()
+    if not q:
+        e = ap.estado()
+        return {"error": "Falta el tema.", "indexado": e}
+    hallados = ap.buscar(q, limite=6)
+    return {"tema": q, "encontrado": len(hallados),
+            "resultados": [{"curso": h["curso"], "actividad": h["actividad"],
+                            "url": h["url"], "texto": h["pasaje"]}
+                           for h in hallados]}
+
+
+def campus_indexar_handler(params: dict) -> dict:
+    """Vuelve a leer los apuntes de los cursos (hay tareas nuevas)."""
+    from integrations import campus_apuntes as ap
+    ap.construir(forzar=True)
+    return {"ok": True, "estado": ap.estado()}
+
+
 CAMPUS_TOOLS = [
     {"name": "campus_deadlines",
      "risk_level": "low",
@@ -322,4 +384,46 @@ CAMPUS_TOOLS = [
      "description": "Abre o desbloquea la página del ciclo (campus AVIESAU) en el navegador y mete el login (usuario y contraseña ya configurados).",
      "label": "Abriendo el campus",
      "handler": campus_open_handler},
+    {"name": "campus_courses",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Lista sus cursos del Moodle con sus actividades, notas y avisos. Úsala para saber qué materias tiene y qué hay en cada una.",
+     "label": "Abriendo el índice de cursos",
+     "handler": campus_courses_handler},
+    {"name": "campus_search",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"query": "str: palabra o frase a buscar en el campus"},
+     "description": "Busca una palabra en todo el campus: cursos, actividades, notas y avisos. Útil para encontrar una tarea concreta.",
+     "label": "Buscando en el campus",
+     "handler": campus_search_handler},
+    {"name": "campus_course",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"course": "str: nombre (o parte) del curso"},
+     "description": "Todo lo indexado de un curso: secciones, actividades, notas y avisos.",
+     "label": "Leyendo un curso",
+     "handler": campus_course_handler},
+    {"name": "campus_refresh",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Vuelve a leer el Moodle para recoger tareas o notas nuevas. Úsala si el señor acaba de subir algo.",
+     "label": "Actualizando el campus",
+     "handler": campus_refresh_handler},
+    {"name": "campus_notas",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {"topic": "str: el tema que se busca, p.ej. 'configuracion dhcp'"},
+     "description": "Busca en el contenido de los apuntes de sus cursos y devuelve el pasaje literal, con su curso y su dirección. Úsala cuando pregunte por un tema concreto de una asignatura.",
+     "label": "Buscando en los apuntes",
+     "handler": campus_notas_handler},
+    {"name": "campus_indexar",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Vuelve a leer el contenido de los cursos para tener al día los apuntes. Úsala si el señor acaba de subir material nuevo.",
+     "label": "Leyendo los apuntes",
+     "handler": campus_indexar_handler},
 ]

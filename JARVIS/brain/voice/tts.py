@@ -22,6 +22,7 @@ log = logging.getLogger("voice.tts")
 _MODELS_DIR = Config.BRAIN_DIR / "models" / "piper"
 _lock = threading.Lock()
 _voice = None
+_voice_sample_rate = 22050
 
 
 def _voice_name() -> str:
@@ -38,13 +39,12 @@ def ensure_voice() -> str:
         return str(onnx)
 
     _MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    parts = name.rsplit("_", 2)  # ej. es_ES / davefx / medium
-    if len(parts) == 3:
-        lang, speaker, qual = parts
+    # Nombre habitual: es_ES-davefx-medium (también se aceptan guiones bajos).
+    match = re.fullmatch(r"([a-z]{2}_[A-Z]{2})[-_]([a-zA-Z0-9_-]+)[-_](low|medium|high)", name)
+    if match:
+        lang, speaker, qual = match.groups()
     else:
-        # fallback: asumir estructura lang-speaker-medium
-        x = name.split("-")
-        lang, speaker, qual = x[0] if len(x) > 0 else "es_ES", x[1] if len(x) > 1 else "davefx", "medium"
+        raise RuntimeError(f"Nombre de voz Piper no válido: {name}")
     base = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/{lang}/{speaker}/{qual}"
     urls = {
         onnx: f"{base}/{name}.onnx",
@@ -55,12 +55,50 @@ def ensure_voice() -> str:
         if target.exists():
             continue
         log.info("Descargando voz Piper %s desde HuggingFace…", name)
+        tmp = target.with_name(target.name + ".download")
         try:
-            urllib.request.urlretrieve(url, target)
+            urllib.request.urlretrieve(url, tmp)
+            os.replace(tmp, target)
         except Exception as e:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
             log.warning("No pude descargar %s: %s", name, e)
-            raise RuntimeError(f"No pude descargar la voz {name}. Revisa tu conexión.")
+            raise RuntimeError(f"No pude descargar la voz {name}. Revisa tu conexión.") from e
     return str(onnx)
+
+
+def _load_voice_locked():
+    """Carga Piper una sola vez; quien llama debe mantener _lock."""
+    global _voice, _voice_sample_rate
+    if _voice is None:
+        onnx = ensure_voice()
+        from piper import PiperVoice
+        _voice = PiperVoice.load(onnx)
+        config_rate = getattr(getattr(_voice, "config", None), "sample_rate", None)
+        if config_rate:
+            _voice_sample_rate = int(config_rate)
+        else:
+            try:
+                import json
+                with open(onnx + ".json", "r", encoding="utf-8") as f:
+                    _voice_sample_rate = int(json.load(f).get("audio", {}).get("sample_rate", 22050))
+            except Exception:
+                _voice_sample_rate = 22050
+    return _voice, _voice_sample_rate
+
+
+def preload() -> bool:
+    """Carga el modelo local en segundo plano al iniciar, sin sintetizar audio."""
+    try:
+        with _lock:
+            _load_voice_locked()
+        log.info("Piper listo (modelo cargado, %s Hz).", _voice_sample_rate)
+        return True
+    except Exception as e:
+        log.warning("No pude precargar Piper; se intentará al hablar: %s", e)
+        return False
 
 
 # Rango amplio de emoji/símbolos que Piper deletrearía en voz alta.
@@ -103,43 +141,54 @@ def clean_for_speech(text: str) -> str:
     return s.strip()
 
 
-def synthesize(text: str) -> np.ndarray:
-    """Texto → audio float32 a 22050 Hz (limpio de Markdown para hablar)."""
-    global _voice
+def _synthesize_with_rate(text: str) -> tuple[np.ndarray, int]:
+    """Texto → audio float32 y frecuencia nativa declarada por el modelo."""
     try:
         text = clean_for_speech(text)
-        onnx = ensure_voice()
-        import numpy as _np
         if not text:
-            return _np.zeros(0, dtype=_np.float32)
+            return np.zeros(0, dtype=np.float32), _voice_sample_rate
         with _lock:
-            if _voice is None:
-                from piper import PiperVoice
-                _voice = PiperVoice.load(onnx)
-            chunks = list(_voice.synthesize(text))
+            voice, sample_rate = _load_voice_locked()
+            chunks = list(voice.synthesize(text))
         if not chunks:
             raise RuntimeError("Piper no generó audio.")
 
-        # Piper entrega normalmente un fragmento por frase. Una pausa breve
-        # ayuda a separar ideas y hace más inteligible la locución en español.
-        silence = _np.zeros(int(22050 * 0.12), dtype=_np.int16)
-        pieces = []
-        for i, chunk in enumerate(chunks):
-            piece = _np.asarray(chunk.audio_int16_array, dtype=_np.int16).reshape(-1)
-            if piece.size:
-                pieces.append(piece)
-                if i < len(chunks) - 1:
-                    pieces.append(silence)
-        if not pieces:
-            raise RuntimeError("Piper generó audio vacío.")
-        samples = _np.concatenate(pieces).astype(_np.float32) / 32768.0
-        peak = float(_np.max(_np.abs(samples)))
-        if peak > 1e-5:
-            samples *= min(1.12, 0.88 / peak)
-        return _np.clip(samples, -0.98, 0.98)
+        parts = []
+        for chunk in chunks:
+            # piper-tts expone audio_int16_bytes; algunas versiones/forks
+            # ofrecen también audio_int16_array. Admitimos ambas APIs.
+            samples = getattr(chunk, "audio_int16_array", None)
+            if samples is not None:
+                parts.append(np.asarray(samples, dtype=np.int16).reshape(-1))
+            else:
+                raw = getattr(chunk, "audio_int16_bytes", None)
+                if raw is None:
+                    raise RuntimeError("Piper devolvió un fragmento sin audio PCM.")
+                parts.append(np.frombuffer(raw, dtype=np.int16))
+            sample_rate = int(getattr(chunk, "sample_rate", sample_rate) or sample_rate)
+        samples = np.concatenate(parts).astype(np.int16, copy=False)
+        return samples.astype(np.float32) / 32768.0, sample_rate
     except Exception as e:
         log.exception("Piper falló: %s", e)
         raise
+
+
+def synthesize(text: str) -> np.ndarray:
+    """Texto → audio float32 a la frecuencia nativa del modelo (normalmente 22050 Hz)."""
+    return _synthesize_with_rate(text)[0]
+
+
+def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    """Remuestrea linealmente mono; evita reproducir 22050 Hz como si fueran 16 kHz."""
+    if source_rate == target_rate or not len(audio):
+        return audio.astype(np.float32, copy=False)
+    count = max(1, int(round(len(audio) * target_rate / source_rate)))
+    positions = np.arange(count, dtype=np.float32) * (source_rate / target_rate)
+    positions = np.minimum(positions, len(audio) - 1)
+    left = positions.astype(np.intp)
+    right = np.minimum(left + 1, len(audio) - 1)
+    fraction = positions - left
+    return (audio[left] * (1.0 - fraction) + audio[right] * fraction).astype(np.float32)
 
 
 def speak(text: str, engine) -> bool:
@@ -148,20 +197,18 @@ def speak(text: str, engine) -> bool:
     if not text:
         return False
     try:
-        audio = synthesize(text)
+        audio, source_rate = _synthesize_with_rate(text)
         if not len(audio):
             return False
-        # El modelo es 22.05 kHz pero AudioEngine reproduce a 16 kHz. Si se
-        # etiqueta como 16 kHz sin convertir, la voz sale lenta y grave.
-        from voice.audio import RATE, _resample_linear
-        sample_rate = int(getattr(getattr(_voice, "config", None), "sample_rate", 22050))
-        if sample_rate != RATE:
-            audio = _resample_linear(audio, sample_rate, RATE)
-        # Sin cambios grandes de pitch/tempo: la configuración antigua tenía
-        # 1.12 y hacía que el habla sonara demasiado acelerada.
-        speak_rate = min(1.04, max(0.96, float(getattr(Config, "TTS_SPEED", 1.0))))
+        target_rate = int(getattr(engine, "playback_rate", 16000) or 16000)
+        audio = _resample(audio, source_rate, target_rate)
+        try:
+            speak_rate = float(getattr(Config, "TTS_SPEED", 1.0))
+        except (TypeError, ValueError):
+            speak_rate = 1.0
+        speak_rate = min(1.4, max(0.8, speak_rate))
         if abs(speak_rate - 1.0) > 0.01:
-            idx = np.minimum((np.arange(0, len(audio), speak_rate)).astype(int), len(audio) - 1)
+            idx = np.arange(0, len(audio), speak_rate).astype(np.intp)
             audio = audio[idx]
         engine.play_data(audio)
         return True

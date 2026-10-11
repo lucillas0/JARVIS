@@ -16,7 +16,10 @@ OC_CMD = r"C:\Users\Lucas\AppData\Roaming\npm\opencode.cmd"
 OC_MODEL = "opencode/muse-spark-1.3-contributor-free"
 OC_TIMEOUT = 480
 PROTECT = ("keys.env", ".env", ".db", ".db-wal", ".db-shm", "auth.json",
-           "creds.json")
+           "creds.json", "opencode_tools.py")
+# Directorios que OpenCode no pisa jamás (dependencias, venvs, instaladores).
+SKIP_DIRS = ("node_modules", "venv", ".venv", "dist-installer", "win-unpacked",
+             "__pycache__", ".git", "qdrant", "wa-session")
 
 
 def ensure_opencode(timeout: int = 180) -> bool:
@@ -49,15 +52,18 @@ ERROR:
 {context}
 
 REGLAS DURAS:
-1. Solo puedes editar ficheros .py/.js/.html/.css dentro del repo. PROHIBIDO tocar keys.env,
-   .env, *.db, credenciales, tokens o borrar nada.
-2. Cambios mínimos que eliminen la causa raíz (no parches cosméticos).
-3. No añadas dependencias nuevas. No cambies firmas públicas.
-4. Si falta una capacidad (el error dice "no tengo herramienta" o similar),
+1. Solo puedes editar ficheros .py/.js/.html/.css del CÓDIGO FUENTE (brain/,
+   app/ui/, app/splash/, app/setup-wizard/). PROHIBIDO tocar keys.env,
+   .env, *.db, credenciales, tokens, opencode_tools.py, o borrar nada.
+2. PROHIBIDO entrar en node_modules, venv, dist-installer, win-unpacked,
+   __pycache__, .git, qdrant o wa-session (ni leer ni escribir).
+3. Cambios mínimos que eliminen la causa raíz (no parches cosméticos).
+4. No añadas dependencias nuevas. No cambies firmas públicas.
+5. Si falta una capacidad (el error dice "no tengo herramienta" o similar),
    crea la herramienta en brain/tools/custom_tools.py como entrada CUSTOM_TOOLS
    con handler + risk_level + description, y avisa que hay que recargar.
-5. Al terminar, resume en 3 líneas: causa, ficheros tocados, verificación.
-6. Si no puedes repararlo con seguridad, di "NO-FIX: <motivo>" y no toques nada.
+6. Al terminar, resume en 3 líneas: causa, ficheros tocados, verificación.
+7. Si no puedes repararlo con seguridad, di "NO-FIX: <motivo>" y no toques nada.
 """
 
 BUILD_TOOL_PROMPT = """Eres el ingeniero del asistente JARVIS (repo Python en {workdir}).
@@ -103,7 +109,7 @@ def _keys_env() -> dict:
 def _snapshot(workdir: str) -> dict:
     snap = {}
     for dp, _, fns in os.walk(workdir):
-        if "__pycache__" in dp or ".git" in dp:
+        if any(s in dp.replace("\\", "/") for s in SKIP_DIRS):
             continue
         for fn in fns:
             if fn.endswith((".py", ".js", ".ts", ".json", ".html", ".css", ".md", ".txt", ".cjs")):
@@ -115,6 +121,23 @@ def _snapshot(workdir: str) -> dict:
                 except Exception:
                     pass
     return snap
+
+
+def _restore(snapshot: dict) -> None:
+    """Rollback: devuelve los ficheros a su estado previo."""
+    for p, h in snapshot.items():
+        try:
+            with open(p, "rb") as f:
+                import hashlib
+                if hashlib.sha256(f.read()).hexdigest() == h:
+                    continue
+            bak = p + ".ocbak"
+            if os.path.isfile(bak):
+                import shutil
+                shutil.copy2(bak, p)
+                log.warning("opencode rollback: %s", p)
+        except Exception as e:
+            log.debug("rollback %s: %s", p, e)
 
 
 def _brain_dir() -> str:
@@ -130,7 +153,18 @@ def opencode_fix(task: str, timeout: int = OC_TIMEOUT, workdir: str = "") -> dic
     workdir = workdir or _brain_dir()
     if not ensure_opencode():
         return {"ok": False, "error": "OpenCode CLI no instalado (auto-instalación falló)."}
+    # Jaula: el trabajo siempre ocurre dentro de workdir; fuera de estos
+    # directorios OpenCode no escribe aunque lo intente (rollback + veto).
     before = _snapshot(workdir)
+    try:
+        import shutil as _sh
+        for p in before:
+            try:
+                _sh.copy2(p, p + ".ocbak")
+            except Exception:
+                pass
+    except Exception:
+        pass
     full_task = task  # ya viene con rol+reglas desde selfheal
     try:
         r = subprocess.run(
@@ -149,8 +183,12 @@ def opencode_fix(task: str, timeout: int = OC_TIMEOUT, workdir: str = "") -> dic
     after = _snapshot(workdir)
     changed = [p for p in after if after.get(p) != before.get(p)]
     changed = [p for p in changed
-               if not any(x in p.replace("\\", "/") for x in PROTECT)]
+               if not any(x in p.replace("\\", "/") for x in PROTECT)
+               and not any(s in p.replace("\\", "/") for s in SKIP_DIRS)]
+    # Limpieza de copias de seguridad de runs previos (no son cambios).
+    changed = [p for p in changed if not p.endswith(".ocbak")]
     if not changed:
+        _restore(before)
         return {"ok": False,
                 "error": "OpenCode no modificó ningún fichero."}
     # verifica sintaxis de lo tocado (.py y .js)
@@ -170,8 +208,17 @@ def opencode_fix(task: str, timeout: int = OC_TIMEOUT, workdir: str = "") -> dic
         except Exception as e:
             bad.append((p, str(e)[:150]))
     if bad:
+        _restore(before)
         return {"ok": False,
-                "error": "Sintaxis rota en: " + ", ".join(f"{p}: {e}" for p, e in bad)}
+                "error": "Sintaxis rota en: " + ", ".join(f"{p}: {e}" for p, e in bad)
+                + " (revertido)"}
+    # Limpia los .ocbak de este run (ya verificados).
+    for p in before:
+        try:
+            if os.path.isfile(p + ".ocbak"):
+                os.remove(p + ".ocbak")
+        except Exception:
+            pass
     return {"ok": True, "output": out[-800:], "files": changed}
 
 

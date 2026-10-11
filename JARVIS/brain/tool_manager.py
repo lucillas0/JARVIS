@@ -11,6 +11,19 @@ from risk_engine import RiskEngine
 
 log = logging.getLogger("tool_manager")
 
+# Herramientas que se describen siempre, las de un solo uso, y el conjunto de
+# nombres que se usan como base para la eleccion por relevancia.
+_TRABAJO_UNA_VEZ: set = set()
+
+
+def _norm_tokens(texto: str) -> list:
+    """Palabras de un texto, sin tildes, para ver si encaja con la peticion."""
+    import re
+    import unicodedata as _ud
+    t = _ud.normalize("NFKD", (texto or "").lower())
+    t = "".join(c for c in t if not _ud.combining(c))
+    return [p for p in re.findall(r"[a-z0-9]{3,}", t)]
+
 
 class ToolManager:
     def __init__(self, risk_engine: RiskEngine):
@@ -25,7 +38,7 @@ class ToolManager:
 
     def _register_defaults(self) -> None:
         try:
-            from tools import system_tools, web_tools, virtualbox_tools, campus_tools, raspberry_tools, code_tools, syshealth_tools, auto_tools, git_tools, translate_tools, opencode_tools
+            from tools import system_tools, web_tools, virtualbox_tools, campus_tools, raspberry_tools, code_tools, syshealth_tools, auto_tools, git_tools, translate_tools, opencode_tools, diag_tools, install_tools, github_tools, mobile_tools, camera_tools
             all_tools = (system_tools.TOOLS + system_tools.WINDOW_TOOLS +
                          system_tools.MEDIA_TOOLS + system_tools.NAV_TOOLS +
                          virtualbox_tools.VB_TOOLS +
@@ -37,7 +50,13 @@ class ToolManager:
                          git_tools.GIT_TOOLS +
                          translate_tools.TRANSLATE_TOOLS +
                          opencode_tools.OCODE_TOOLS +
+                         diag_tools.DIAG_TOOLS +
+                         install_tools.INSTALL_TOOLS +
+                         github_tools.TOOLS +
+                         mobile_tools.MOBILE_TOOLS +
+                         camera_tools.CAMERA_TOOLS +
                          system_tools.danger_tools() +
+                         system_tools.FILE_TOOLS +
                          web_tools.TOOLS)
             try:
                 from tools import custom_tools as _custom
@@ -71,18 +90,79 @@ class ToolManager:
             return 0
 
     def list_tools(self) -> list[dict]:
-        return [{"name": t["name"], "risk_level": t["risk_level"],
-                 "requires_confirmation": t["requires_confirmation"],
-                 "parameters": t["parameters"]}
+        return [{"name": t["name"], "risk_level": t.get("risk_level", "low"),
+                 "requires_confirmation": bool(t.get("requires_confirmation")),
+                 "parameters": t.get("parameters") or {}}
                 for t in self._registry.values()]
 
-    def describe_for_prompt(self) -> str:
-        lines = []
+    def _herramientas_de_una_vez(self) -> set:
+        global _TRABAJO_UNA_VEZ
+        if _TRABAJO_UNA_VEZ:
+            return _TRABAJO_UNA_VEZ
+        base = {"open_app", "open_file", "web_search", "web_fetch", "say",
+                "analizar_archivo", "campus_courses", "campus_notas",
+                "system_diagnose", "vbox_list", "memory_search"}
+        got = set()
         for t in self._registry.values():
-            params = ", ".join(f"{k}: {v}" for k, v in t["parameters"].items())
-            lines.append(f"- {t['name']}({params}) [riesgo: {t['risk_level']}] :: "
-                         f"{t.get('description', '')}")
-        return "\n".join(lines)
+            d = ((t.get("description") or "") + " " + t.get("name", "")).lower()
+            if "solo" in d and "una" in d:
+                got.add(t.get("name", ""))
+        _TRABAJO_UNA_VEZ = got | base
+        return _TRABAJO_UNA_VEZ
+
+    def describe_for_prompt(self, consulta: str = "") -> str:
+        """Las herramientas, pero solo las que el señor puede necesitar.
+
+        Antes iban las 108 enteras, unas 3.700 palabras, siempre. Con eso el
+        prompt se iba de 8.000 tokens y Groq lo rechazaba entero: la petición
+        fallaba y la respuesta llegaba tarde y de otro proveedor, que es
+        justamente lo que hacia que perdiera el hilo.
+
+        Ahora van siempre los nombres (baratos) y la descripción completa
+        solo de las que de verdad encajan con lo que acaba de decir.
+        """
+        registro = list(self._registry.values())
+        if not registro:
+            return "sin herramientas"
+        q = _norm_tokens(consulta)
+        una_vez = self._herramientas_de_una_vez()
+        relevantes, resto = set(), []
+        for t in registro:
+            nombre = t.get("name", "")
+            # Sin consulta solo van las de un uso; con consulta, todas y el
+            # filtro de relevancia se hace despues.
+            if nombre in una_vez:
+                relevantes.add(nombre)
+            else:
+                resto.append(t)
+        if q:
+            tokens_q = set(q)
+            for t in resto:
+                texto = _norm_tokens(f"{t.get('name','')} "
+                                     f"{t.get('description','')} "
+                                     f"{' '.join((t.get('parameters') or {}).keys())}")
+                if tokens_q and len(tokens_q & set(texto)) >= 1:
+                    relevantes.add(t.get("name", ""))
+        lineas, otros = [], []
+        for t in registro:
+            nombre = t.get("name", "")
+            desc = (t.get("description") or "").strip()
+            if not desc:
+                continue
+            if nombre in relevantes:
+                p = ", ".join(f"{k}: {v}"
+                              for k, v in (t.get("parameters") or {}).items())
+                riesgo = t.get("risk_level", "low")
+                lineas.append(f"- {nombre}({p}) [riesgo: {riesgo}] :: {desc}")
+            else:
+                # Las que no encajan van solo con el nombre. Con la descripción
+                # entera sumaban casi 8.000 caracteres y el proveedor rechazaba
+                # la petición entera.
+                otros.append(nombre)
+        if otros:
+            lineas.append("Otras herramientas (solo si de verdad hacen falta): "
+                          + ", ".join(otros))
+        return "\n".join(lineas)
 
     def execute_now_safe(self, name: str, params: dict) -> dict:
         """Versión bloqueante para lanzar desde hilos sin event loop activo."""

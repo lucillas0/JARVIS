@@ -13,3 +13,7 @@ __pycache__/
 *.pyc
 
 node_modules/
+
+# Carpetas de trabajo local, no forman parte del proyecto
+_respaldo-ficheros-buenos/
+_herramientas/

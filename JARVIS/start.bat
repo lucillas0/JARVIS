@@ -1,7 +1,7 @@
 @echo off
 REM JARVIS - Arranque completo (app + brain)
 setlocal
-cd /d "%~dp0.."
+cd /d "%~dp0"
 
 echo ============================================
 echo   JARVIS - Asistente personal de escritorio

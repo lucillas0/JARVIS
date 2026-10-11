@@ -1,521 +1,342 @@
-# 🤖 JARVIS
+# JARVIS
 
-> **Asistente personal de escritorio para Windows con IA, voz y una interfaz holográfica inspirada en J.A.R.V.I.S. de Iron Man.**
+**Asistente personal con IA, voz y una interfaz holográfica.** Funciona como
+aplicación de escritorio en Windows, Linux y macOS, y como servidor en Docker,
+NAS o cualquier servidor con Python 3.10.
 
-JARVIS es un asistente personal de escritorio diseñado para ejecutarse en un PC con Windows. El proyecto combina una interfaz desarrollada con **Electron** con un cerebro de IA desarrollado en **Python + FastAPI**, comunicándose mediante **WebSocket local**.
-
-El objetivo es evolucionar desde un asistente conversacional hasta un asistente capaz de interactuar con el sistema operativo, analizar la pantalla, controlar aplicaciones y ofrecer interacción mediante voz.
-
----
-
-## ✨ Características
-
-### 🧠 Inteligencia artificial
-
-Actualmente el MVP utiliza **Groq** como proveedor de IA.
-
-El sistema está preparado para evolucionar hacia un sistema de múltiples proveedores:
-
-- **Groq** → respuestas rápidas y conversación.
-- **Gemini** → tareas complejas y análisis de visión.
-- **OpenRouter** → proveedor de respaldo.
-- **Ollama** → alternativa local para funcionamiento sin conexión.
-
-El MVP actual utiliza el modelo:
-
-```text
-llama-3.3-70b-versatile
-```
-
-La implementación actual del brain utiliza FastAPI, WebSocket, `groq` y `python-dotenv`.
+> JARVIS combina una interfaz de escritorio construida con **Electron** y un
+> cerebro de IA escrito en **Python + FastAPI**. Ambos se comunican por un
+> WebSocket local. El escritorio es opcional: el cerebro funciona solo, y en
+> servidor es lo que se despliega.
 
 ---
 
-## 🖥️ Interfaz
+## Índice
 
-La aplicación utiliza **Electron** para proporcionar una aplicación de escritorio nativa.
-
-La interfaz está diseñada siguiendo una estética:
-
-- 🔵 Azul/cian.
-- 🤖 Inspirada en JARVIS.
-- 🌐 Interfaz tipo HUD.
-- 🔮 Orbe holográfico.
-- 📊 Panel de información lateral.
-- 🖥️ Overlay de escritorio.
-
-La especificación del proyecto contempla un orbe holográfico basado en Three.js, una línea de audio reactiva y un panel lateral para mostrar las acciones que está realizando JARVIS.
-
----
-
-## 💬 Conversación
-
-El MVP permite mantener una conversación con JARVIS mediante texto.
-
-El brain recibe los mensajes mediante un WebSocket:
-
-```text
-Electron → WebSocket → FastAPI → Groq
-                                      ↓
-Electron ← WebSocket ← respuesta
-```
-
-El contexto actual utiliza un prompt del sistema junto con el historial de conversación disponible.
-
-JARVIS responde principalmente en español y mantiene una personalidad propia, con un tono inspirado en el personaje original.
+- [Qué es](#qué-es)
+- [Cómo funciona](#cómo-funciona)
+- [Instalación](#instalación)
+- [El modo servidor](#el-modo-servidor)
+- [La interfaz](#la-interfaz)
+- [La isla de Coucou](#la-isla-de-coucou)
+- [Voz](#voz)
+- [Integraciones](#integraciones)
+- [Configuración](#configuración)
+- [Estructura del proyecto](#estructura-del-proyecto)
+- [Compilación](#compilación)
+- [Desarrollo](#desarrollo)
+- [Licencia](#licencia)
 
 ---
 
-## 🗄️ Memoria
+## Qué es
 
-El proyecto utiliza **SQLite** para almacenar el historial de conversaciones.
+JARVIS es un asistente que vive en tu equipo. Escucha, piensa, responde hablando
+y puede usar herramientas para actuar: leer ficheros, buscar en la web, mirar la
+pantalla, controlar ventanas o hablarte por Discord.
 
-La aplicación Electron crea una base de datos `jarvis.db` dentro del directorio de datos del usuario y mantiene una tabla de mensajes con:
+Tres cosas lo definen:
 
-- ID.
-- Rol (`user`, `assistant`, `system`).
-- Contenido.
-- Fecha de creación.
-
-
-La especificación futura contempla añadir memoria semántica mediante **Qdrant** cuando el historial sea suficientemente grande.
-
----
-
-## 🔐 API Keys
-
-JARVIS utiliza variables de entorno para las claves de los diferentes servicios.
-
-Entre las variables previstas se encuentran:
-
-```env
-GROQ_API_KEY=
-GEMINI_API_KEY=
-OPENROUTER_API_KEY=
-WEATHER_API_KEY=
-```
-
-También se contemplan futuras integraciones con:
-
-```env
-GOOGLE_CALENDAR_CREDENTIALS_PATH=
-SPOTIFY_CLIENT_ID=
-SPOTIFY_CLIENT_SECRET=
-OLLAMA_HOST=http://localhost:11434
-```
-
-Las claves no deben almacenarse directamente en el código ni subirse a GitHub.
-
-El `.gitignore` del proyecto excluye `.env`, entornos virtuales, ejecutables, modelos ONNX y otros archivos generados.
+- **Siempre local.** El cerebro corre en tu equipo. Solo salen los datos de
+  la pregunta que le haces al proveedor de IA que configures.
+- **Dos piezas separadas.** La interfaz y el cerebro se hablan por un socket.
+  Puedes usar el cerebro sin escritorio, y el escritorio sin voz.
+- **Una interfaz que se aparta.** La isla de la barra superior se pliega sola
+  cuando no la usas y aparece cuando hay algo que contar.
 
 ---
 
-## ⚙️ Arquitectura
+## Cómo funciona
 
-El proyecto está dividido principalmente en dos partes:
-
-```text
-JARVIS/
-│
-├── app/                  # Aplicación/interfaz Electron
-│
-├── codigo-mvp/           # Implementación inicial del proyecto
-│   └── brain/            # Cerebro de IA en Python
-│       ├── main.py
-│       ├── requirements.txt
-│       └── .env.example
-│
-├── JARVIS/               # Componentes principales del proyecto
-│
-├── camara-probe/         # Pruebas relacionadas con cámara
-│
-├── .opencode/            # Skills/configuración para desarrollo
-│
-├── JARVIS-SPEC.md        # Especificación completa
-├── main.js               # Proceso principal de Electron
-├── instalar-jarvis.cmd   # Script auxiliar de instalación
-└── .gitignore
+```
+┌──────────────────────────────────────────────┐
+│  Interfaz (Electron)                         │
+│    isla · HUD · chat · overlay Win+J         │
+└───────────────────┬──────────────────────────┘
+                    │  ws://127.0.0.1:8000/ws
+┌───────────────────▼──────────────────────────┐
+│  Cerebro (Python + FastAPI)                  │
+│    router de modelos · memoria · herramientas │
+│    voz · Discord · web · sistema              │
+└──────────────────────────────────────────────┘
 ```
 
-La especificación técnica define como arquitectura objetivo:
-
-```text
-Electron
-   │
-   │ WebSocket
-   ▼
-Python / FastAPI
-   │
-   ├── Model Router
-   ├── Voice
-   ├── Vision
-   ├── Tools
-   ├── Memory
-   └── Integrations
-```
-
+El **cerebro** decide qué modelo usar para cada consulta (Groq, Gemini u
+OpenRouter), recuerda lo que importa, expone unas cien herramientas y habla.
+La **interfaz** es una capa fina: dibuja, escucha al usuario y pinta lo que el
+cerebro dice. Si el escritorio se cierra, el cerebro sigue funcionando y
+responde por Discord o por HTTP.
 
 ---
 
-## 🚀 Instalación
+## Instalación
 
-### Requisitos
+### Windows
 
-Actualmente el proyecto está orientado principalmente a **Windows**.
+1. Descarga `JARVIS-<versión>-win-x64.exe` de la [página de
+   releases](https://github.com/lucillas0/JARVIS/releases).
+2. Ejecútalo. Pide al menos una clave de IA.
+3. Listo.
 
-Se necesita:
+También puedes instalarlo desde el código:
 
-- Windows.
-- Python **3.11 o 3.12**.
-- Node.js.
-- npm.
-- Una API key de Groq para utilizar el MVP.
-- Micrófono para las futuras funciones de voz.
-
-El propio sistema de preparación de JARVIS comprueba la instalación de Python y crea automáticamente un entorno virtual para el brain.
-
----
-
-### 1. Clonar el repositorio
-
-```bash
-git clone https://github.com/lucillas0/JARVIS.git
-cd JARVIS
+```bat
+instalar.bat
 ```
 
-### 2. Configurar el brain
+### Linux
 
-Entrar en el directorio del MVP:
+Descarga el `AppImage`, dale permiso y ábrelo:
 
-```bash
-cd codigo-mvp/brain
+```sh
+chmod +x JARVIS-4.0.0-x64.AppImage
+./JARVIS-4.0.0-x64.AppImage
 ```
 
-Crear un entorno virtual:
+También hay paquetes `.deb` y `.rpm`, y un `tar.gz` para los que prefieran
+descomprimir. Desde el código:
 
-```bash
-python -m venv venv
+```sh
+chmod +x instalar.sh
+./instalar.sh
 ```
 
-Activarlo en Windows:
+### macOS
 
-```cmd
-venv\Scripts\activate
-```
+Hay dos compilaciones distintas, porque son máquinas distintas:
 
-Instalar las dependencias:
-
-```bash
-pip install -r requirements.txt
-```
-
-Las dependencias actuales incluyen:
-
-```text
-fastapi
-uvicorn
-groq
-python-dotenv
-websockets
-```
-
-
----
-
-### 3. Configurar Groq
-
-Crear un archivo:
-
-```text
-.env
-```
-
-con:
-
-```env
-GROQ_API_KEY=TU_CLAVE_DE_GROQ
-```
-
-**No subas nunca este archivo a GitHub.**
-
----
-
-### 4. Ejecutar el brain
-
-Desde:
-
-```text
-codigo-mvp/brain
-```
-
-ejecutar:
-
-```bash
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-El servicio WebSocket estará disponible en:
-
-```text
-ws://127.0.0.1:8000/ws
-```
-
-La aplicación Electron utiliza este servicio para comunicarse con el cerebro de JARVIS.
-
----
-
-## 📦 Instalador de Windows
-
-El proyecto también contempla distribución mediante un instalador `.exe`.
-
-Existe un script:
-
-```text
-instalar-jarvis.cmd
-```
-
-que automatiza parte del proceso de instalación y arranque en Windows.
-
-Los instaladores y ejecutables generados no se almacenan en el repositorio Git debido a su tamaño. El `.gitignore` excluye explícitamente:
-
-```text
-*.exe
-*.onnx
-dist/
-build/
-dist-installer/
-```
-
-
-Para distribuir versiones compiladas se recomienda utilizar **GitHub Releases** en lugar de subir los ejecutables directamente al repositorio.
-
----
-
-# 🎙️ Sistema de voz
-
-Una de las principales líneas de desarrollo de JARVIS es convertirlo en un asistente completamente controlado por voz.
-
-La arquitectura prevista incluye:
-
-### Speech-to-Text
-
-**Groq Whisper**
-
-Permite transformar la voz del usuario en texto.
-
-### Text-to-Speech
-
-**Piper TTS**
-
-Sistema de síntesis de voz local pensado para utilizar una voz masculina en español.
-
-### Wake Word
-
-Detección local de:
-
-```text
-"Jarvis"
-```
-
-La idea es que el usuario pueda decir:
-
-> "Jarvis"
-
-y comenzar una conversación sin necesidad de utilizar teclado.
-
-También está previsto soportar **barge-in**, permitiendo interrumpir a JARVIS mientras está hablando.
-
----
-
-# 👁️ Análisis de pantalla
-
-Una de las funciones previstas es permitir que JARVIS pueda analizar lo que aparece en la pantalla.
-
-Se contemplan dos modos:
-
-### Modo continuo
-
-JARVIS captura periódicamente la pantalla para conocer mejor el contexto.
-
-### Modo bajo demanda
-
-El usuario puede preguntar, por ejemplo:
-
-```text
-"Jarvis, ¿qué aparece en mi pantalla?"
-```
-
-La imagen se procesa en memoria y no se almacena como archivo.
-
-También se contempla poder activar y desactivar esta función mediante comandos de voz.
-
----
-
-# 🖥️ Control del sistema
-
-El objetivo final es permitir que JARVIS pueda realizar acciones sobre Windows.
-
-La implementación está planificada por fases:
-
-1. Abrir aplicaciones y archivos.
-2. Buscar archivos en el sistema.
-3. Abrir el navegador.
-4. Gestionar ventanas.
-5. Controlar multimedia.
-6. Controlar Spotify.
-7. Realizar acciones de red y energía.
-8. Automatizaciones más avanzadas.
-
-Las acciones sensibles deberán solicitar confirmación antes de ejecutarse.
-
----
-
-# 🔒 Seguridad
-
-Las acciones de riesgo no deben ejecutarse directamente desde el modelo de IA.
-
-La arquitectura prevista incluye:
-
-```text
-Usuario
-   ↓
-JARVIS
-   ↓
-LLM
-   ↓
-Tool Manager
-   ↓
-Risk Engine
-   ↓
-Confirmación
-   ↓
-Acción
-```
-
-Las acciones sensibles utilizan:
-
-- Confirmación mediante voz.
-- Confirmación mediante interfaz gráfica.
-- Timeout de 30 segundos.
-- Registro en el sistema de auditoría.
-
-La especificación establece además una retención de 30 días para los registros de auditoría.
-
----
-
-# 🔌 Integraciones previstas
-
-El proyecto está diseñado para incorporar diferentes servicios:
-
-| Servicio | Función |
+| Tu Mac | Fichero |
 |---|---|
-| 🧠 Groq | Inteligencia artificial |
-| 🤖 Gemini | Razonamiento y visión |
-| 🌐 OpenRouter | Proveedor alternativo |
-| 🦙 Ollama | IA local/offline |
-| 📅 Google Calendar | Consultar y gestionar eventos |
-| 🎵 Spotify | Música y playlists |
-| 🌦️ Weather API | Información meteorológica |
-| 📧 Gmail | Lectura de correos |
-| 💬 WhatsApp | Lectura de mensajes/notificaciones |
+| Apple Silicon (M1, M2, M3, M4) | `JARVIS-<versión>-mac-arm64.dmg` |
+| Intel | `JARVIS-<versión>-mac-x64.dmg` |
 
-Estas integraciones forman parte de la arquitectura prevista y se irán incorporando progresivamente.
+Abre el `.dmg` y arrastra a *Aplicaciones*. Desde el código:
 
----
-
-# 🗺️ Roadmap
-
-### ✅ Implementado
-
-- [x] Aplicación Electron.
-- [x] Brain desarrollado en Python.
-- [x] FastAPI.
-- [x] Comunicación WebSocket.
-- [x] Integración inicial con Groq.
-- [x] Historial mediante SQLite.
-- [x] Contexto básico de conversación.
-- [x] Preparación automática del entorno Python.
-- [x] Configuración mediante variables de entorno.
-
-### 🚧 En desarrollo / siguientes fases
-
-- [ ] Wake word local.
-- [ ] Reconocimiento de voz.
-- [ ] Piper TTS.
-- [ ] Conversación continua.
-- [ ] Barge-in.
-- [ ] Fallback con Ollama.
-- [ ] Sistema de permisos y riesgos.
-- [ ] Control del sistema operativo.
-- [ ] Búsqueda web.
-- [ ] Model Router.
-- [ ] Google Calendar.
-- [ ] Spotify.
-- [ ] Gmail.
-- [ ] WhatsApp.
-- [ ] Análisis de pantalla.
-- [ ] Motor proactivo.
-- [ ] Memoria semántica con Qdrant.
-- [ ] HUD holográfico completo.
-- [ ] Instalador final para Windows.
-
-La prioridad de estas fases está definida en `JARVIS-SPEC.md`.
-
----
-
-# 📁 Documentación
-
-El repositorio incluye una especificación detallada del proyecto:
-
-```text
-JARVIS-SPEC.md
+```sh
+chmod +x instalar.sh
+./instalar.sh
 ```
 
-Este documento describe:
+> La primera vez, macOS pediré permiso para usar el micrófono. Sin él, JARVIS
+> funciona igual, pero solo de viva voz.
 
-- Arquitectura.
-- Personalidad.
-- Stack tecnológico.
-- Sistema de voz.
-- Análisis de pantalla.
-- Interfaz.
-- Control de Windows.
-- Seguridad.
-- Integraciones.
-- Memoria.
-- Protocolo WebSocket.
-- Variables de entorno.
-- Plan de pruebas.
-- Roadmap.
+### Qué hace falta
+
+- **Python 3.10 o superior.** Es lo único imprescindible: el instalador lo
+  comprueba y te dice cómo instalarlo si falta.
+- Alrededor de 1,5 GB de disco.
+- Una clave de al menos un proveedor de IA: [Groq](https://console.groq.com/keys)
+  (gratis), [Gemini](https://aistudio.google.com/apikey) o
+  [OpenRouter](https://openrouter.ai/keys).
 
 ---
 
-# ⚠️ Estado del proyecto
+## El modo servidor
 
-JARVIS se encuentra actualmente en **desarrollo activo**.
+El modo servidor es el cerebro sin escritorio. Es lo que se despliega en un NAS
+o en un servidor, y lo que se usa cuando quieres que JARVIS esté siempre
+encendido.
 
-El núcleo conversacional funciona, pero muchas de las capacidades descritas en la especificación todavía forman parte del roadmap.
+### Con Docker
 
-Por este motivo, algunas características mencionadas en este README pueden estar todavía en fase de desarrollo.
+```sh
+cp configuracion.env.example .env
+# Edita .env y pega al menos una clave
+./instalar-docker.sh
+```
+
+Levanta un contenedor con el cerebro, deja los datos en `./data` y espera a que
+responda antes de darse por terminado.
+
+### En Synology / Xenology
+
+Container Manager no ejecuta scripts, así que se instala desde su interfaz.
+Copia esta carpeta a una carpeta compartida del NAS y, en **Proyecto →
+Crear**, apúntala como ruta del proyecto con el `docker-compose.yml` que trae.
+Container Manager lee el `.env` de la misma carpeta.
+
+El `PUID` y `PGID` del `.env` son tus ids de usuario del DSM. Si no los pones,
+Docker creará los ficheros como `root` y luego no podrás borrarlos desde la
+interfaz.
+
+Más detalle en [DOCKER.md](JARVIS/DOCKER.md).
+
+### Desde código
+
+```sh
+cd JARVIS/brain
+python -m venv venv
+venv/bin/pip install -r requirements-server.txt
+venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
 
 ---
 
-# 👨‍💻 Autor
+## La interfaz
 
-**lucillas0**
+Con el servidor en marcha, la interfaz vive en `http://<servidor>:8000/ui`.
 
-Repositorio:
+Es un orbe de partículas que cambia de estado según lo que está pasando:
 
-**GitHub:** https://github.com/lucillas0/JARVIS
+| Estado | Cuándo |
+|---|---|
+| **En espera** | No hay nada pendiente |
+| **Escuchando** | El micrófono está abierto |
+| **Pensando** | Hay una consulta en curso |
+| **Hablando** | Está respondiendo |
+
+El panel lateral muestra los procesos, el número de herramientas disponibles,
+los proveedores activos y un registro en vivo de lo que va pasando.
+
+Todos los botones hacen algo real: el micrófono dicta y manda el nivel de voz
+al orbe, el interruptor de voz activa o silencia la locución, la tecla `M`
+abre y cierra el micrófono y la barra lateral enlaza a la pizarra, la
+configuración y el estado del servidor.
+
+La página **no depende de internet**: el three.js va incluido y no usa ninguna
+fuente externa. En un NAS sin conexión funciona igual.
 
 ---
 
-# 📄 Licencia
+## La isla de Coucou
 
-Actualmente no se ha definido una licencia de código abierto en el repositorio.
+La barra superior no es un invento: es el Coucou, importado del proyecto de
+[Louis-CFM](https://github.com/Louis-CFM/coucou) y conectado al cerebro de
+JARVIS.
 
-Si el proyecto se publica para uso de terceros, se recomienda añadir un archivo `LICENSE` con la licencia elegida.
+Lo que se ha traído tal cual:
+
+- La **máquina de estados** de cuatro estados (`hidden`, `petit`, `home`,
+  `coucou`) con sus tiempos: 15 s para plegarse, 60 s para ocultarse.
+- El **motor de dibujo de Mochi**, con sus 11 estados y sus 13 atuendos,
+  incluido el modo automático por estaciones.
+- La **hoja de estilo completa**, byte a byte.
+- Los textos en español del catálogo original.
+
+Lo que se ha adaptado: el puente, que en Coucou habla con Rust y aquí habla con
+el WebSocket del cerebro, y las pastillas, que en Coucou se llenan con los hooks de
+Claude Code y aquí se llenan con los procesos que el servidor detecta.
+
+Comprobado con la matriz de los 11 estados × 13 atuendos, sin un solo fallo.
 
 ---
 
-> *"Sistemas en línea. ¿En qué puedo ayudarte?"* 🤖
+## Voz
+
+- **Transcripción**: Whisper, con palabra de activación configurable.
+- **Síntesis**: Piper, con una voz española por defecto.
+- **Control**: silencio de conversación, velocidad y modelo, todo ajustable.
+
+En servidor la voz no suele hacer falta y se puede apagar sin que afecte a
+nada más.
+
+---
+
+## Integraciones
+
+| Integración | Estado |
+|---|---|
+| Discord | DM privado con el propietario, con puente de voz |
+| Búsqueda web | DuckDuckGo con reintentos y caché, y Wikipedia primero en preguntas enciclopédicas |
+| Campus | Índice de apuntes y herramientas por asignatura |
+| Máquinas virtuales | Control por SSH |
+| Spotify | Reproducción y estado de la música |
+| Cámaras | Instantánea y vídeo en directo |
+| Telegram, móvil | Avisos y control |
+
+---
+
+## Configuración
+
+Todo se configura por entorno, en un solo archivo.
+
+- **Escritorio y modo lite:** `JARVIS/brain/.env`.
+- **Servidor:** `.env` en la carpeta del proyecto, con el ejemplo en
+  [configuracion.env.example](JARVIS/configuracion.env.example).
+
+Las claves que se pueden poner están documentadas en ese ejemplo, agrupadas y
+con los valores por defecto reales del código. Para ponerlas en cualquier
+momento sin reinstalar:
+
+```sh
+python instalar.py --solo-claves
+```
+
+> El `.env` va en claro. No lo subas a ningún repositorio ni lo compartas. El
+> instalador lo deja en permisos `600` cuando el sistema lo permite.
+
+---
+
+## Estructura del proyecto
+
+```
+JARVIS/
+├── app/                 Interfaz de escritorio (Electron)
+│   ├── main.js          Ventanas, atajos, puente con la isla
+│   ├── preload.js       Puente seguro entre renderer y proceso principal
+│   ├── ui/
+│   │   ├── notch/       La isla, y dentro el Coucou original
+│   │   ├── overlay/     Superposición a pantalla completa (Win+J)
+│   │   └── vendor/      three.js
+│   └── scripts/         Utilidades de compilación
+├── brain/               Cerebro (Python)
+│   ├── main.py          Servidor FastAPI y WebSocket
+│   ├── config.py        Configuración y claves
+│   ├── model_router.py  Groq → Gemini → OpenRouter
+│   ├── ui/              Interfaz web del modo servidor
+│   ├── tools/           Catálogo de herramientas
+│   ├── integrations/    Campus, máquinas virtuales, Discord
+│   ├── memory/          Memoria, contexto y autoreparación
+│   └── vision/          Visión por cámara
+├── assets/              Iconos, sonidos e imágenes
+├── Dockerfile           Imagen del servidor
+├── docker-compose.yml   Proyecto para Container Manager
+├── instalar.py          Instalador (Windows, Linux, macOS)
+├── instalar.sh          Lanzador en Unix
+├── instalar.bat         Lanzador en Windows
+└── instalar-docker.sh   Instalador del modo servidor
+```
+
+---
+
+## Compilación
+
+```sh
+npm install --prefix app
+
+npm --prefix app run dist:win        # Windows
+npm --prefix app run dist:linux      # Linux x64
+npm --prefix app run dist:linux:arm  # Linux arm64
+npm --prefix app run dist:mac        # macOS Intel
+npm --prefix app run dist:mac:arm    # macOS Apple Silicon
+```
+
+> Cada sistema se compila en su propio sistema. Un `.dmg` no se genera desde
+> Windows ni un `AppImage` desde macOS. Para las cuatro plataformas a la vez,
+> existe el flujo de trabajo de [build.yml](.github/workflows/build.yml), que
+> compila cada una en su runner y publica una release con todo.
+
+---
+
+## Desarrollo
+
+```sh
+# Interfaz en modo desarrollo
+npm --prefix app start
+
+# Cerebro con recarga
+cd JARVIS/brain && venv/bin/python -m uvicorn main:app --reload
+
+# Pruebas
+npm --prefix app test
+```
+
+El repositorio incluye pruebas de la geometría de la isla, de los diagnósticos
+del instalador y de la matriz de Mochi, para que los cambios no rompan nada sin
+avisar.
+
+---
+
+## Licencia
+
+MIT.

@@ -60,9 +60,11 @@ def _pick_devices():
         return (-1, -1)
     ins, outs = [], []
     for i, d in enumerate(devs):
-        if d["max_input_channels"] > 0 and d["max_input_channels"] % 2 == 0:
+        # El stream usa mono: un dispositivo de un solo canal es válido. El
+        # filtro anterior descartaba micrófonos/altavoces mono (canales impares).
+        if d["max_input_channels"] > 0:
             ins.append(i)
-        if d["max_output_channels"] > 0 and d["max_output_channels"] % 2 == 0:
+        if d["max_output_channels"] > 0:
             outs.append(i)
     # Validar cada candidato abriendo y cerrando el stream.
     ok_ins = [i for i in ins if _try_open(i, "input")]
@@ -109,6 +111,12 @@ class AudioEngine:
         self._music_volume = 0.4
         self._ww_history: list[np.ndarray] = []
         self._rms_buffer: list[float] = []
+        self._latest_mic_rms = 0.0
+        self._latest_mic_ts = 0.0
+        self._mic_revision = 0
+        self._barge_revision = 0
+        self._barge_high_chunks = 0
+        self._barge_cooldown_until = 0.0
         self._has_input = False
         self._has_output = False
 
@@ -120,37 +128,53 @@ class AudioEngine:
         if self._istream is not None or self._ostream is not None:
             return True
         in_dev, out_dev = _pick_devices()
-        try:
-            import sounddevice as sd
-            # micro: entrada (16k, mono)
-            if in_dev >= 0:
+        import sounddevice as sd
+        # Un dispositivo puede desaparecer o quedar ocupado entre la prueba y
+        # la apertura real. Conserva el lado que sí funcione: la salida TTS no
+        # debe perderse porque haya fallado el micrófono.
+        if in_dev >= 0:
+            try:
                 self._istream = sd.InputStream(
                     samplerate=RATE, channels=CHANNELS, device=in_dev,
                     callback=self._in_callback, blocksize=1600, dtype="float32",
                 )
                 self._istream.start()
                 self._has_input = True
-            # altavoz: salida (16k, mono)
-            if out_dev >= 0:
+            except Exception as e:
+                log.warning("No pude abrir el micrófono %s; sigo solo con salida: %s",
+                            in_dev, e)
+                if self._istream is not None:
+                    try:
+                        self._istream.close()
+                    except Exception:
+                        pass
+                self._istream = None
+        if out_dev >= 0:
+            try:
                 self._ostream = sd.OutputStream(
                     samplerate=RATE, channels=CHANNELS, device=out_dev,
                     callback=self._out_callback, blocksize=1600, dtype="float32",
                 )
                 self._ostream.start()
                 self._has_output = True
-            if not self._has_output:
-                log.error("No pude abrir ningún stream de audio.")
-                return False
-            self._barrier_thread = threading.Thread(target=self._playback_worker, daemon=True)
-            self._barrier_thread.start()
-            mode = "input+output" if self._has_input else "output-only"
-            log.info("Audio activo [%s]: micro=%s altavoz=%s", mode, in_dev, out_dev)
-            return True
-        except Exception as e:
-            log.exception("No pude abrir streams de audio: %s", e)
-            self._istream = self._ostream = None
-            self._has_input = self._has_output = False
+            except Exception as e:
+                log.warning("No pude abrir el altavoz %s: %s", out_dev, e)
+                if self._ostream is not None:
+                    try:
+                        self._ostream.close()
+                    except Exception:
+                        pass
+                self._ostream = None
+        if not self._has_input and not self._has_output:
+            log.error("No pude abrir ningún stream de audio.")
             return False
+        self._barrier_thread = threading.Thread(target=self._playback_worker,
+                                                daemon=True, name="audio-worker")
+        self._barrier_thread.start()
+        mode = ("input+output" if self._has_input and self._has_output else
+                "input-only" if self._has_input else "output-only")
+        log.info("Audio activo [%s]: micro=%s altavoz=%s", mode, in_dev, out_dev)
+        return self._has_output
 
     def stop(self):
         for s in (self._istream, self._ostream):
@@ -179,11 +203,15 @@ class AudioEngine:
 
     def _in_callback(self, indata, frames, time_info, status):
         mic = indata[:, 0].copy()
+        self._latest_mic_rms = float(np.sqrt(np.mean(mic * mic))) if len(mic) else 0.0
+        self._latest_mic_ts = time.monotonic()
+        self._mic_revision += 1
         # Wake word siempre escuchando: se acumula y el worker lo procesa fuera
         # del callback de audio (tiempo real) para no bloquear el stream.
-        self._ww_history.append(mic)
-        if len(self._ww_history) > 40:  # ~4 s de contexto máximo
-            self._ww_history.pop(0)
+        if self.on_mic_chunk:
+            self._ww_history.append(mic)
+            if len(self._ww_history) > 40:  # ~4 s de contexto máximo
+                self._ww_history.pop(0)
         # para STT se graba aquí:
         if self._recording.is_set():
             self._record_buf.append(mic)
@@ -226,16 +254,27 @@ class AudioEngine:
             except Exception as e:
                 log.debug("ww worker: %s", e)
             # barge-in: mientras haya salida, vigilar mic
-            if self._playing.is_set() and self.on_barge_in:
+            if (self._playing.is_set() and self.on_barge_in and
+                    time.monotonic() >= self._barge_cooldown_until):
                 try:
-                    amp = self.last_mic_rms()
-                    if amp and amp > self._barge_threshold:
-                        self._onsetting_barge_in()
+                    # Solo juzgar muestras nuevas; repetir el RMS de una frase
+                    # recién grabada provocaba cortes falsos al empezar el TTS.
+                    if self._mic_revision != self._barge_revision:
+                        self._barge_revision = self._mic_revision
+                        if self.last_mic_rms() > self._barge_threshold:
+                            self._barge_high_chunks += 1
+                        else:
+                            self._barge_high_chunks = 0
+                        if self._barge_high_chunks >= 2:
+                            self._barge_high_chunks = 0
+                            self._onsetting_barge_in()
                 except Exception:
                     pass
 
     def _onsetting_barge_in(self):
         log.info("Barge-in: usuario interrumpiendo.")
+        self._barge_cooldown_until = time.monotonic() + 1.0
+        self._barge_high_chunks = 0
         self.stop_playback(emit=False)
         if self.on_barge_in:
             try:
@@ -321,11 +360,11 @@ class AudioEngine:
 
     # ---------------- micrófono ----------------
     def last_mic_rms(self) -> float:
-        buf = self._record_buf
-        if not buf:
+        # No usar _record_buf: contiene la última frase completa y su último
+        # fragmento podía interrumpir el audio recién encolado como si fuera voz.
+        if time.monotonic() - self._latest_mic_ts > 0.5:
             return 0.0
-        chunk = buf[-1]
-        return float((np.abs(chunk) ** 2).mean() ** 0.5)
+        return self._latest_mic_rms
 
     def begin_recording(self) -> None:
         self._recording.set()
