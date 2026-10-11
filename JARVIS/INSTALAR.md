@@ -64,16 +64,38 @@ lo compartas.
 ## Si algo falla
 
 El instalador se para solo si falla el grupo del servidor; el resto son
-avisos. Al final te dice cuales fallaron.
+avisos. Al final te dice cuales fallaron, y **el motivo de cada uno**: no dice
+"revisa la red" a todo, que era lo que pasaba antes.
 
-Cosas que pasan de vez en cuando:
+Los errores de Windows que mas se dan, y que son los que suelen parecer
+"problemas de seguridad":
 
-| Que pasa | Que hacer |
-|---|---|
-| `No se pudo crear el entorno virtual` | En Debian/Ubuntu: `sudo apt install python3-venv python3-pip` |
-| Falla todo al descargar | Revisa el proxy o la conexion. Se puede usar `--proxy` de pip. |
-| `No he podido dejar .env en 600` | Sistema de ficheros que no soporta permisos (NTFS). Restringelo a mano. |
-| Falla un grupo opcional | Es normal: son paquetes pesados o especificos. JARVIS funciona igual. |
+| Lo que pone | Que pasa de verdad | Que hacer |
+|---|---|---|
+| `la red esta inspeccionando las conexiones y el certificado no cuadra` | El certificado TLS no valida: tipico en redes de empresa o universidad que inspeccionan el trafico | `pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org <paquete>`, o configura el proxy con `set HTTPS_PROXY=http://servidor:puerto` |
+| `Windows no deja escribir o ejecutar` | El antivirus esta bloqueando el entorno nuevo | Cierra el antivirus mientras instala, o anade `brain\venv` a las exclusiones. Tambien vale ejecutar la consola como administrador |
+| `no queda espacio en disco` | Faltan los ~1,5 GB del entorno | Libera espacio y repite |
+| `falta un compilador para construir ese paquete` | Un paquete quiere Visual Studio Build Tools | Si solo quieres el servidor: `instalar.bat --rapido` |
+| `No encuentro Python` o abre la Microsoft Store | El Python de la Store no se ejecuta, abre la tienda | Descarga el de python.org marcando "Add python.exe to PATH" |
+
+### Lo de "viene de internet"
+
+Si bajaste un ZIP, Windows marca los ficheros y a veces se niegan a tocarlos.
+`instalar.bat` lo resuelve solo: lo primero que hace es quitar esa marca con
+`Unblock-File`, asi que no tienes que hacer nada.
+
+Si aun asi Windows dice que elscript esta bloqueado,click con el boton derecho
+en Properties y pulsa **Unblock** (Desbloquear).
+
+### Si el antivirus lo corta
+
+A veces Defender o el antivirus de tu empresa matan `python.exe` del entorno a
+mitad de la instalacion. Despues, el grupo falla con "Windows no deja escribir
+o ejecutar". Anade de antemano la carpeta a las exclusiones:
+
+- **Windows Defender:** Seguridad de Windows > Proteccion contra virus > &
+  amenaza > Gestionar configuracion > Exclusions > Agregar exclusion > carpeta
+- ** otro antivirus:** lo de siempre, carpeta `brain\venv`
 
 Para rehacer todo y empezar limpio: `python instalar.py --rehacer`.
 

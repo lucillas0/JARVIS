@@ -177,6 +177,72 @@ def ultimo_error(salida: str) -> str:
     return (fallos or lineas or ["sin detalle"])[-1][:200]
 
 
+# Cada clase de fallo que se da al instalar con pip en Windows, con lo que
+# significa y lo que se puede hacer. Antes el instalador daba el mismo consejo
+# para todo y acababa diciendo "revisa la red" cuando el problema era otro.
+FALLOS: list[tuple[tuple[str, ...], str, list[str]]] = [
+    (("No matching distribution found", "Could not find a version"),
+     "ese paquete no existe o no hay version para tu Python",
+     ["Suele ser un problema de la lista de dependencias, no tuyo."]),
+
+    (("CERTIFICATE_VERIFY_FAILED", "certificate verify failed", "SSLError",
+      "SSL: WRONG_VERSION_NUMBER", "TLSV1_ALERT"),
+     "la red esta inspeccionando las conexiones y el certificado no cuadra",
+     ["Es habitual en redes de empresa o universidad.",
+      "Prueba con:  pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org <paquete>",
+      "O configura el proxy:  set HTTPS_PROXY=http://servidor:puerto"]),
+
+    (("ProxyError", "Failed to establish a new connection", "Read timed out",
+      "Connection to", "Network is unreachable", "Temporary failure in name resolution",
+      "SSLError: EOF occurred"),
+     "no se puede llegar a PyPI",
+     ["Revisa la conexion, el proxy o el cortafuegos.",
+      "Si usas proxy:  set HTTPS_PROXY=http://servidor:puerto"]),
+
+    (("Access is denied", "Permission denied", "WinError 5"),
+     "Windows no deja escribir o ejecutar",
+     ["Suele ser el antivirus bloqueando el entorno nuevo.",
+      "Cierra el antivirus un momento o anade brain\\venv a las exclusiones.",
+      "Prueba tambien a ejecutar la consola como administrador."]),
+
+    (("No space left on device", "There is not enough space"),
+     "no queda espacio en disco",
+     ["Hacen falta unos 1,5 GB. Libera espacio y vuelve a intentarlo."]),
+
+    (("Failed building wheel", "error: Microsoft Visual C\\+\\+ 14.0",
+      "error: command 'cl.exe' failed", "Building wheel for"),
+     "falta un compilador para construir ese paquete",
+     ["En Windows hace falta Visual Studio Build Tools.",
+      "Si solo quieres el servidor sin voz ni escritorio, usa:  instalar.bat --rapido"]),
+
+    (("ModuleNotFoundError", "No module named"),
+     "falta un modulo de Python",
+     ["Comprueba que el entorno se creo bien:  python instalar.py --rehacer"]),
+
+    (("Access is denied", "cannot write", "Read-only file system"),
+     "la carpeta destino no permite escribir",
+     ["Mueve el proyecto a una carpeta donde tengas permisos."]),
+]
+
+
+def diagnosticar(salida: str) -> tuple[str, list[str]]:
+    """Traduce la salida de pip a un motivo y un consejo. (motivo, consejos)"""
+    baja = salida.lower()
+    for disparadores, motivo, consejos in FALLOS:
+        if any(d.lower() in baja for d in disparadores):
+            return motivo, list(consejos)
+    return "la instalacion de ese grupo ha fallado", []
+
+
+def avisar_fallo(nombre: str, salida: str) -> None:
+    """Informa de un grupo roto con un motivo util, no generico."""
+    motivo, consejos = diagnosticar(salida)
+    aviso(f"{nombre}: {motivo}")
+    detalle(ultimo_error(salida))
+    for c in consejos:
+        detalle(c)
+
+
 # --- Pasos -------------------------------------------------------------------
 def comprobar_python() -> None:
     v = sys.version_info
@@ -225,10 +291,10 @@ def instalar_grupos(py: Path, grupos: list, obligatorio: bool = True) -> list:
             ok(f"{nombre}")
         else:
             fallidos.append(nombre)
-            aviso(f"{nombre}: fallo la instalacion")
-            detalle(ultimo_error(salida))
+            avisar_fallo(nombre, salida)
             if nombre == "servidor" and obligatorio:
-                error("Sin el servidor no arranca nada. Revisa la red o el proxy.")
+                motivo, _ = diagnosticar(salida)
+                error(f"Sin el grupo del servidor JARVIS no arranca ({motivo}).")
                 sys.exit(1)
     return fallidos
 
@@ -398,6 +464,16 @@ def verificar(py: Path) -> bool:
     return False
 
 
+def esperar_si_falla() -> None:
+    """Si esto se ha abierto a doble clic, la consola se cierra al salir y el
+    error se va sin leer. Con una entrada interactiva se espera a una tecla."""
+    try:
+        if os.name == "nt" and sys.stdin is not None and sys.stdin.isatty():
+            input("\n  Pulsa Intro para cerrar...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 # --- Programa ----------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=False)
@@ -475,9 +551,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except KeyboardInterrupt:
-        print()
-        aviso("Cancelado por el usuario.")
-        sys.exit(130)
+        try:
+            _codigo = main()
+        except KeyboardInterrupt:
+            print()
+            aviso("Cancelado por el usuario.")
+            _codigo = 130
+        # A doble clic la consola se cierra al salir y el error se va sin leer.
+        if _codigo:
+            esperar_si_falla()
+        sys.exit(_codigo)
