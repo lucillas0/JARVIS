@@ -12,6 +12,10 @@ Dockerfile  text eol=lf
 .gitignore  text eol=lf
 .gitattributes text eol=lf
 
+# Los .bat son de Windows y cmd.exe los quiere con CRLF. Ademas no pueden
+# llevar BOM: se lo come la primera linea y "@echo off" deja de funcionar.
+*.bat       text eol=crlf
+
 # Documentacion y ficheros de texto normal.
 *.md        text eol=lf
 *.py        text eol=lf
