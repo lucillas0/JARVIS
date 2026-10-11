@@ -1,4 +1,4 @@
-# Compila JARVIS para Windows, Linux y macOS, y publica una release.
+﻿# Compila JARVIS para Windows, Linux y macOS, y publica una release.
 #
 # Cada SO se compila en su propio runner: un .dmg para macOS no se puede
 # generar desde Windows, y un AppImage necesita el toolchain de Linux. El
@@ -39,9 +39,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --quiet pillow
-      - run: npm --prefix app run iconos
-      - run: npm ci --prefix app
-      - run: npm --prefix app run dist:win
+      - run: npm --prefix JARVIS/app run iconos
+      - run: npm ci --prefix JARVIS/app
+      - run: npm --prefix JARVIS/app run dist:win
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-windows-x64
@@ -63,9 +63,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
       - run: python -m pip install --quiet pillow
-      - run: npm --prefix app run iconos
-      - run: npm ci --prefix app
-      - run: npm --prefix app run dist:linux
+      - run: npm --prefix JARVIS/app run iconos
+      - run: npm ci --prefix JARVIS/app
+      - run: npm --prefix JARVIS/app run dist:linux
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-linux-x64
@@ -91,9 +91,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
       - run: python -m pip install --quiet pillow
-      - run: npm --prefix app run iconos
-      - run: npm ci --prefix app
-      - run: npm --prefix app run dist:linux:arm
+      - run: npm --prefix JARVIS/app run iconos
+      - run: npm ci --prefix JARVIS/app
+      - run: npm --prefix JARVIS/app run dist:linux:arm
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-linux-arm64
@@ -115,9 +115,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --quiet pillow
-      - run: npm --prefix app run iconos
-      - run: npm ci --prefix app
-      - run: npm --prefix app run dist:mac:arm
+      - run: npm --prefix JARVIS/app run iconos
+      - run: npm ci --prefix JARVIS/app
+      - run: npm --prefix JARVIS/app run dist:mac:arm
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-macos-arm64
@@ -135,9 +135,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --quiet pillow
-      - run: npm --prefix app run iconos
-      - run: npm ci --prefix app
-      - run: npm --prefix app run dist:mac
+      - run: npm --prefix JARVIS/app run iconos
+      - run: npm ci --prefix JARVIS/app
+      - run: npm --prefix JARVIS/app run dist:mac
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-macos-x64
