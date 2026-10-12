@@ -45,9 +45,10 @@ function apartaAtras() {
 
 function medida() {
   if (!lienzo || !hueco || !anclaEl) return;
-  // La mascota va ENCIMA del hueco de Mochi, del mismo tamaño. Coucou cambia
-  // ese tamaño al abrir y cerrar la isla, asi que se lee cada vez en vez de
-  // fijar un tamaño: si no se queda pegada al borde al abrirse.
+  // La mascota va ENCIMA del hueco de Mochi. Se dibuja en un lienzo CUADRADO
+  // porque en los HTML el lienzo es cuadrado y la mascota esta centrada en el
+  // origen; si el lienzo no es cuadrado se estira y deja de parecerse.
+  // El lado es el mayor de los dos y se centra sobre el hueco.
   //
   // Las coordenadas van RELATIVAS al ancla y en absoluto a proposito: la isla
   // se centra con un transform, y con position:fixed eso haria que las
@@ -57,16 +58,17 @@ function medida() {
   const r = hueco.getBoundingClientRect();
   const a = anclaEl.getBoundingClientRect();
   if (!r.width || !r.height) return;
-  const px = Math.round(r.width * dpr);
+  const lado = Math.max(r.width, r.height);
+  const px = Math.round(lado * dpr);
   if (lienzo.width !== px || lienzo.height !== px) {
     lienzo.width = px;
     lienzo.height = px;
   }
-  lienzo.style.width = r.width + 'px';
-  lienzo.style.height = r.height + 'px';
-  lienzo.style.left = (r.left - a.left) + 'px';
-  lienzo.style.top = (r.top - a.top) + 'px';
-  grande = r.width > 190;
+  lienzo.style.width = lado + 'px';
+  lienzo.style.height = lado + 'px';
+  lienzo.style.left = (r.left - a.left + (r.width - lado) / 2) + 'px';
+  lienzo.style.top = (r.top - a.top + (r.height - lado) / 2) + 'px';
+  grande = lado > 190;
 }
 
 export function montaMascotas(ancla) {
@@ -196,6 +198,83 @@ export function apaga() {
   clearTimeout(temporizador);
   lienzo.style.display = 'none';
   apartaAtras();
+}
+
+// ── Avatares de las pastillas ────────────────────────────────────────────────
+// En segundo plano: cada pastilla lleva su mascota en el circleito. Coucou usa
+// ahi un cuadrado de color, asi que el avatar se dibuja al lado en vez de
+// encima, para no perder el color de la pastilla.
+
+const DE_ETIQUETA = {
+  jarvis: 'jarvi', 'jarvis': 'jarvi',
+  freebuff: 'buffi',
+  'vs code': 'vee', vscode: 'vee',
+  opencode: 'opi',
+  codex: 'opi',
+};
+
+export function mascotaDeEtiqueta(texto) {
+  const t = String(texto || '').trim().toLowerCase();
+  return DE_ETIQUETA[t] || null;
+}
+
+// Clave por elemento y no por mascota: Codex y OpenCode comparten la misma
+// (Opi), y guardando por id la segunda pastilla pisaba a la primera y se
+// quedaba en negro.
+const avatares = new Map(); // elemento canvas -> { lienzo, ctx, motor }
+
+let ultimaAvatar = 0;
+function dibujaAvatar(ms) {
+  // Van a paso lento: son 15 pixeles y no se nota, pero cuatro lienzos a 60 fps
+  // serian tirar CPU para nada. Se mira el reloj, no el resto de ms % 100,
+  // que con los tiempos de rAF cae unas veces y otras no.
+  if (ms - ultimaAvatar >= 90) {
+    ultimaAvatar = ms;
+    for (const [, a] of avatares) {
+      const st = a.motor.avanza(ms);
+      st.grande = false;
+      st.parpadeo = 0;
+      const lado = a.lienzo.width;
+      a.ctx.save();
+      a.motor.dibuja(a.ctx, lado, lado, st, { x: 0, y: 0 });
+      a.ctx.restore();
+    }
+  }
+  requestAnimationFrame(dibujaAvatar);
+}
+
+let avataresArrancados = false;
+
+export function montaAvatares() {
+  if (!avataresArrancados) { avataresArrancados = true; requestAnimationFrame(dibujaAvatar); }
+  const pastillas = document.querySelectorAll('#root .pill');
+  for (const pill of pastillas) {
+    if (pill.dataset.jarvisAvatar) continue;
+    const etiqueta = (pill.innerText || '').trim();
+    const id = mascotaDeEtiqueta(etiqueta);
+    if (!id) continue;
+    // Se cuelga de la pastilla y NO del squareito de color: si va dentro, el
+    // lienzo agranda el squareito, el squareito agranda la pastilla y al medir
+    // otra vez el avatar sale mas grande. Tamano fijo para que no se mueva.
+    const lado = 15;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const lienzoA = document.createElement('canvas');
+    lienzoA.width = Math.round(lado * dpr);
+    lienzoA.height = Math.round(lado * dpr);
+    Object.assign(lienzoA.style, {
+      width: lado + 'px',
+      height: lado + 'px',
+      verticalAlign: 'middle',
+      marginLeft: '3px',
+      pointerEvents: 'none',
+      flex: '0 0 auto',
+    });
+    pill.appendChild(lienzoA);
+    pill.dataset.jarvisAvatar = id;
+    const motor = creaMotor(MASCOTAS[id].def, MASCOTAS[id].estados, MASCOTAS[id].pintar);
+    motor.pon('reposo');
+    avatares.set(lienzoA, { lienzo: lienzoA, ctx: lienzoA.getContext('2d'), motor });
+  }
 }
 
 // Enganche para probar y depurar desde la consola del renderer: sin esto no
