@@ -62,9 +62,10 @@ function medida() {
 
   // El dibujo ocupa unos 160 unidades de alto sobre un lado de 200, y las
   // manos y el globo se salen un poco mas. Con esta altura maxima, lo dibujado
-  // no llega a salirse por arriba.
-  const altoUtil = Math.max(60, Math.min(window.innerHeight - 10, 176));
-  const lado = Math.max(28, Math.min(r.width * 1.7, altoUtil / 0.82));
+  // no llega a salirse por arriba. Y el tope de 104 es para que se vea dentro
+  // de la isla sin taparla: antes salia de 138 y se salia de la vista.
+  const altoUtil = Math.max(60, Math.min(window.innerHeight - 10, 130));
+  const lado = Math.max(28, Math.min(r.width * 1.25, altoUtil / 0.82, 104));
 
   const px = Math.round(lado * dpr);
   if (lienzo.width !== px || lienzo.height !== px) {
