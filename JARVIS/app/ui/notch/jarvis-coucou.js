@@ -218,10 +218,10 @@ setInterval(() => {
   // Los avatares de las pastillas van siempre; la mascota grande solo si esta
   // encendida, porque si no manda Mochi.
   montaAvatares();
-  if (QUIERO_MASCOTAS) {
-    const ancla = document.querySelector("#bot-canvas");
-    if (ancla) montaMascotas(ancla.parentElement);
-  }
+  // Se reconfirma por ponMascotas y no por montaMascotas: Coucou vuelve a
+  // pintar su boton cuando cambia algo, y si solo se montara, el interruptor
+  // se quedaria apagado sin querer aunque aqui siga puesto.
+  ponMascotas(QUIERO_MASCOTAS);
 }, 900);
 
 function ponMascotas(on) {

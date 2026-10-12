@@ -61,14 +61,20 @@ function creaMotor(def, estados, pintar) {
     st.ancho = W;
     c.clearRect(0, 0, W, H);
     c.save();
-    c.translate(W / 2, H / 2);
+    // Coucou no centra la mascota en la caja: la caja lleva 24 px de margen a
+    // cada lado y 40 de voladizo arriba, y el cuerpo va al 79 % de la altura.
+    // Si se dibuja centrado y del tamano de la caja, la mascota asoma por
+    // debajo del panel en vez de quedar dentro, que es lo que pasaba.
+    const ref = st.ref || Math.min(W, H);
+    const cy = st.cy != null ? st.cy : H / 2;
+    c.translate(W / 2, cy);
     // Zoom: a 26 px el dibujo entero es una mancha y no se sabe que mascota es.
     // Con zoom se acerca a la cara, que es lo que la identifica: los ojos, la
     // pantalla y los colores bastan para reconocerla.
     const z = st.zoom || 1;
-    c.scale((W / 200) * z, (W / 200) * z);
+    c.scale((ref / 200) * z, (ref / 200) * z);
     if (z !== 1) c.translate(0, st.zoomY || 0);
-    pintar(c, W / 320, st, mirar);
+    pintar(c, ref / 320, st, mirar);
     c.restore();
   }
 
