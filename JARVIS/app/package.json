@@ -3,7 +3,11 @@
   "version": "4.1.0",
   "description": "JARVIS - Asistente personal de escritorio con voz para Windows, Linux y macOS",
   "main": "main.js",
-  "author": "Lucas",
+  "author": {
+    "name": "Lucas",
+    "email": "noreply@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/lucillas0/JARVIS",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
@@ -33,6 +37,7 @@
   "build": {
     "appId": "com.jarvis.assistant",
     "productName": "JARVIS",
+    "publish": null,
     "files": [
       "main.js",
       "jarvis-history.js",
