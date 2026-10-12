@@ -9,7 +9,7 @@
 
 import { Bridge, emiteEvento } from "./coucou/_js/core/bridge.js";
 import { State } from "./coucou/_js/core/state.js";
-import { montaMascotas, muestra, sincroniza } from "./jarvis-mascotas.js";
+import { montaMascotas, muestra, sincroniza, montaAvatares } from "./jarvis-mascotas.js";
 
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 const MAIN = "jarvis";
@@ -184,6 +184,10 @@ function esperaIsla() {
   montaMascotas(ancla);
   muestra(State.focusId || MAIN);
   sincroniza("idle");
+  // Los avatares van en las pastillas, que Coucou vuelve a pintar cuando
+  // cambian los agentes: se revisa cada poco por si aparece alguna nueva.
+  montaAvatares();
+  setInterval(montaAvatares, 2000);
 }
 
 function sigueElFoco() {
