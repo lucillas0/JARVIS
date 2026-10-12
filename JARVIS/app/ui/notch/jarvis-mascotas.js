@@ -18,62 +18,76 @@ export function mascotFor(pastilla) {
   return DE_PASTILLA[pastilla] || 'jarvi';
 }
 
+export function mascotaActiva() {
+  return activoId;
+}
+
 let lienzo = null;
 let ctx = null;
 let motorActivo = null;
 let activoId = null;
 let pedido = null;
 let grande = true;
+let hueco = null; // el canvas de Mochi: es el sitio donde va la mascota
+let anclaEl = null; // su contenedor, para medir en coordenadas relativas
 const mirada = { x: 0, y: 0 };
 
 function apartaMochi() {
   // Mochi tambien se pinta en canvas. Mientras manden las mascotas de JARVIS
   // se aparta, que si no se ven las dos superpuestas.
-  for (const id of ['bot-canvas', 'greeting-canvas']) {
-    const el = document.getElementById(id);
-    if (el) el.style.visibility = 'hidden';
-  }
+  if (!hueco) return;
+  hueco.style.visibility = 'hidden';
 }
 
 function apartaAtras() {
-  for (const id of ['bot-canvas', 'greeting-canvas']) {
-    const el = document.getElementById(id);
-    if (el) el.style.visibility = '';
-  }
+  if (hueco) hueco.style.visibility = '';
 }
 
 function medida() {
-  if (!lienzo) return;
+  if (!lienzo || !hueco || !anclaEl) return;
+  // La mascota va ENCIMA del hueco de Mochi, del mismo tamaño. Coucou cambia
+  // ese tamaño al abrir y cerrar la isla, asi que se lee cada vez en vez de
+  // fijar un tamaño: si no se queda pegada al borde al abrirse.
+  //
+  // Las coordenadas van RELATIVAS al ancla y en absoluto a proposito: la isla
+  // se centra con un transform, y con position:fixed eso haria que las
+  // coordenadas se midieran contra el ancestro transformado y la mascota
+  // acabara desplazada.
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const caja = lienzo.parentElement.getBoundingClientRect();
-  const lado = Math.max(80, Math.min(caja.width, caja.height) * 0.9);
-  const px = Math.round(lado * dpr);
-  // Redimensionar un lienzo lo deja en blanco. Si el tamano no ha cambiado
-  // no se toca, o el observer puede borrar un frame en cuanto se dispara.
-  if (lienzo.width === px && lienzo.height === px) { grande = lado > 190; return; }
-  lienzo.width = px;
-  lienzo.height = px;
-  lienzo.style.width = lado + 'px';
-  lienzo.style.height = lado + 'px';
-  grande = lado > 190;
+  const r = hueco.getBoundingClientRect();
+  const a = anclaEl.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const px = Math.round(r.width * dpr);
+  if (lienzo.width !== px || lienzo.height !== px) {
+    lienzo.width = px;
+    lienzo.height = px;
+  }
+  lienzo.style.width = r.width + 'px';
+  lienzo.style.height = r.height + 'px';
+  lienzo.style.left = (r.left - a.left) + 'px';
+  lienzo.style.top = (r.top - a.top) + 'px';
+  grande = r.width > 190;
 }
 
 export function montaMascotas(ancla) {
   if (lienzo || !ancla) return;
+  anclaEl = ancla;
+  hueco = document.getElementById('bot-canvas');
   lienzo = document.createElement('canvas');
   lienzo.id = 'jarvis-mascotas';
   Object.assign(lienzo.style, {
     position: 'absolute',
-    left: '50%',
-    top: '50%',
-    transform: 'translate(-50%,-50%)',
     pointerEvents: 'none',
     zIndex: '5',
   });
   ancla.appendChild(lienzo);
   ctx = lienzo.getContext('2d');
   apartaMochi();
+  // Coucou cambia el hueco al abrir y cerrar la isla; se sigue con observer
+  // y ademas una medida por frame, que es lo que mantiene la mascota en su
+  // sitio cuando el alto del panel cambia.
   try { new ResizeObserver(medida).observe(ancla); } catch (e) { /* sin observer */ }
+  if (hueco) { try { new ResizeObserver(medida).observe(hueco); } catch (e) { /* sin observer */ } }
   medida();
   pide();
   requestAnimationFrame(bucle);
@@ -117,6 +131,7 @@ function bucle(ms) {
   requestAnimationFrame(bucle);
   if (!motorActivo || !ctx) return;
   if (!ultimo) ultimo = ms;
+  medida();
   // La isla no recibe raton de forma fiable, asi que la mirada va sola: es el
   // caso "nadie ha movido el raton" del HTML.
   mirada.x = Math.sin(ms / 1000 * 0.5) * 0.45;
@@ -185,4 +200,9 @@ export function apaga() {
 
 // Enganche para probar y depurar desde la consola del renderer: sin esto no
 // hay forma de forzar un estado ni cambiar de mascota a mano.
-globalThis.__mascotas = { muestraPorId, sincroniza, estadoActual, motorDe: (id) => motores[id] };
+globalThis.__mascotas = {
+  muestraPorId, sincroniza, estadoActual,
+  motorDe: (id) => motores[id],
+  activo: () => activoId,
+  rect: () => (lienzo ? lienzo.getBoundingClientRect() : null),
+};
