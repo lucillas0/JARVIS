@@ -60,12 +60,12 @@ function medida() {
   const a = anclaEl.getBoundingClientRect();
   if (!r.width || !r.height) return;
 
-  // El dibujo ocupa unos 160 unidades de alto sobre un lado de 200, y las
-  // manos y el globo se salen un poco mas. Con esta altura maxima, lo dibujado
-  // no llega a salirse por arriba. Y el tope de 104 es para que se vea dentro
-  // de la isla sin taparla: antes salia de 138 y se salia de la vista.
-  const altoUtil = Math.max(60, Math.min(window.innerHeight - 10, 130));
-  const lado = Math.max(28, Math.min(r.width * 1.25, altoUtil / 0.82, 104));
+  // El tamaño es el de Coucou: el lado menor de la caja de Mochi. Las cuatro
+  // mascotas se dibujan ahi con su propio estilo (Jarvi, Buffi, Vee y Opi)
+  // pero ocupan el hueco que ocupa Mochi, que es lo que se ve en la isla.
+  // El altoUtil es solo una red de seguridad por si la ventana se encoje.
+  const altoUtil = Math.max(60, Math.min(window.innerHeight - 10, 160));
+  const lado = Math.max(28, Math.min(r.width, r.height, altoUtil));
 
   const px = Math.round(lado * dpr);
   if (lienzo.width !== px || lienzo.height !== px) {
