@@ -5,6 +5,11 @@ dist/
 build/
 dist-installer/
 
+# Las ruedas de Python se descargan al compilar (ver build.yml). Son cientos
+# de MB y son distintas para cada plataforma, asi que no van en el repo.
+*.whl
+**/dist-assets/wheelhouse/
+
 *.exe
 *.onnx
 

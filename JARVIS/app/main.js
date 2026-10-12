@@ -407,6 +407,81 @@ function writeEnvFromExample() {
   }
 }
 
+// ------------------------------------------------------------------ //
+// Progreso de la instalacion
+// ------------------------------------------------------------------ //
+// pip habla de dos maneras distintas segun como se instale, y antes solo se
+// escuchaba una de ellas, que es por lo que la barra se quedaba clavada:
+//
+//   por red:   "Collecting numpy"
+//   con ruedas: "Processing .../numpy-2.1.0-....whl"   <- no hay Collecting
+//
+// Ademas, entre linea y linea puede pasar un buen rato (descomprimir una rueda
+// grande, compilar algo), asi que ademas del progreso real se deja que la barra
+// avance sola poco a poco. Nunca se retrocede y nunca se pasa del tope.
+function crearSeguimiento(desde, hasta, total) {
+  const vistos = new Set();
+  const estado = { percent: desde, ultimo: Date.now() };
+  // El denominador se satura a proposito: si pip avisa de mas paquetes de los
+  // que contabamos, la barra se queda cerca del tope en vez de reventarse.
+  const tanto = (n) => Math.min(1, n / Math.max(total, 1));
+
+  const sube = (nuevo, detalle) => {
+    const objetivo = Math.max(estado.percent, Math.min(hasta, nuevo));
+    if (objetivo !== estado.percent) {
+      estado.percent = objetivo;
+      estado.ultimo = Date.now();
+    }
+    sendSetup({
+      phase: 'setup',
+      title: 'Preparando el cerebro',
+      detail: detalle || 'Instalando dependencias…',
+      percent: estado.percent,
+    });
+  };
+
+  return {
+    /** Una linea de pip: se leea lo que venga. */
+    linea(linea) {
+      const m = /^(?:Collecting|Downloading)\s+(\S+)/.exec(linea);
+      if (m) {
+        vistos.add(m[1]);
+        sube(desde + Math.round(tanto(vistos.size) * (hasta - desde)), 'Instalando ' + m[1]);
+        return;
+      }
+      const w = /^Processing\s+.*?([A-Za-z0-9_.-]+?)-[\d.]+.*\.whl/.exec(linea);
+      if (w) {
+        vistos.add(w[1]);
+        sube(desde + Math.round(tanto(vistos.size) * (hasta - desde)), 'Instalando ' + w[1]);
+        return;
+      }
+      if (/^Installing collected packages:/.test(linea)) {
+        // pip ya sabe cuantos va a instalar: cuenta y adelanta, pero sin
+        // saltarse hasta el final. Lo que viene ahora (descomprimir y montar
+        // 180 ruedas) es la parte lenta de verdad, asi que se reserva sitio
+        // para ella en vez de llenar la barra aqui.
+        const n = linea.slice(linea.indexOf(':') + 1).split(',').filter((s) => s.trim()).length;
+        if (n > 0) {
+          for (let i = 0; i < n; i++) vistos.add('x' + i);
+          sube(desde + Math.round(tanto(n) * (hasta - desde) * 0.55), 'Montando los paquetes…');
+        }
+        return;
+      }
+      if (/^Successfully installed/.test(linea)) {
+        // Ultima linea de pip: aqui ya esta todo instalado.
+        sube(hasta, 'Dependencias instaladas');
+      }
+    },
+    /** Si pip calla, la barra sigue respirando. */
+    tic() {
+      if (Date.now() - estado.ultimo < 1200) return;
+      const techo = Math.min(hasta - 4, desde + Math.round(vistos.size / total * (hasta - desde)) + 6);
+      if (estado.percent < techo) sube(techo);
+    },
+    percent() { return estado.percent; },
+  };
+}
+
 async function runSetup() {
   sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Buscando Python…', percent: 2 });
   const python = findPython();
@@ -437,8 +512,8 @@ async function runSetup() {
     const wheelhouse = app.isPackaged
       ? path.join(ROOT_DIR, 'wheelhouse')
       : path.join(ROOT_DIR, 'dist-assets', 'wheelhouse');
-    //    Si existe wheelhouse local (viene con el instalador), instalamos sin red.
-    const hasLocal = process.platform === 'win32' && fs.existsSync(wheelhouse) &&
+    //    Si hay ruedas en el disco (vienen con el instalador), se instala sin red.
+    const hasLocal = fs.existsSync(wheelhouse) &&
       fs.readdirSync(wheelhouse).some((f) => f.endsWith('.whl'));
     const requirements = requirementsFile();
     const reqPath = path.basename(requirements);
@@ -451,48 +526,37 @@ async function runSetup() {
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith('#'));
     const total = Math.max(reqs.length, 1);
-    let got = 0;
+    // Con ruedas incluidas pip avisa una vez por rueda instalada, no por
+    // requisito. Si contamos los requisitos como denominador se dispara al
+    // principio, asi que se cuenta lo que hay de verdad en la carpeta.
+    const piezas = hasLocal
+      ? fs.readdirSync(wheelhouse).filter((f) => f.endsWith('.whl')).length
+      : total;
+    const seg = crearSeguimiento(16, 90, Math.max(piezas, total));
     sendSetup({
       phase: 'setup', title: 'Preparando el cerebro',
-      detail: hasLocal ? 'Instalando dependencias (local, sin red)…' : 'Descargando dependencias (la primera vez tarda unos minutos)…',
+      detail: hasLocal
+        ? 'Instalando dependencias incluidas (sin internet)…'
+        : 'Descargando dependencias (la primera vez tarda unos minutos)…',
       percent: 16,
     });
+    // Si pip tarda en decir nada, la barra sigue avanzando sola.
+    const tic = setInterval(() => seg.tic(), 900);
     try {
-      await runCmd(venvPy(), pipArgs, {
-        onLine: (line) => {
-          const m = line.match(/^Collecting\s+(\S+)/);
-          if (m) {
-            got++;
-            const pct = Math.min(84, 16 + Math.round((got / total) * 68));
-            sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Instalando ' + m[1], percent: pct });
-          } else if (/^Installing collected|^Successfully installed/.test(line)) {
-            sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: line, percent: Math.min(90, 84 + got * 0.1) });
-          }
-        },
-      });
-    } catch (localErr) {
-      // Fallback: si el wheelhouse local falla (versiones incompatibles), bajar por red.
-      if (hasLocal) {
-        console.error('[JARVIS] wheelhouse local falló, reintento por red:', localErr && localErr.message);
-        try {
-          await runCmd(venvPy(), ['-m', 'pip', 'install', '-r', reqPath, '--no-input'], {
-            onLine: (line) => {
-              const m = line.match(/^Collecting\s+(\S+)/);
-              if (m) {
-                got++;
-                const pct = Math.min(84, 16 + Math.round((got / total) * 68));
-                sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Instalando ' + m[1], percent: pct });
-              } else if (/^Installing collected|^Successfully installed/.test(line)) {
-                sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: line, percent: Math.min(90, 84 + got * 0.1) });
-              }
-            },
-          });
-        } catch (err) {
-          throw err;
-        }
-      } else {
-        throw localErr;
+      try {
+        await runCmd(venvPy(), pipArgs, { onLine: (line) => seg.linea(line) });
+      } catch (localErr) {
+        // Si las ruedas locales no valen para esta plataforma, se cae a la red.
+        if (!hasLocal) throw localErr;
+        console.error('[JARVIS] las ruedas incluidas no sirvieron, voy por red:', localErr && localErr.message);
+        // Sin tocar el porcentaje: la barra nunca retrocede, solo avanza.
+        seg.linea('Las ruedas incluidas no valen para esta plataforma; descargando…');
+        await runCmd(venvPy(), ['-m', 'pip', 'install', '-r', reqPath, '--no-input'], {
+          onLine: (line) => seg.linea(line),
+        });
       }
+    } finally {
+      clearInterval(tic);
     }
     sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Dependencias instaladas.', percent: 90 });
 
@@ -601,6 +665,18 @@ function showOrb() {
 // WebGL de la ventana transparente no se quede en blanco. (Inerte: sin orbe propio.)
 function forceOrbRender() {
   // noop
+}
+
+// Abre o esconde la isla. Se usa desde el menu de la bandeja, que es la via
+// de salida cuando la isla esta escondida y no hay ninguna ventana a la que
+// volver con el raton.
+function toggleNotch() {
+  if (!notchWindow || notchWindow.isDestroyed()) return;
+  if (notchWindow.isVisible()) {
+    notchWindow.hide();
+  } else {
+    notchWindow.showInactive();
+  }
 }
 
 function restoreMain() {
@@ -1281,22 +1357,43 @@ function setAutostart(on) {
   }
 }
 
+function trayIconPath() {
+  // En macOS el menu de la barra necesita una imagen de plantilla (negra con
+  // alfa) para poder invertirse sola con el tema claro y el oscuro. Con un PNG
+  // normal se ve gris apagado y parece que no esta.
+  if (process.platform === 'darwin') {
+    const t = path.join(ASSETS_DIR, 'tray-iconTemplate.png');
+    if (fs.existsSync(t)) return t;
+  }
+  return path.join(ASSETS_DIR, 'tray-icon.png');
+}
+
 function createTray() {
-  const iconPath = path.join(ASSETS_DIR, 'tray-icon.png');
+  const iconPath = trayIconPath();
   try {
-    tray = new Tray(fs.existsSync(iconPath) ? iconPath : emptyIcon());
-    tray.setToolTip('JARVIS');
+    const img = fs.existsSync(iconPath) ? iconPath : emptyIcon();
+    tray = new Tray(img);
+    tray.setToolTip('JARVIS — clic para mostrarlo, clic derecho para el menu');
     const platformName = process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux';
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Mostrar/Activar', click: () => restoreMain() },
-      { label: 'Reiniciar brain', click: () => { brainProcess = null; startBrain(); } },
+    const menu = Menu.buildFromTemplate([
+      { label: 'Mostrar JARVIS', click: () => restoreMain() },
+      { label: 'Abrir / cerrar la isla', click: () => toggleNotch() },
+      { type: 'separator' },
+      { label: 'Reiniciar cerebro', click: () => { brainProcess = null; startBrain(); } },
       { label: 'Abrir carpeta del proyecto', click: () => shell.openPath(ROOT_DIR) },
       { label: `Iniciar con ${platformName}`, type: 'checkbox', checked: isAutostartOn(),
         click: (item) => { if (!setAutostart(item.checked)) item.checked = !item.checked; } },
       { type: 'separator' },
-      { label: 'Salir', click: () => app.quit() },
-    ]));
-    tray.on('click', () => restoreMain());
+      { label: 'Salir de JARVIS', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
+    ]);
+    tray.setContextMenu(menu);
+    // En macOS el clic abre el menu, que es lo esperable; en el resto de
+    // sistemas el clic muestra la ventana.
+    if (process.platform === 'darwin') {
+      tray.on('click', () => tray.popUpContextMenu(menu));
+    } else {
+      tray.on('click', () => restoreMain());
+    }
   } catch (err) {
     tray = null;
     console.warn('[JARVIS] No pude crear el icono de bandeja:', err.message);
