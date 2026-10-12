@@ -312,6 +312,10 @@ function dibujaAvatar(ms) {
       const st = a.motor.avanza(ms);
       st.grande = false;
       st.parpadeo = 0;
+      // A este tamano se acerca a la cara, que es lo que hace reconocible la
+      // mascota: con el dibujo entero a 26 px es una mancha de color.
+      st.zoom = 1.9;
+      st.zoomY = 6;
       const lado = a.lienzo.width;
       a.ctx.save();
       a.motor.dibuja(a.ctx, lado, lado, st, { x: 0, y: 0 });
