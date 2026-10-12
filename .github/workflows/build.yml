@@ -207,6 +207,9 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      # Sin esto no hay ficheros en disco: este job no compila, pero necesita
+      # leer el .yml y el .env de ejemplo para publicarlos.
+      - uses: actions/checkout@v4
       # El .yml y el .env de ejemplo se publican sueltos: quien monta el
       # servidor en un NAS no descarga el instalador de escritorio.
       - name: Recoger los ficheros del modo servidor
