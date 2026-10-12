@@ -12,7 +12,7 @@ openai>=1.30
 
 numpy>=1.26
 sounddevice>=0.4.6
-openwakeword>=0.4.1
+openwakeword>=0.4.1; sys_platform != "linux"
 onnxruntime>=1.17
 piper-tts>=1.2.0
 miniaudio>=1.56
