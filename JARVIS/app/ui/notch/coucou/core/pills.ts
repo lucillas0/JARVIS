@@ -76,8 +76,8 @@ export const PILL_CATALOG: readonly PillDefinition[] = [
     // eventos del cerebro. No tiene hooks de agente, asi que connect es "none".
     { id: "jarvis", name: "JARVIS", color: "#5B8DEF", category: "workspace",
       subtitle: N_("Agent"), source: "agent", support: "yes", connect: none },
-    { id: "freebuff", name: "Freebuff", color: "#E879F9", category: "workspace",
-      subtitle: N_("Integration"), source: "agent", support: "yes", connect: none },
+  { id: "freebuff", name: "Freebuff", color: "#E879F9", category: "workspace",
+    subtitle: N_("Integration"), source: "agent", support: "yes", connect: none },
     // ── Where you code ───────────────────────────────────────────────────────
     { id: "integration_claude", name: "VS Code", color: "#F5F6F8", category: "workspace",
       subtitle: N_("Integration"), source: "claudeCode", support: "yes", connect: hooks },
@@ -89,8 +89,8 @@ export const PILL_CATALOG: readonly PillDefinition[] = [
   { id: "agent_codex", name: "Codex", color: "#2DD4BF", category: "workspace",
     subtitle: N_("Integration"), source: "agent", support: "yes", connect: hooks },
   // ── Agents ─────────────────────────────────────────────────────────────────
-  { id: "agent_gemini", name: "Gemini CLI", color: "#8AB4F8", category: "agent",
-    subtitle: N_("Agent"), source: "agent", support: "yes", connect: hooks },
+  { id: "agent_freebuff", name: "Freebuff", color: "#E879F9", category: "agent",
+    subtitle: N_("Agent"), source: "agent", support: "yes", connect: none },
   { id: "agent_copilot", name: "Copilot CLI", color: "#818CF8", category: "agent",
     subtitle: N_("Agent"), source: "agent", support: "yes", connect: hooks },
   { id: "agent_muse", name: "Muse Code", color: "#38BDF8", category: "agent",

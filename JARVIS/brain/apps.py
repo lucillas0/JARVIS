@@ -21,7 +21,6 @@ DETECTORES: Dict[str, List[str]] = {
     "agent_opencode": ["opencode.exe", "opencode"],
     "integration_claude": ["code.exe", "devenv.exe"],
     "agent_codex": ["codex.exe", "codex"],
-    "agent_gemini": ["gemini.exe", "gemini"],
     "freebuff": ["freebuff.exe", "freebuff"],
     "agent_cursor": ["cursor.exe"],
     "agent_amp": ["amp.exe"],

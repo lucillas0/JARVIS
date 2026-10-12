@@ -171,20 +171,37 @@ export function buildPrompt(onHeightChange) {
     const bar = h("div", { class: "chat-bar" }, input, send);
     const modelDot = h("i", { class: "model-dot" });
     const modelName = h("span", { class: "model-name" });
-    const modelBtn = h("button", { class: "model-btn", title: tl(STRINGS.switchModel) }, modelDot, modelName, svg(ICONS.chevronUpDown, 9, { stroke: 2 }));
+    const modelBtn = h("button", { class: "model-btn", title: "Modelos configurados en JARVIS", disabled: true }, modelDot, modelName);
     const modelRow = h("div", { class: "model-row" }, modelBtn);
     const body = h("div", { class: "chat-body" });
     const picker = buildPicker(() => {
         body.classList.toggle("picking", picker.isOpen);
         drawModelButton();
     });
-    body.append(chipRow, log, picker.el, modelRow, bar);
+    picker.el.hidden = true;
+    body.append(chipRow, log, modelRow, bar);
     const el = h("div", { class: "view" }, h("div", { class: "card wash chat-card" }, body));
     el.querySelector(".card").style.setProperty("--wash", "rgba(99,102,241,0.5)");
     let sending = false;
     let renderedCount = -1;
     // A local model answers token by token: where its text so far is shown.
     let live = null;
+    let historyLoading = null;
+    const refreshHistory = (force = false) => {
+        if (historyLoading) return historyLoading;
+        if (!force && State.chatHistory.length) return Promise.resolve(State.chatHistory);
+        historyLoading = Promise.resolve(globalThis.jarvisNotchAPI?.getConversation?.(100))
+            .then((rows) => {
+                if (!Array.isArray(rows)) throw new Error("El historial de JARVIS no está disponible.");
+                State.chatHistory = rows.map((row, index) => ({ id: row.id || `history-${index}`, role: row.role, content: row.content }))
+                    .filter((row) => (row.role === "user" || row.role === "assistant") && row.content);
+                renderedCount = -1;
+                State.notify();
+                return State.chatHistory;
+            })
+            .finally(() => { historyLoading = null; });
+        return historyLoading;
+    };
     function drawModelButton() {
         const p = providerDef(State.settings.chatProvider);
         modelDot.style.background = p.accent;
@@ -221,20 +238,28 @@ export function buildPrompt(onHeightChange) {
         sending = true;
         drawModelButton();
         Sound.play("send");
-        State.chatHistory.push({ id: nextId++, role: "user", content: query });
+        const requestId = `notch-${Date.now()}-${nextId++}`;
+        State.chatHistory.push({ id: requestId, role: "user", content: query });
         State.stateOverride = "thinking";
         State.notify();
         onHeightChange();
         const file = State.droppedFile;
-        const context = State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
+        const context = State.promptContext?.kind === "file" ? State.promptContext
+            : State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
         try {
-            const reply = await Bridge.chatSend(query, context);
-            State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
+            let resolvedContext = context;
+            if (context?.kind === "file" && !context.content) {
+                resolvedContext = await Bridge.ingestFile(context.path);
+            }
+            await Bridge.chatSend(query, resolvedContext);
+            await refreshHistory(true);
             State.stateOverride = null;
             Sound.play("finish");
         }
         catch (err) {
             State.stateOverride = null;
+            State.chatHistory = State.chatHistory.filter((entry) => entry.id !== requestId);
+            renderedCount = -1;
             State.noteMessage = String(err).replace(/^Error:\s*/, "");
             State.view = "note";
             Sound.play("error");
@@ -294,6 +319,7 @@ export function buildPrompt(onHeightChange) {
         focus() {
             input.focus();
             input.select();
+            void refreshHistory();
         },
     };
 }

@@ -46,8 +46,8 @@ export const PILL_CATALOG = [
     { id: "agent_codex", name: "Codex", color: "#2DD4BF", category: "workspace",
         subtitle: N_("Integration"), source: "agent", support: "yes", connect: hooks },
     // ── Agents ─────────────────────────────────────────────────────────────────
-    { id: "agent_gemini", name: "Gemini CLI", color: "#8AB4F8", category: "agent",
-        subtitle: N_("Agent"), source: "agent", support: "yes", connect: hooks },
+    { id: "agent_freebuff", name: "Freebuff", color: "#E879F9", category: "agent",
+        subtitle: N_("Agent"), source: "agent", support: "yes", connect: none },
     { id: "agent_copilot", name: "Copilot CLI", color: "#818CF8", category: "agent",
         subtitle: N_("Agent"), source: "agent", support: "yes", connect: hooks },
     { id: "agent_muse", name: "Muse Code", color: "#38BDF8", category: "agent",

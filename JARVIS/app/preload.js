@@ -42,7 +42,14 @@ contextBridge.exposeInMainWorld('overlayAPI', {
 });
 
 contextBridge.exposeInMainWorld('jarvisNotchAPI', {
-  getConversation: (limit) => ipcRenderer.invoke('notch:jarvis-history', limit),
+  getConversation: (limit) => ipcRenderer.invoke('notch:get-conversation', limit),
+  sendMessage: (message, context) => ipcRenderer.invoke('notch:send-message', message, context),
+  resetConversation: () => ipcRenderer.invoke('notch:reset-conversation'),
+  focusPill: (id) => ipcRenderer.invoke('notch:focus-pill', id),
+  getSettings: () => ipcRenderer.invoke('notch:get-settings'),
+  saveSettings: (settings) => ipcRenderer.invoke('notch:save-settings', settings),
+  openSettings: () => ipcRenderer.invoke('notch:settings'),
+  log: (message) => ipcRenderer.invoke('notch:log', message),
   setExpanded: (expanded, height) => ipcRenderer.invoke('notch:set-expanded', expanded, height),
   hide: () => ipcRenderer.invoke('notch:hide'),
   openMain: () => ipcRenderer.invoke('notch:main'),
@@ -56,6 +63,7 @@ contextBridge.exposeInMainWorld('jarvisNotchAPI', {
   onEvent: (callback) => subscribe('brain:event', callback),
   onHoverOpen: (callback) => subscribe('notch:hover-open', callback),
   onHoverOut: (callback) => subscribe('notch:hover-out', callback),
+  onConversationChanged: (callback) => subscribe('notch:conversation-changed', callback),
   // Atajos del island, registrados en el proceso principal (Win+Shift+...).
   onIslandToggle: (callback) => subscribe('island:toggle', callback),
   onIslandTab: (callback) => subscribe('island:tab', callback),

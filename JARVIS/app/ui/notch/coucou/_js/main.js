@@ -20,6 +20,53 @@ async function main() {
         return;
     void Sound.preload();
     const island = new Island(root);
+    const notchApi = globalThis.jarvisNotchAPI;
+    let historyRevision = 0;
+    let historyLoad = Promise.resolve();
+    const refreshConversation = () => {
+        const revision = ++historyRevision;
+        historyLoad = Promise.resolve(notchApi?.getConversation?.(100)).then((rows) => {
+            if (revision !== historyRevision || !Array.isArray(rows)) return;
+            State.chatHistory = rows.map((row, index) => ({ id: row.id || `history-${index}`, role: row.role, content: row.content }))
+                .filter((row) => (row.role === "user" || row.role === "assistant") && row.content);
+            State.notify();
+        }).catch((error) => console.error("[coucou] No se pudo sincronizar la conversación:", error));
+        return historyLoad;
+    };
+    const openView = (view) => {
+        State.paused = false;
+        void Bridge.setPaused(false);
+        island.alert(view);
+        if (view === "prompt") island.takeKeyboard();
+    };
+    const removeSubscriptions = [
+        notchApi?.onIslandToggle?.(() => openView(State.defaultView())),
+        notchApi?.onIslandTab?.((tab) => {
+            if (tab === "chat") openView("prompt");
+            else if (tab === "new") {
+                State.droppedFile = null;
+                State.promptContext = null;
+                openView("prompt");
+                void refreshConversation();
+            } else openView("overview");
+        }),
+        notchApi?.onIslandSend?.(() => {
+            openView("prompt");
+            window.setTimeout(() => document.querySelector(".chat-input")?.dispatchEvent(
+                new KeyboardEvent("keydown", { key: "Enter", bubbles: true })), 140);
+        }),
+        notchApi?.onIslandMute?.(() => {
+            State.settings.soundEnabled = !State.settings.soundEnabled;
+            Sound.setEnabled(State.settings.soundEnabled);
+            void Bridge.saveSettings(State.settings);
+            State.notify();
+        }),
+        notchApi?.onConversationChanged?.(() => void refreshConversation()),
+        notchApi?.onRestore?.(() => { State.paused = false; island.alert(State.defaultView()); }),
+        notchApi?.onReset?.(() => island.fsm.forcePetit()),
+        notchApi?.onHide?.(() => island.fsm.forceHidden()),
+        notchApi?.onAutoCollapse?.(() => island.collapse()),
+    ].filter((remove) => typeof remove === "function");
     const boot = await Bridge.boot();
     if (boot) {
         State.settings = { ...State.settings, ...boot.settings };
@@ -35,9 +82,14 @@ async function main() {
     State.loadIntegrationTasks();
     if (boot && !boot.cursorPoll)
         island.followPageCursor();
+    await refreshConversation();
     await island.desktop.init();
     await onEvent("cursor", ({ x, y }) => island.onCursor(x, y));
     await onEvent("pointer-inside", (inside) => island.setPointerInside(inside));
+    await onEvent("jarvis-reply", (reply) => {
+        if (reply?.persisted) void refreshConversation();
+    });
+    await onEvent("jarvis-abierto", () => { void refreshConversation(); });
     /** Pause has to reach Rust too, or the pollers keep calling out. */
     const setPaused = (on) => {
         if (State.paused === on)
@@ -107,6 +159,6 @@ async function main() {
     // page wake the island so the visuals can be checked with `npm run dev`.
     if (!IS_TAURI) {
         document.addEventListener("click", () => Sound.resume(), { once: true });
-    }
+    }        window.addEventListener("unload", () => removeSubscriptions.forEach((remove) => remove()), { once: true });
 }
 void main();

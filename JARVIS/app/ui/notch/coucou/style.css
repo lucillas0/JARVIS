@@ -66,6 +66,7 @@ body {
   width: 240px;
   height: 6px;
   background: transparent;
+  pointer-events: none;
 }
 
 /* ── Island ─────────────────────────────────────────────────────────────── */
@@ -174,6 +175,19 @@ body {
   gap: 3px;
   pointer-events: none;
   transition: opacity 0.25s ease-in-out;
+}
+
+#mini-grid .mini {
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+#mini-grid .mini:hover,
+#mini-grid .mini:focus-visible {
+  filter: brightness(1.25);
+  outline: 1px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 1px;
 }
 
 /* A mini Mochi: the slot is the body, the canvas is larger and overflows it so

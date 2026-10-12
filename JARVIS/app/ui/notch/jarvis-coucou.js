@@ -7,11 +7,24 @@
 //
 // Se carga despues de main.js del repo, que es quien crea la isla.
 
-import { Bridge } from "./coucou/_js/core/bridge.js";
+import { Bridge, emiteEvento } from "./coucou/_js/core/bridge.js";
 import { State } from "./coucou/_js/core/state.js";
 
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 const MAIN = "jarvis";
+
+// El raton lo lleva followPageCursor de Coucou, leyendo los mousemove de la
+// propia pagina (Bridge.boot devuelve cursorPoll:false para que lo haga).
+//
+// Ojo con 'pointer-inside': ese flag solo existe para Linux, donde el compositor
+// dice si el puntero esta sobre la capa. Si aqui se le pasa false, onCursor
+// descarta toda posicion y la isla no vuelve a abrirse nunca.
+function enganchaAtajos() {
+  const api = globalThis.jarvisNotchAPI;
+  if (!api) return;
+  // Win+Shift+J y el menu: sacar la isla de la pausa y abrirla.
+  api.onIslandToggle?.(() => emiteEvento("tray", "open"));
+}
 
 // Los verbos son los de Coucou (views/hooks.ts), no traducciones inventadas.
 const VERBO = {
@@ -158,3 +171,4 @@ function empiezaMirada() {
 
 conecta();
 empiezaMirada();
+enganchaAtajos();
