@@ -8,6 +8,9 @@ dist-installer/
 *.exe
 *.onnx
 
+# rcedit si es necesario: sin el, el .exe de Windows sale sin icono
+!JARVIS/app/scripts/rcedit-x64.exe
+
 .env
 __pycache__/
 *.pyc
