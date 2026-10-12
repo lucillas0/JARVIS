@@ -224,6 +224,25 @@ jobs:
           merge-multiple: true
       - name: Listar los ficheros
         run: ls -la artefactos servidor
+      # electron-builder nombra los ficheros como electron-builder-XX-4.1.0-win-x64.exe,
+      # con la arquitectura en medio y abreviaturas raras (x86_64, amd64). Para quien
+      # descarga, el nombre tiene que decir que sistema es y que version es, asi que
+      # se renombran aqui, que es donde ya estan todos juntos.
+      - name: Poner nombres que se entiendan
+        run: |
+          VERSION=$(node -p "require('./JARVIS/app/package.json').version")
+          cd artefactos
+          mover() { if [ -f "$1" ]; then mv -v "$1" "$2"; fi; }
+          mover "JARVIS-${VERSION}-win-x64.exe"     "Windows-${VERSION}.exe"
+          mover "JARVIS-${VERSION}-x86_64.AppImage" "Linux-${VERSION}.AppImage"
+          mover "JARVIS-${VERSION}-amd64.deb"       "Linux-${VERSION}.deb"
+          mover "JARVIS-${VERSION}-x86_64.rpm"      "Linux-${VERSION}.rpm"
+          mover "JARVIS-${VERSION}-x64.tar.gz"      "Linux-${VERSION}.tar.gz"
+          mover "JARVIS-${VERSION}-arm64.AppImage"  "Linux-arm64-${VERSION}.AppImage"
+          mover "JARVIS-${VERSION}-arm64.tar.gz"    "Linux-arm64-${VERSION}.tar.gz"
+          mover "JARVIS-${VERSION}-mac-x64.dmg"     "Mac-Intel-${VERSION}.dmg"
+          mover "JARVIS-${VERSION}-mac-arm64.dmg"   "Mac-Silicon-${VERSION}.dmg"
+          ls -la
       - name: Crear la release
         uses: softprops/action-gh-release@v2
         with:
