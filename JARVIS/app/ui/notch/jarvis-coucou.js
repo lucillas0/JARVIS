@@ -9,6 +9,7 @@
 
 import { Bridge, emiteEvento } from "./coucou/_js/core/bridge.js";
 import { State } from "./coucou/_js/core/state.js";
+import { montaMascotas, muestra, sincroniza } from "./jarvis-mascotas.js";
 
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 const MAIN = "jarvis";
@@ -169,6 +170,41 @@ function empiezaMirada() {
   consulta.tarea = setInterval(miraApps, 4000);
 }
 
+// ── Mascotas ─────────────────────────────────────────────────────────────────
+// La isla pinta a Mochi, que es de Coucou. Aqui se superpone una capa con las
+// mascotas de JARVIS (Jarvi, Vee, Opi y Buffi), que cambian con la pastilla que
+// tenga el foco y con el estado en el que este: trabajando, compilando,
+// pensando, pidiendo permiso... y cuando no hay nada que hacer, se lucen.
+
+// Espera a que Coucou haya montado la isla: el contenedor de la mascota no
+// existe hasta entonces.
+function esperaIsla() {
+  const ancla = document.querySelector("#bot-canvas") && document.querySelector("#bot-canvas").parentElement;
+  if (!ancla) { setTimeout(esperaIsla, 300); return; }
+  montaMascotas(ancla);
+  muestra(State.focusId || MAIN);
+  sincroniza("idle");
+}
+
+function sigueElFoco() {
+  // Cada vez que Coucou cambia de pastilla, la mascota tambien.
+  let ultimoFoco = null;
+  let ultimoEstado = null;
+  setInterval(() => {
+    const foco = State.focusId || MAIN;
+    if (foco !== ultimoFoco) { ultimoFoco = foco; muestra(foco); }
+    const tarea = State.tasks.find((t) => t.id === foco);
+    const estado = (tarea && tarea.status) || "idle";
+    if (estado !== ultimoEstado) { ultimoEstado = estado; sincroniza(estado); }
+  }, 500);
+}
+
 conecta();
 empiezaMirada();
 enganchaAtajos();
+sigueElFoco();
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", esperaIsla);
+} else {
+  esperaIsla();
+}
