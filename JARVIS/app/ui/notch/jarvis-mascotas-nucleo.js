@@ -152,12 +152,12 @@ function brazo(c, sx, x, y, vis, lado, v, colores, bulto) {
 }
 
 // Globo con el simbolo del estado, arriba a la izquierda.
-function globo(c, W, h, P, ph, sy, saltitos, estadoDef, bobA, hop, salto) {
+function globo(c, W, h, P, ph, sy, saltitos, estadoDef, bobA, hop, baseY) {
   if (P.bs <= 0.02) return;
   c.save();
   c.translate(W / 2, W / 2);
   c.scale(W / 200, W / 200);
-  c.translate(-47, -44 + Math.sin(ph.b) * bobA * 0.5 - hop * 0.6 - salto);
+  c.translate(-47, (baseY === undefined ? -44 : baseY) + Math.sin(ph.b) * bobA * 0.5 - hop * 0.6);
   const bs = Math.max(0, P.bs) * (1 + saltitos * 0.18);
   c.scale(bs, bs);
   c.fillStyle = `hsl(${h},${estadoDef.globoS},${estadoDef.globoL}%)`;
@@ -177,14 +177,22 @@ function globo(c, W, h, P, ph, sy, saltitos, estadoDef, bobA, hop, salto) {
 }
 
 // Ojos: los cuatro los dibujan casi igual (elipses que se cierran al parpadear,
-// o curva al sonreir, o X al fallar).
-function ojos(c, P, ph, t, lx, ly, ee, mirilla, color, separacion, transformada) {
+// o curva al sonreir, o X al fallar). Jarvi es el unico que los quiere un pelo
+// mas grandes y con el puntito de brillo, asi que eso entra por `opciones`.
+function ojos(c, P, ph, t, lx, ly, ee, mirilla, color, separacion, transformada, opciones) {
+  const o = opciones || {};
+  const rx = o.rx === undefined ? 3.4 : o.rx;
+  const ry = o.ry === undefined ? 6 : o.ry;
+  const grosor = o.lw === undefined ? 2.4 : o.lw;
   const dzx = Math.cos(ph.d * 1.3) * 2.5 * P.dz;
   const dzy = Math.sin(ph.d * 1.3) * 2.5 * P.dz;
   c.save();
   c.shadowBlur = 9 * (transformada || 1);
+  // Jarvi dibuja los ojos con las puntas redondeadas; las demas lo dejan como
+  // lo tuvieran puesto (Opi ya viene con lineCap redondo de la diadema).
+  if (o.redondo) c.lineCap = 'round';
   c.strokeStyle = c.fillStyle = color;
-  c.lineWidth = 2.4;
+  c.lineWidth = grosor;
   for (const s of [-1, 1]) {
     c.save();
     c.translate(s * (separacion - Math.abs(lx) * 1.5) + lx * 5 + dzx, -3 + ly * 3 + dzy);
@@ -192,7 +200,13 @@ function ojos(c, P, ph, t, lx, ly, ee, mirilla, color, separacion, transformada)
     const a0 = Math.max(0, 1 - P.hp - P.xx);
     if (a0 > 0.01) {
       c.globalAlpha = a0;
-      c.beginPath(); c.ellipse(0, 0, 3.4, 6 * ee, 0, 0, 7); c.fill();
+      c.beginPath(); c.ellipse(0, 0, rx, ry * ee, 0, 0, 7); c.fill();
+      if (o.brillo) {
+        c.fillStyle = '#fff';
+        c.globalAlpha = a0 * 0.85;
+        c.beginPath(); c.arc(1, -2 * ee, 1.2, 0, 7); c.fill();
+        c.fillStyle = color;
+      }
     }
     if (P.hp > 0.01) {
       c.globalAlpha = P.hp;
@@ -209,13 +223,18 @@ function ojos(c, P, ph, t, lx, ly, ee, mirilla, color, separacion, transformada)
   c.restore();
 }
 
-// Mofletes.
-function mofletes(c, alpha) {
+// Mofletes. Vee los quiere en (21, 8) de 4.6x2.6 y Jarvi mas arriba y algo
+// mas gordos, en (21, 6) de 5x3; por eso la posicion y el tamano entran por
+// parametro en vez de ir fijos.
+function mofletes(c, alpha, color, cy, rx, ry) {
   c.save();
   c.shadowBlur = 0;
-  c.fillStyle = `rgba(255,120,140,${alpha})`;
+  c.fillStyle = `rgba(${color || '255,120,140'},${alpha})`;
+  const y = cy === undefined ? 8 : cy;
+  const a = rx === undefined ? 4.6 : rx;
+  const b = ry === undefined ? 2.6 : ry;
   for (const s of [-1, 1]) {
-    c.beginPath(); c.ellipse(s * 21, 8, 4.6, 2.6, 0, 0, 7); c.fill();
+    c.beginPath(); c.ellipse(s * 21, y, a, b, 0, 0, 7); c.fill();
   }
   c.restore();
 }

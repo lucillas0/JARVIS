@@ -171,10 +171,12 @@ function empiezaMirada() {
 }
 
 // ── Mascotas ─────────────────────────────────────────────────────────────────
-// Coucou pinta a Mochi y se queda con el. Las mascotas de JARVIS (Jarvi, Vee,
-// Opi y Buffi) siguen aqui, pero apagadas: se encienden en caliente con
-//   __mascotas.activa(true)
-// y se vuelven a apagar con false, que devuelve a Mochi.
+// Las mascotas de JARVIS (Jarvi, Vee, Opi y Buffi) son las de siempre: cada
+// pastilla lleva la suya y la isla pinta la de la pastilla con el foco. Van
+// ENCENDIDAS por defecto, que es lo que se quiere ver; el interruptor sigue
+// estando para volver a Mochi en caliente:
+//   __mascotas.activa(false)  -> vuelve Mochi, el de Coucou
+//   __mascotas.activa(true)   -> vuelven las nuestras
 //
 // El trabajo de estado (trabajando, compilando, pensando, pidiendo permiso) y
 // las florituras en reposo solo hacen falta si estan encendidas.
@@ -185,11 +187,9 @@ let QUIERO_MASCOTAS = false;
 function esperaIsla() {
   const ancla = document.querySelector("#bot-canvas") && document.querySelector("#bot-canvas").parentElement;
   if (!ancla) { setTimeout(esperaIsla, 300); return; }
-  // Por defecto se queda Mochi, que es la mascota de Coucou. Las de JARVIS
-  // solo entran si alguien las activa con __mascotas.activa(true).
-  montaMascotas(ancla);
-  muestra(State.focusId || MAIN);
-  sincroniza("idle");
+  // ponMascotas enciende de verdad (activa + monta): montaMascotas a secas
+  // solo crea el lienzo y se queda con Mochi delante.
+  ponMascotas(QUIERO_MASCOTAS);
   // Los avatares van en las pastillas, que Coucou vuelve a pintar cuando
   // cambian los agentes: se revisa cada poco por si aparece alguna nueva.
   montaAvatares();
@@ -215,10 +215,12 @@ function sigueElFoco() {
 setInterval(() => {
   if (!window.__mascotas) return;
   fijaFoco(State.focusId || MAIN);
+  // Los avatares de las pastillas van siempre; la mascota grande solo si esta
+  // encendida, porque si no manda Mochi.
+  montaAvatares();
   if (QUIERO_MASCOTAS) {
     const ancla = document.querySelector("#bot-canvas");
     if (ancla) montaMascotas(ancla.parentElement);
-    montaAvatares();
   }
 }, 900);
 

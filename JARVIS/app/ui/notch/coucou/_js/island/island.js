@@ -8,7 +8,7 @@ import { State } from "../core/state.js";
 import { SPOTIFY_ID, islandDances } from "../core/spotify.js";
 import { BotEngine, hexToRGB } from "../mochi/engine.js";
 import { Greeting } from "../mochi/greeting.js";
-import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots.js";
+import { createMiniBot, pruneMiniBots, syncMiniBotOutfit, syncMiniBotStates, tickMiniBots } from "../mochi/minibots.js";
 import { SeasonCache, parseOutfit } from "../mochi/wardrobe.js";
 import { UploadCanvas } from "../upload/canvas.js";
 import { USC, UploadSeq } from "../upload/sequence.js";
@@ -1047,15 +1047,14 @@ export class Island {
                 this.engine.slotHVel = 0;
             }
         }
-        // Only the main Mochi is dressed — the one of the main tool's pill (Settings →
-        // Active pills): a focused integration pill shows its own colours, unless
-        // the wardrobe is open (BotCanvasView.showOutfit, macOS).
-        // In the wardrobe the hovered outfit swaps in at once, without the drop-in.
+        // In the notch we want the selected skin/outfit to stay visible even when
+        // the focused pill is not the main one (the "second plane" the user asked
+        // for). The outfit is independent from body colours.
         const inWardrobe = State.mode === "expanded" && State.view === "wardrobe";
-        const mainFocused = State.focusId == null || State.focusId === State.mainPillId;
-        const showOutfit = mainFocused || State.mode !== "expanded" || inWardrobe;
         const outfit = State.wardrobePreview ?? this.seasons.get(parseOutfit(State.settings.mochiOutfit));
-        this.engine.setOutfit(showOutfit ? outfit : "none", !inWardrobe);
+        this.engine.setOutfit(outfit, !inWardrobe);
+        // Also apply it to the small pill/grid Mochis.
+        syncMiniBotOutfit(outfit, !inWardrobe);
         // Dances while music plays: always in the compact island, expanded only on
         // the music pill's card (BotCanvasView, macOS). Asked every frame.
         this.engine.setDancing(islandDances({

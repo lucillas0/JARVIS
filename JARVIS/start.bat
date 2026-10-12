@@ -14,7 +14,7 @@ if errorlevel 1 goto :error
 REM 2) Instalar dependencias de la app si falta node_modules
 cd app
 if not exist node_modules (
-  echo [JARVIS] Instalando dependencias de la app (descarga Electron ~100MB primero)...
+  echo [JARVIS] Instalando dependencias de la app - descarga Electron, unos 100MB -
   call npm install
 )
 if errorlevel 1 goto :error

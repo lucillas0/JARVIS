@@ -109,10 +109,12 @@ function pide() {
     activoId = id;
     motores[id].reinicia();
     clearTimeout(temporizador);
+    clearTimeout(relojCompila);
     // La mascota nueva nace en reposo, pero si ya habia un estado en marcha
     // hay que ponerselo: si no se queda en reposo mientras trabaja.
     if (canonicoActual && canonicoActual !== 'reposo') {
       motores[id].pon(estadoPara(id, canonicoActual));
+      if (canonicoActual === 'programando') programaCompilacion();
     } else {
       programaFloritura();
     }
@@ -161,6 +163,7 @@ function bucle(ms) {
 // ── Florituras de reposo ─────────────────────────────────────────────────────
 
 let temporizador = null;
+let relojCompila = null;
 let canonicoActual = null;
 
 const floriturasDe = (id) => (TIENE[id] || []).filter((n) => motores[id] && motores[id].estados && motores[id].estados[n]);
@@ -180,6 +183,29 @@ function programaFloritura() {
     }, 4800 + Math.random() * 2200);
   }, 7000 + Math.random() * 9000);
 }
+
+// ── Compilar ─────────────────────────────────────────────────────────────────
+// En los HTML compilar es un estado de TRABAJO, no un adorno: sale el portatil
+// con la barra de progreso. Por eso no esta en TIENE (que son cosas de reposo)
+// sino que se cuela de vez en cuando MIENTRAS el agente trabaja, y a los pocos
+// segundos vuelve solo al estado de trabajo. Asi cada mascota tiene su
+// equivalencia de "compilar" sin inventarle ningun estado nuevo.
+function programaCompilacion() {
+  clearTimeout(relojCompila);
+  if (!motorActivo || !tieneCompilando(activoId)) return;
+  relojCompila = setTimeout(() => {
+    if (!motorActivo || canonicoActual !== 'programando') return;
+    // Si mientras esperabamos le tocaba otra cosa (permiso, error), se respeta.
+    if (motorActivo.estado() !== estadoPara(activoId, 'programando')) return;
+    motorActivo.pon('compilando');
+    relojCompila = setTimeout(() => {
+      if (motorActivo && canonicoActual === 'programando') motorActivo.pon(estadoPara(activoId, 'programando'));
+      programaCompilacion();
+    }, 3200 + Math.random() * 2600);
+  }, 5000 + Math.random() * 7000);
+}
+
+const tieneCompilando = (id) => !!(motores[id] && motores[id].estados && motores[id].estados.compilando);
 
 /** Estado que llega de Coucou. */
 export function sincroniza(estadoCoucou) {
@@ -204,6 +230,7 @@ export function estadoActual() {
 
 export function apaga() {
   clearTimeout(temporizador);
+  clearTimeout(relojCompila);
   lienzo.style.display = 'none';
   apartaAtras();
 }
@@ -218,6 +245,7 @@ export function activa(on) {
   if (activado === !!on) return activado;
   activado = !!on;
   clearTimeout(temporizador);
+  clearTimeout(relojCompila);
   if (activado) {
     apartaMochi();
     if (lienzo) lienzo.style.display = '';
@@ -227,10 +255,8 @@ export function activa(on) {
   } else {
     apartaAtras();
     if (lienzo) lienzo.style.display = 'none';
-    // Los avatares de las pastillas tambien se retiran.
-    for (const [lienzoA] of avatares) if (lienzoA.parentNode) lienzoA.parentNode.removeChild(lienzoA);
-    avatares.clear();
-    document.querySelectorAll('#root .pill').forEach((p) => { delete p.dataset.jarvisAvatar; });
+    // Los avatares de las pastillas se quedan: son adorno de 15 px y no
+    // estorban a Mochi.
   }
   return activado;
 }
@@ -241,16 +267,25 @@ export function activa(on) {
 // encima, para no perder el color de la pastilla.
 
 const DE_ETIQUETA = {
-  jarvis: 'jarvi', 'jarvis': 'jarvi',
-  freebuff: 'buffi',
+  jarvis: 'jarvi',
+  freebuff: 'buffi', 'free buff': 'buffi',
   'vs code': 'vee', vscode: 'vee',
+  claude: 'vee', 'claude code': 'vee', 'claude desktop': 'vee',
   opencode: 'opi',
   codex: 'opi',
 };
 
 export function mascotaDeEtiqueta(texto) {
-  const t = String(texto || '').trim().toLowerCase();
-  return DE_ETIQUETA[t] || null;
+  const bruto = String(texto || '').trim().toLowerCase();
+  if (!bruto) return null;
+  // La pastilla puede traer solo el nombre, o el nombre y debajo el subtitulo
+  // o el ultimo paso del ticker. Se prueba el texto entero y, si no cuadra,
+  // solo la primera linea, que es el nombre. Asi "VS Code\nClaude Code" cae en
+  // Vee, pero un paso que mencione "claude" no cambia la mascota por su cuenta.
+  const directo = DE_ETIQUETA[bruto];
+  if (directo) return directo;
+  const primera = bruto.split('\n')[0].trim();
+  return DE_ETIQUETA[primera] || null;
 }
 
 // Clave por elemento y no por mascota: Codex y OpenCode comparten la misma
@@ -281,7 +316,9 @@ function dibujaAvatar(ms) {
 let avataresArrancados = false;
 
 export function montaAvatares() {
-  if (!activado) return;
+  // Los avatares de las pastillas van SIEMPRE, independently de que la mascota
+  // grande este encendida o no: son 15 px al lado del circleito de color y no
+  // cambian a Mochi ni su tamano, que es lo que hay que dejar como estaba.
   if (!avataresArrancados) { avataresArrancados = true; requestAnimationFrame(dibujaAvatar); }
   const pastillas = document.querySelectorAll('#root .pill');
   for (const pill of pastillas) {
@@ -292,19 +329,31 @@ export function montaAvatares() {
     // Se cuelga de la pastilla y NO del squareito de color: si va dentro, el
     // lienzo agranda el squareito, el squareito agranda la pastilla y al medir
     // otra vez el avatar sale mas grande. Tamano fijo para que no se mueva.
-    const lado = 15;
+    const lado = 26;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const lienzoA = document.createElement('canvas');
+    lienzoA.className = 'jarvis-avatar';
+    // Evita que el canvas haga scroll/reflow en layouts raros.
+    lienzoA.style.overflow = 'visible';
     lienzoA.width = Math.round(lado * dpr);
     lienzoA.height = Math.round(lado * dpr);
+    // Posicionado en absoluto para no ensanchar el pill (la etiqueta está
+    // centrada con posicion:absolute). Esto lo deja "en segundo plano".
     Object.assign(lienzoA.style, {
       width: lado + 'px',
       height: lado + 'px',
-      verticalAlign: 'middle',
-      marginLeft: '3px',
       pointerEvents: 'none',
-      flex: '0 0 auto',
+      position: 'absolute',
+      left: '37px', // ajustado: .pill .mini (24px) + margin-left (7px) + hueco (3px)
+      top: '50%',
+      transform: 'translateY(-50%)',
+      zIndex: '4',
+      // Asegura que el canvas no quede recortado por el contenedor
+      // (si algo cambia en CSS/overflow entre vistas).
     });
+    // En vez de insertarlo como hijo normal (que puede interferir con el layout
+    // del label centrado), lo dejamos como último hijo para asegurar que no
+    // empuja el ancho ni cambia el orden de apilado.
     pill.appendChild(lienzoA);
     pill.dataset.jarvisAvatar = id;
     const motor = creaMotor(MASCOTAS[id].def, MASCOTAS[id].estados, MASCOTAS[id].pintar);

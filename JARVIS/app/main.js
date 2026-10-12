@@ -702,7 +702,7 @@ function restoreMain() {
       x: bounds.x + Math.round((bounds.width - COUCOU_PANEL_W) / 2),
       y: bounds.y,
       width: COUCOU_PANEL_W,
-      height: COUCOU_PANEL_H,
+      height: COUCOU_VENTANA_H,
     };
   }
 
@@ -711,7 +711,7 @@ function updateNotchPanelBounds() {
   const { bounds } = screen.getPrimaryDisplay();
   try {
     notchWindow.setBounds({ x: bounds.x + Math.round((bounds.width - COUCOU_PANEL_W) / 2),
-      y: bounds.y, width: COUCOU_PANEL_W, height: COUCOU_PANEL_H });
+      y: bounds.y, width: COUCOU_PANEL_W, height: COUCOU_VENTANA_H });
     if (coucouColapsada) aplicaRegionEntrada();
   } catch { /* window may close during a display change */ }
 }
@@ -847,6 +847,13 @@ function encogeElNotch() {
 // island.rs las declara en el mismo sitio: PANEL 720x320 y la franja 240x6.
 const COUCOU_PANEL_W = 720;
 const COUCOU_PANEL_H = 320;
+// Coucou saca a Mochi unos 40 px por encima del panel (el lienzo de la mascota
+// va en top:-40). En macOS la ventana puede subirse por encima del techo, pero
+// en Windows no: la ventana arranca en y=0 y lo que sobresalga se corta. Por eso
+// la ventana crece en esa medida y la pagina baja el contenido lo mismo, para
+// que la mascota quepa entera sin cambiar su sitio respecto al panel.
+const MOCHI_SOBRESALTO = 44;
+const COUCOU_VENTANA_H = COUCOU_PANEL_H + MOCHI_SOBRESALTO;
 const COUCOU_STRIP_W = 240;
 const COUCOU_STRIP_H = 6;
 const HIT_MARGIN = 14;
