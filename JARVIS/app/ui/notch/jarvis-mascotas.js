@@ -50,20 +50,22 @@ function apartaAtras() {
 
 function medida() {
   if (!lienzo || !hueco || !anclaEl) return;
-  // La mascota va ENCIMA del hueco de Mochi. Se dibuja en un lienzo CUADRADO
-  // porque en los HTML el lienzo es cuadrado y la mascota esta centrada en el
-  // origen; si el lienzo no es cuadrado se estira y deja de parecerse.
-  // El lado es el mayor de los dos y se centra sobre el hueco.
-  //
-  // Las coordenadas van RELATIVAS al ancla y en absoluto a proposito: la isla
-  // se centra con un transform, y con position:fixed eso haria que las
-  // coordenadas se midieran contra el ancestro transformado y la mascota
-  // acabara desplazada.
+  // Coucou coloca el lienzo de la mascota en top:-40, para que sobresalga por
+  // encima del panel. Aqui la ventana arranca en y=0 y eso se ve cortado, así
+  // que la mascota grande se dibuja MAS PEQUEÑA para que quepa entera dentro
+  // del notch. Solo se toca la grande: los avatares de las pastillas, de 15 px,
+  // se quedan como estaban.
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const r = hueco.getBoundingClientRect();
   const a = anclaEl.getBoundingClientRect();
   if (!r.width || !r.height) return;
-  const lado = Math.max(r.width, r.height);
+
+  // El dibujo ocupa unos 160 unidades de alto sobre un lado de 200, y las
+  // manos y el globo se salen un poco mas. Con esta altura maxima, lo dibujado
+  // no llega a salirse por arriba.
+  const altoUtil = Math.max(60, Math.min(window.innerHeight - 10, 176));
+  const lado = Math.max(28, Math.min(r.width * 1.7, altoUtil / 0.82));
+
   const px = Math.round(lado * dpr);
   if (lienzo.width !== px || lienzo.height !== px) {
     lienzo.width = px;
@@ -71,9 +73,14 @@ function medida() {
   }
   lienzo.style.width = lado + 'px';
   lienzo.style.height = lado + 'px';
-  lienzo.style.left = (r.left - a.left + (r.width - lado) / 2) + 'px';
-  lienzo.style.top = (r.top - a.top + (r.height - lado) / 2) + 'px';
-  grande = lado > 190;
+
+  // Centrada en el hueco de Mochi, pero nunca por encima de la ventana.
+  const cx = r.left - a.left + r.width / 2;
+  const cy = r.top - a.top + r.height / 2;
+  const arriba = Math.max(2, cy - lado / 2);
+  lienzo.style.left = (cx - lado / 2) + 'px';
+  lienzo.style.top = arriba + 'px';
+  grande = lado > 150;
 }
 
 export function montaMascotas(ancla) {
