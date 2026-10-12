@@ -28,6 +28,8 @@ let motorActivo = null;
 let activoId = null;
 let pedido = null;
 let grande = true;
+let cuerpo = 73;   // el ancho que le queda a la mascota dentro de la caja
+let centroY = 36;  // su centro vertical, que en Coucou no es el de la caja
 let hueco = null; // el canvas de Mochi: es el sitio donde va la mascota
 let anclaEl = null; // su contenedor, para medir en coordenadas relativas
 const mirada = { x: 0, y: 0 };
@@ -54,36 +56,35 @@ function apartaAtras() {
 
 function medida() {
   if (!lienzo || !hueco || !anclaEl) return;
-  // Coucou coloca el lienzo de la mascota en top:-40, para que sobresalga por
-  // encima del panel. Aqui la ventana arranca en y=0 y eso se ve cortado, así
-  // que la mascota grande se dibuja MAS PEQUEÑA para que quepa entera dentro
-  // del notch. Solo se toca la grande: los avatares de las pastillas, de 15 px,
-  // se quedan como estaban.
+  // La caja es LA MISMA que la de Mochi, tal cual la calcula Coucou: ancho por
+  // alto, con el mismo left y el mismo top. Coucou la sube 40 px (BOT_OVERHANG)
+  // y por eso parece cortada; no lo esta, porque el cuerpo no va centrado en la
+  // caja sino al 79 % de ella, que es justo lo que cae dentro del panel. Se
+  // respeta su sitio en vez de inventar uno.
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const r = hueco.getBoundingClientRect();
   const a = anclaEl.getBoundingClientRect();
   if (!r.width || !r.height) return;
 
-  // Las medidas son las de Coucou: la misma caja que Mochi, ancho por alto.
-  // El lienzo se dibuja cuadrado (el de Mochi es un poco mas ancho que alto y
-  // si no se estira), del lado menor de esa caja, y centrado en ella.
-  const lado = Math.max(28, Math.min(r.width, r.height));
-
-  const px = Math.round(lado * dpr);
-  if (lienzo.width !== px || lienzo.height !== px) {
-    lienzo.width = px;
-    lienzo.height = px;
+  const ancho = r.width;
+  const alto = r.height;
+  const pxW = Math.round(ancho * dpr);
+  const pxH = Math.round(alto * dpr);
+  if (lienzo.width !== pxW || lienzo.height !== pxH) {
+    lienzo.width = pxW;
+    lienzo.height = pxH;
   }
-  lienzo.style.width = lado + 'px';
-  lienzo.style.height = lado + 'px';
+  lienzo.style.width = ancho + 'px';
+  lienzo.style.height = alto + 'px';
+  lienzo.style.left = (r.left - a.left) + 'px';
+  lienzo.style.top = (r.top - a.top) + 'px';
 
-  // Centrada en el hueco de Mochi, pero nunca por encima de la ventana.
-  const cx = r.left - a.left + r.width / 2;
-  const cy = r.top - a.top + r.height / 2;
-  const arriba = Math.max(2, cy - lado / 2);
-  lienzo.style.left = (cx - lado / 2) + 'px';
-  lienzo.style.top = arriba + 'px';
-  grande = lado > 150;
+  // Coucou dibuja a Mochi con un margen de BOT_SIDE a cada lado, asi que el
+  // cuerpo mide (ancho - 48), y lo baja con la mitad del voladizo mas un pelo
+  // de Separacion. Copiado tal cual para que la mascota caiga en el mismo sitio.
+  cuerpo = Math.max(6, ancho - 48);
+  centroY = alto / 2 + 20 + cuerpo * 0.06;
+  grande = cuerpo > 150;
 }
 
 export function montaMascotas(ancla) {
@@ -162,11 +163,14 @@ function bucle(ms) {
   const st = motorActivo.avanza(ms);
   st.grande = grande;
   st.parpadeo = relojParpadeo;
+  st.ref = cuerpo;
+  st.cy = centroY;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const lado = lienzo.width / dpr;
+  const W = lienzo.width / dpr;
+  const H = lienzo.height / dpr;
   ctx.save();
   ctx.scale(dpr, dpr);
-  motorActivo.dibuja(ctx, lado, lado, st, mirada);
+  motorActivo.dibuja(ctx, W, H, st, mirada);
   ctx.restore();
 }
 
@@ -262,19 +266,20 @@ export function activa(on) {
     muestra(mascotFor(focoGuardado));
     sincroniza('idle');
     programaFloritura();
+    avataresVisibles(true);
   } else {
     apartaAtras();
     if (lienzo) lienzo.style.display = 'none';
-    // Los avatares de las pastillas se quedan: son adorno de 15 px y no
-    // estorban a Mochi.
+    avataresVisibles(false);
   }
   return activado;
 }
 
 // ── Avatares de las pastillas ────────────────────────────────────────────────
 // En segundo plano: cada pastilla lleva su mascota en el circleito. Coucou usa
-// ahi un cuadrado de color, asi que el avatar se dibuja al lado en vez de
-// encima, para no perder el color de la pastilla.
+// ahi un cuadrado de color mas el gorro del atuendo, asi que el avatar se
+// dibuja ENCIMA con su mismo tamano y el canvas de Coucou se oculta: la skin
+// sustituye al circleito entero en vez de acompanarlo.
 
 const DE_ETIQUETA = {
   jarvis: 'jarvi',
@@ -329,51 +334,116 @@ function dibujaAvatar(ms) {
 
 let avataresArrancados = false;
 
+// Los avatares sustituyen al mini de Coucou, asi que van con el interruptor:
+// apagadas las mascotas vuelven los circleitos y los gorros de Coucou.
+function avataresVisibles(on) {
+  for (const [lienzoA, a] of avatares) {
+    if (!lienzoA.isConnected) { avatares.delete(lienzoA); continue; }
+    lienzoA.style.display = on ? '' : 'none';
+    const suyo = a.mini && a.mini.querySelector('canvas:not(.jarvis-avatar)');
+    if (suyo) suyo.style.visibility = on ? 'hidden' : '';
+  }
+}
+
 // Coloca el avatar ENCIMA del circleito de color y con su tamano exacto. Al
 // lado empujaba la etiqueta y se leia "Code" en vez de "Codex"; encima, lo
 // sustituye y la pastilla queda igual de ancha que la de Coucou.
-function situaAvatar(pill) {
-  const lienzoA = pill.querySelector('canvas.jarvis-avatar');
-  const mini = pill.querySelector('.mini');
-  if (!lienzoA || !mini) return;
+function situaSobre(anfitrion, mini, lienzoA) {
   const mr = mini.getBoundingClientRect();
-  const pr = pill.getBoundingClientRect();
+  const pr = anfitrion.getBoundingClientRect();
   if (!mr.width || !pr.width) return;
+  // Cuando el lienzo cuelga del propio mini (que ya es position:relative), se
+  // pega a su esquina: medir el desplazamiento aqui se descuadraba unos pixeles
+  // porque el canvas se accounta a si mismo en la medida.
+  const dentro = anfitrion === mini;
   Object.assign(lienzoA.style, {
     position: 'absolute',
-    left: (mr.left - pr.left) + 'px',
-    top: (mr.top - pr.top) + 'px',
+    left: dentro ? '0px' : (mr.left - pr.left) + 'px',
+    top: dentro ? '0px' : (mr.top - pr.top) + 'px',
     width: mr.width + 'px',
     height: mr.height + 'px',
     marginLeft: '0',
+    // El CSS de Coucou centra su lienzo con translate(-50%,-50%) porque el suyo
+    // es mas grande que el hueco. El nuestro va justa al hueco, asi que ese
+    // desplazamiento lo dejaba medio pixel (o medio mini) fuera de sitio.
+    transform: 'none',
     zIndex: '6',
     pointerEvents: 'none',
   });
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const lado = Math.max(8, Math.round(mr.width * dpr));
   if (lienzoA.width !== lado) { lienzoA.width = lado; lienzoA.height = lado; }
+  // Coucou pinta ahi su squareito de color, y su lienzo es mas grande que el
+  // hueco a proposito, para que el gorro y las particulas no se corten. Por eso
+  // el gorro se veia por encima de nuestra skin: se oculta su lienzo entero.
+  // El span se deja, que es el que recibe el clic.
+  const suyo = mini.querySelector('canvas');
+  if (suyo && suyo !== lienzoA) suyo.style.visibility = 'hidden';
+}
+
+function situaAvatar(pill) {
+  const mini = pill.querySelector('.mini');
+  if (!mini) return;
+  const lienzoA = mini.querySelector('canvas.jarvis-avatar');
+  if (lienzoA) situaSobre(mini, mini, lienzoA);
+}
+
+function creaAvatar(anfitrion, mini, id, marca) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const lienzoA = document.createElement('canvas');
+  lienzoA.className = 'jarvis-avatar';
+  lienzoA.width = 26 * dpr;
+  lienzoA.height = 26 * dpr;
+  anfitrion.appendChild(lienzoA);
+  if (marca) marca.dataset.jarvisAvatar = id;
+  const motor = creaMotor(MASCOTAS[id].def, MASCOTAS[id].estados, MASCOTAS[id].pintar);
+  motor.pon('reposo');
+  avatares.set(lienzoA, { lienzo: lienzoA, ctx: lienzoA.getContext('2d'), motor, mini });
+  situaSobre(anfitrion, mini, lienzoA);
 }
 
 export function montaAvatares() {
   if (!avataresArrancados) { avataresArrancados = true; requestAnimationFrame(dibujaAvatar); }
   const pastillas = document.querySelectorAll('#root .pill');
+  const ids = [];
   for (const pill of pastillas) {
-    if (pill.dataset.jarvisAvatar) { situaAvatar(pill); continue; }
+    if (pill.dataset.jarvisAvatar) { ids.push(pill.dataset.jarvisAvatar); situaAvatar(pill); continue; }
     const etiqueta = (pill.innerText || '').trim();
     const id = mascotaDeEtiqueta(etiqueta);
     if (!id) continue;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const lienzoA = document.createElement('canvas');
-    lienzoA.className = 'jarvis-avatar';
-    lienzoA.width = 26 * dpr;
-    lienzoA.height = 26 * dpr;
-    pill.appendChild(lienzoA);
-    pill.dataset.jarvisAvatar = id;
-    const motor = creaMotor(MASCOTAS[id].def, MASCOTAS[id].estados, MASCOTAS[id].pintar);
-    motor.pon('reposo');
-    avatares.set(lienzoA, { lienzo: lienzoA, ctx: lienzoA.getContext('2d'), motor });
-    situaAvatar(pill);
+    const mini = pill.querySelector('.mini');
+    if (!mini) continue;
+    ids.push(id);
+    // Se cuelga del mini y no de la pastilla: el mini es el hueco, y ahi dentro
+    // el lienzo es justo del tamano del circleito, sin el desplazamiento que le
+    // mete el borde de la pastilla.
+    creaAvatar(mini, mini, id, pill);
   }
+
+  // Coucou, cuando la isla esta compacta, enseña 4 minibots con su gorro. Tambien
+  // son un sustituto: se les pone la misma mascota que a su pastilla y al mismo
+  // tamano. Coucou rehace la cuadricula cuando cambian los agentes, asi que esto
+  // se vuelve a pasar en cada vuelta.
+  const cuadricula = document.querySelector('#mini-grid');
+  if (cuadricula) {
+    const minis = cuadricula.querySelectorAll('.mini');
+    for (let i = 0; i < minis.length; i++) {
+      const mini = minis[i];
+      if (!mini.querySelector('canvas.jarvis-avatar')) {
+        creaAvatar(mini, mini, ids[i] || 'jarvi');
+      } else {
+        situaSobre(mini, mini, mini.querySelector('canvas.jarvis-avatar'));
+      }
+    }
+  }
+
+  // Coucou borra la cuadricula entera al cambiar de agentes, asi que sus lienzos
+  // viejos se quedan en el mapa sin estar ya en la pagina.
+  for (const [lienzoA] of avatares) {
+    if (!lienzoA.isConnected) avatares.delete(lienzoA);
+  }
+  // Los nuevos nacen con lo que diga el interruptor, no siempre con el pelo.
+  avataresVisibles(activado);
 }
 
 // Enganche para probar y depurar desde la consola del renderer: sin esto no
