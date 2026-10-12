@@ -32,6 +32,11 @@ let hueco = null; // el canvas de Mochi: es el sitio donde va la mascota
 let anclaEl = null; // su contenedor, para medir en coordenadas relativas
 const mirada = { x: 0, y: 0 };
 
+// Coucou pinta a Mochi, que es su mascota. Las de JARVIS son un extra: por
+// defecto se queda Mochi, que es lo de Coucou, y las nuestras solo se montan
+// si se activan. Asi no se pierde nada y se puede volver cuando se quiera.
+let activado = false;
+
 function apartaMochi() {
   // Mochi tambien se pinta en canvas. Mientras manden las mascotas de JARVIS
   // se aparta, que si no se ven las dos superpuestas.
@@ -72,6 +77,7 @@ function medida() {
 }
 
 export function montaMascotas(ancla) {
+  if (!activado) return;
   if (lienzo || !ancla) return;
   anclaEl = ancla;
   hueco = document.getElementById('bot-canvas');
@@ -115,6 +121,7 @@ function pide() {
 }
 
 export function muestra(pastilla) {
+  if (!activado) return;
   const id = mascotFor(pastilla);
   if (id === activoId && motorActivo) return;
   pedido = id;
@@ -176,6 +183,7 @@ function programaFloritura() {
 
 /** Estado que llega de Coucou. */
 export function sincroniza(estadoCoucou) {
+  if (!activado) return;
   const canonico = deEstado(estadoCoucou);
   if (canonico === canonicoActual) return;
   canonicoActual = canonico;
@@ -198,6 +206,33 @@ export function apaga() {
   clearTimeout(temporizador);
   lienzo.style.display = 'none';
   apartaAtras();
+}
+
+// ── El interruptor ───────────────────────────────────────────────────────────
+//   __mascotas.activa(true)   -> las mascotas de JARVIS tapan a Mochi
+//   __mascotas.activa(false)  -> vuelve Mochi, el de Coucou
+let focoGuardado = 'jarvis';
+export function fijaFoco(id) { focoGuardado = id; }
+
+export function activa(on) {
+  if (activado === !!on) return activado;
+  activado = !!on;
+  clearTimeout(temporizador);
+  if (activado) {
+    apartaMochi();
+    if (lienzo) lienzo.style.display = '';
+    muestra(mascotFor(focoGuardado));
+    sincroniza('idle');
+    programaFloritura();
+  } else {
+    apartaAtras();
+    if (lienzo) lienzo.style.display = 'none';
+    // Los avatares de las pastillas tambien se retiran.
+    for (const [lienzoA] of avatares) if (lienzoA.parentNode) lienzoA.parentNode.removeChild(lienzoA);
+    avatares.clear();
+    document.querySelectorAll('#root .pill').forEach((p) => { delete p.dataset.jarvisAvatar; });
+  }
+  return activado;
 }
 
 // ── Avatares de las pastillas ────────────────────────────────────────────────
@@ -246,6 +281,7 @@ function dibujaAvatar(ms) {
 let avataresArrancados = false;
 
 export function montaAvatares() {
+  if (!activado) return;
   if (!avataresArrancados) { avataresArrancados = true; requestAnimationFrame(dibujaAvatar); }
   const pastillas = document.querySelectorAll('#root .pill');
   for (const pill of pastillas) {
@@ -284,4 +320,6 @@ globalThis.__mascotas = {
   motorDe: (id) => motores[id],
   activo: () => activoId,
   rect: () => (lienzo ? lienzo.getBoundingClientRect() : null),
+  activa, fijaFoco,
+  lasNuestrasEstan: () => activado,
 };
