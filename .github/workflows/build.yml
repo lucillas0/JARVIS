@@ -43,6 +43,7 @@ jobs:
       - run: npm ci --prefix JARVIS/app
       - name: Compilar
         run: |
+          set +e
           npm --prefix JARVIS/app run dist:win 2>&1 | tee build.log
           codigo=${PIPESTATUS[0]}
           if [ $codigo -ne 0 ]; then
@@ -79,6 +80,7 @@ jobs:
       - run: npm ci --prefix JARVIS/app
       - name: Compilar
         run: |
+          set +e
           npm --prefix JARVIS/app run dist:linux 2>&1 | tee build.log
           codigo=${PIPESTATUS[0]}
           if [ $codigo -ne 0 ]; then
@@ -119,6 +121,7 @@ jobs:
       - run: npm ci --prefix JARVIS/app
       - name: Compilar
         run: |
+          set +e
           npm --prefix JARVIS/app run dist:linux:arm 2>&1 | tee build.log
           codigo=${PIPESTATUS[0]}
           if [ $codigo -ne 0 ]; then
