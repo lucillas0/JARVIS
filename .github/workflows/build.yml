@@ -84,7 +84,7 @@ jobs:
       - name: Dependencias de AppImage
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
+          sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm build-essential python3-dev
       - run: python -m pip install --quiet pillow
       - run: python -m pip install --quiet pillow
       # Las ruedas viajan dentro del instalador para que al abrir JARVIS no
@@ -135,7 +135,7 @@ jobs:
       - name: Dependencias de AppImage
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
+          sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm build-essential python3-dev
       - run: python -m pip install --quiet pillow
       - run: python -m pip install --quiet pillow
       # Las ruedas viajan dentro del instalador para que al abrir JARVIS no
