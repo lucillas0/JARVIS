@@ -4110,8 +4110,11 @@ async def websocket_endpoint(ws: WebSocket):
                 # El LLM es una llamada lenta: se procesa en tarea aparte para que
                 # ESTE socket siga leyendo (pings, más mensajes, otros eventos) y el
                 # listener no se serialice mientras responde.
+                request_id = data.get("request_id")
+                if not isinstance(request_id, str) or len(request_id) > 100:
+                    request_id = None
                 asyncio.create_task(_process_user_message(message, data.get("input_mode", "text"),
-                                            bool(data.get("speak", False))))
+                                            bool(data.get("speak", False)), request_id=request_id))
 
             elif mtype == "confirmation_response":
                 ok = brain.risk.resolve(data.get("action_id", ""),
@@ -4241,7 +4244,8 @@ async def websocket_endpoint(ws: WebSocket):
         brain.clients.discard(ws)
 
 
-async def _process_user_message(message: str, input_mode: str = "text", speak: bool = False) -> None:
+async def _process_user_message(message: str, input_mode: str = "text", speak: bool = False,
+                                request_id: Optional[str] = None) -> None:
     """Procesa un mensaje en segundo plano (hilo) y devuelve el orbe a idle al acabar.
 
     Si speak=True (p. ej. desde la pizarra Win+J), además de emitir la respuesta
@@ -4256,7 +4260,8 @@ async def _process_user_message(message: str, input_mode: str = "text", speak: b
 
     async def _run():
         try:
-            result["reply"] = await asyncio.to_thread(handle_user_message, message, input_mode)
+            result["reply"] = await asyncio.to_thread(
+                handle_user_message, message, input_mode, None, not bool(request_id))
         except Exception:
             log.exception("_process_user_message")
             result["reply"] = ""
@@ -4264,7 +4269,8 @@ async def _process_user_message(message: str, input_mode: str = "text", speak: b
             done.set()
 
     async def _say(text, voice_text=None):
-        await brain._broadcast({"type": "assistant_reply", "text": text})
+        await brain._broadcast({"type": "assistant_reply", "text": text,
+                                "request_id": request_id, "persisted": False})
         if speak and brain.voice is not None:
             await asyncio.to_thread(_speak_text, voice_text or text, input_mode != "text")
 
@@ -4286,6 +4292,9 @@ async def _process_user_message(message: str, input_mode: str = "text", speak: b
         await _progress()
         await runner
         reply = result.get("reply", "")
+        if request_id:
+            await brain._broadcast({"type": "assistant_reply", "text": reply,
+                                    "request_id": request_id, "persisted": True})
         if speak and reply and brain.voice is not None:
             # El texto ya se mostró (input text); solo sonar, sin duplicar.
             await asyncio.to_thread(_speak_text, reply, input_mode != "text")

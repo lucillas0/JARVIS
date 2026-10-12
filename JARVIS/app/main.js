@@ -30,9 +30,91 @@ function brainDataDir() {
   return ud ? path.join(ud, 'brain-data') : BRAIN_DIR;
 }
 function brainDatabasePath() {
-  const persisted = path.join(brainDataDir(), 'jarvis.db');
-  return fs.existsSync(persisted) ? persisted : path.join(BRAIN_DIR, 'db', 'jarvis.db');
+  const candidates = [path.join(brainDataDir(), 'jarvis.db'), path.join(BRAIN_DIR, 'db', 'jarvis.db')];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
 }
+function isNotchSender(event) {
+  return !!notchWindow && !notchWindow.isDestroyed() && event.sender === notchWindow.webContents;
+}
+function notifyNotch(channel, payload) {
+  if (!notchWindow || notchWindow.isDestroyed() || notchWindow.webContents.isDestroyed()) return;
+  notchWindow.webContents.send(channel, payload);
+}
+function broadcastConversationChanged() {
+  notifyNotch('notch:conversation-changed');
+}
+function openNotchApp(identifier) {
+  const id = String(identifier || '').trim().toLowerCase();
+  if (!id) return false;
+  const shortcuts = {
+    freebuff: ['freebuff'], agent_freebuff: ['freebuff'], agent_opencode: ['opencode'],
+    integration_claude: ['code'], agent_cursor: ['cursor'], agent_codex: ['codex'],
+    agent_antigravity: ['antigravity'],
+  };
+  const terms = shortcuts[id] || [id.replace(/^agent_/, '').replace(/^integration_/, '')];
+  let apps = [];
+  try { apps = listApps() || []; } catch { /* app index unavailable */ }
+  const match = apps.find((app) => terms.some((term) =>
+    String(app.id || '').toLowerCase() === term || String(app.name || '').toLowerCase() === term ||
+    String(app.name || '').toLowerCase().includes(term)));
+  if (match?.path) { void shell.openPath(String(match.path)); return true; }
+  if (process.platform === 'win32') {
+    try { spawn('cmd', ['/c', 'start', '', terms[0]], { detached: true, windowsHide: true, stdio: 'ignore' }).unref(); return true; }
+    catch { /* app is not installed */ }
+  }
+  return false;
+}
+function startNewNotchConversation() {
+  try {
+    // Keep JARVIS as the one source of truth; archive for Coucou's local session only.
+    const rows = readJarvisConversation(brainDatabasePath(), 300);
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run('coucou_archived_conversations', JSON.stringify({ label: new Date().toISOString(), rows }));
+    return true;
+  } catch (error) {
+    console.error('[JARVIS] No pude archivar el contexto del notch:', error.message);
+    return false;
+  }
+}
+function sendNotchMessage(message, context) {
+  if (typeof message !== 'string' || !message.trim()) return Promise.reject(new Error('Escribe un mensaje antes de enviarlo.'));
+  if (context?.kind === 'file' && (typeof context.content !== 'string' || !context.content.trim())) {
+    return Promise.reject(new Error('No se pudo extraer contenido útil del archivo adjunto.'));
+  }
+  if (typeof WebSocket === 'undefined') return Promise.reject(new Error('WebSocket no está disponible en este proceso.'));
+  const id = `notch-${Date.now()}-${crypto.randomUUID()}`;
+  let text = message.trim();
+  if (context?.kind === 'file') {
+    const content = context.content.slice(0, 24000);
+    text += `\n[Archivo adjunto: ${String(context.name || 'documento').slice(0, 200)}]\n${content}${context.truncated || context.content.length > 24000 ? '\n[contenido truncado]' : ''}`;
+  }
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket('ws://127.0.0.1:8000/ws');
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error('JARVIS tardó demasiado en responder. Comprueba el historial antes de reintentar.')), 180000);
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.close(); } catch { /* noop */ }
+      if (error) reject(error); else resolve(result);
+    };
+    socket.addEventListener('open', () => {
+      try { socket.send(JSON.stringify({ type: 'user_message', message: text, input_mode: 'text', speak: false, id, request_id: id })); }
+      catch (error) { finish(error); }
+    }, { once: true });
+    socket.addEventListener('message', (event) => {
+      let payload;
+      try { payload = JSON.parse(event.data); } catch { return; }
+      if (payload.type !== 'assistant_reply' || payload.request_id !== id || payload.persisted === false) return;
+      finish(null, { text: String(payload.text || '') });
+      broadcastConversationChanged();
+    });
+    socket.addEventListener('error', () => finish(new Error('No se pudo conectar con el Brain de JARVIS.')), { once: true });
+    socket.addEventListener('close', () => { if (!settled) finish(new Error('Se perdió la conexión con el Brain de JARVIS.')); }, { once: true });
+  });
+}
+
 function venvDir() { return path.join(brainDataDir(), 'venv'); }
 function venvPy() {
   return path.join(venvDir(), process.platform === 'win32' ? 'Scripts' : 'bin',
@@ -537,41 +619,107 @@ function restoreMain() {
   // que se mueve es la region de entrada. Asi que se dimensiona una vez aqui.
   function notchBounds(expanded) {
     const { bounds } = screen.getPrimaryDisplay();
-    const width = expanded ? COUCOU_PANEL_W : COUCOU_STRIP_W;
-    const height = expanded ? COUCOU_PANEL_H : COUCOU_STRIP_H;
+    // Keep a fixed panel origin: renderer geometry and global pointer positions
+    // must be translated using the same window bounds in compact and open modes.
+    void expanded;
     return {
       x: bounds.x + Math.round((bounds.width - COUCOU_PANEL_W) / 2),
       y: bounds.y,
-      width,
-      height,
+      width: COUCOU_PANEL_W,
+      height: COUCOU_PANEL_H,
     };
   }
 
+function updateNotchPanelBounds() {
+  if (!notchWindow || notchWindow.isDestroyed()) return;
+  const { bounds } = screen.getPrimaryDisplay();
+  try {
+    notchWindow.setBounds({ x: bounds.x + Math.round((bounds.width - COUCOU_PANEL_W) / 2),
+      y: bounds.y, width: COUCOU_PANEL_W, height: COUCOU_PANEL_H });
+    if (coucouColapsada) aplicaRegionEntrada();
+  } catch { /* window may close during a display change */ }
+}
+
+function resetNotchRendererState() {
+  coucouRect = null;
+  coucouColapsada = false;
+  notchExpanded = false;
+  notchHovered = false;
+}
+
+function handleIslandShortcut(config) {
+  if (!notchWindow || notchWindow.isDestroyed()) { showNotch(true); return; }
+  if (!notchWindow.isVisible()) showNotch(true);
+  if (config.evento === 'island:toggle' && notchExpanded) {
+    notifyNotch('notch:auto-collapse');
+    return;
+  }
+  if (!notchExpanded && (config.evento === 'island:tab' || config.evento === 'island:send')) notifyNotch('notch:restore');
+  notifyNotch(config.evento, config.dato || null);
+}
+
+const NOTCH_SETTINGS_KEY = 'coucou_notch_settings';
+function sanitizeNotchSettings(settings) {
+  const allowed = new Set(['soundEnabled','soundVolume','autoCloseInterval','openOnHover','absenceInterval','activeIntegrations','mainPill','screen','autostart','hooksInstalled','model','showPlanInNotch','planRelayInstalled','showCodexPlanInNotch','chatProvider','chatModels','ollamaUrl','lmstudioUrl','customUrl','shortcuts','mochiOutfit','pillColors','language']);
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return {};
+  return Object.fromEntries(Object.entries(settings).filter(([key]) => allowed.has(key)));
+}
+function saveNotchSettings(settings) {
+  const safe = sanitizeNotchSettings(settings);
+  try {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(NOTCH_SETTINGS_KEY, JSON.stringify(safe));
+    notifyNotch('settings-changed', safe);
+    return true;
+  } catch (error) { console.error('[JARVIS] No pude guardar preferencias del notch:', error.message); return false; }
+}
+
+ipcMain.handle('notch:focus-pill', (event, id) => {
+  if (!isNotchSender(event) || typeof id !== 'string') return false;
+  notifyNotch('notch:focus-pill', id);
+  return true;
+});
+ipcMain.handle('notch:reset-conversation', (event) => {
+  if (!isNotchSender(event)) return false;
+  return startNewNotchConversation();
+});
+ipcMain.handle('notch:send-message', (event, message, context) => {
+  if (!isNotchSender(event)) throw new Error('Emisor del notch no autorizado.');
+  return sendNotchMessage(message, context);
+});
+ipcMain.handle('notch:get-conversation', (event, limit = 100) => {
+  if (!isNotchSender(event)) return [];
+  try { return readJarvisConversation(brainDatabasePath(), limit); }
+  catch (error) { console.error('[JARVIS] No pude leer el historial:', error.message); return []; }
+});
+
 function setNotchShape(expanded) {
-    if (!notchWindow || notchWindow.isDestroyed() || process.platform !== 'win32') return;
-    const bounds = notchWindow.getBounds();
-    const width = expanded ? 720 : 288;
-    const height = Math.max(1, bounds.height);
-    // Radio real de Coucou: 14 plegado, 22 abierto. El height/2 que usaba
-    // antes convertia la compacta en una capsula en vez del rectángulo del repo.
-    const radius = expanded ? 22 : 14;
-    try {
-      notchWindow.setShape(roundedRectRows(width, height, radius,
-        Math.round((bounds.width - width) / 2), 0));
-    } catch (err) {
-    console.warn('[JARVIS] No pude redondear el Notch nativo:', err.message);
+  if (!notchWindow || notchWindow.isDestroyed() || process.platform !== 'win32') return;
+  const bounds = notchWindow.getBounds();
+  const width = expanded ? COUCOU_PANEL_W : 288;
+  const height = Math.max(1, bounds.height);
+  const radius = expanded ? 22 : 14;
+  try {
+    notchWindow.setShape(roundedRectRows(width, height, radius,
+      Math.round((bounds.width - width) / 2), 0));
+  } catch (error) {
+    console.warn('[JARVIS] No pude redondear el Notch nativo:', error.message);
   }
 }
 
 function notchPointInside(point) {
       if (!notchWindow || notchWindow.isDestroyed()) return false;
-      // Con Coucou manda el rectangulo que la isla empuja: la ventana siempre
-      // mide 720 de ancho y el island solo ocupa la parte central.
+      const bounds = notchWindow.getBounds();
+      const local = { x: point.x - bounds.x, y: point.y - bounds.y };
+      if (coucouColapsada) {
+        const wakeX = Math.round((bounds.width - COUCOU_STRIP_W) / 2);
+        return local.x >= wakeX && local.x < wakeX + COUCOU_STRIP_W && local.y >= 0 && local.y < COUCOU_STRIP_H;
+      }
       if (coucouRect) {
         const r = coucouRect;
-        return point.x >= r.x && point.x < r.x + r.w && point.y >= r.y && point.y < r.y + r.h;
+        return local.x >= r.x && local.x < r.x + r.w && local.y >= r.y && local.y < r.y + r.h;
       }
-      return notchHitTest(point, notchWindow.getBounds());
+      return notchHitTest(local, { x: 0, y: 0, width: bounds.width, height: bounds.height });
     }
 
     // ¿El puntero está sobre la isla? El rectángulo lo manda el renderer.
@@ -588,14 +736,18 @@ function notchPointInside(point) {
       if (notchPointerTimer) return;
       let atras = null;
       notchPointerTimer = setInterval(() => {
-        if (!notchWindow || notchWindow.isDestroyed() || !notchWindow.isVisible()) return;
+        if (!notchWindow || notchWindow.isDestroyed()) { atras = null; return; }
+        if (!notchWindow.isVisible()) { atras = null; return; }
         const dentro = punteroSobreElNotch();
         if (dentro === atras) return;
         atras = dentro;
         try {
-          // Encima: eventos normales. Fuera: se dejan pasar al escritorio,
-          // pero reenviados para que la isla siga viendo el raton.
           notchWindow.setIgnoreMouseEvents(!dentro, { forward: true });
+          const bounds = notchWindow.getBounds();
+          const cursor = screen.getCursorScreenPoint();
+          notifyNotch(dentro ? 'notch:hover-open' : 'notch:hover-out', {
+            x: cursor.x - bounds.x, y: cursor.y - bounds.y, inside: dentro,
+          });
         } catch (err) { /* la ventana pudo cerrarse */ }
       }, 100);
     }
@@ -698,6 +850,7 @@ function showNotch(expand = false) {
   notchExpanded = false;
   notchHovered = false;
   notchWindow.setBounds(notchBounds(false));
+  resetNotchRendererState();
   setNotchShape(false);
   notchWindow.setIgnoreMouseEvents(true, { forward: true });
   notchWindow.showInactive();
@@ -903,9 +1056,8 @@ function registerOverlayHotkey() {
     const ok = globalShortcut.register('Super+J', toggleOverlay);
     console.log('[JARVIS] Atajo Win+J ' + (ok ? 'registrado.' : 'NO se pudo registrar.'));
 
-    /* Atajos del island, como los de Coucou (shortcut.island.*). Se guardan en
-       un objeto para poder avisar al renderer de cuál se pulsó; si no, el atajo
-       no tiene efecto porque la ventana está en otro proceso. */
+    /* Los atajos se envían a la máquina de estados del renderer; así se usa
+       el mismo flujo que los clics y el botón de plegado. */
     const atajos = {
       'Super+Shift+J': { evento: 'island:toggle', que: 'abrir o cerrar el island' },
       'Super+Shift+1': { evento: 'island:tab', dato: 'home', que: 'ir a Inicio' },
@@ -927,11 +1079,7 @@ function registerOverlayHotkey() {
   }
 
   function mandaAtajo(cfg) {
-    if (!notchWindow || notchWindow.isDestroyed()) { showNotch(true); return; }
-    if (!notchWindow.isVisible()) { showNotch(true); }
-    try {
-      notchWindow.webContents.send(cfg.evento, cfg.dato || null);
-    } catch { /* noop */ }
+    handleIslandShortcut(cfg);
   }
 
 // ---- overlay ----
@@ -1214,7 +1362,7 @@ app.whenReady().then(() => {
   // 'screen' no existe hasta que la app esta lista.
   screen.on('display-metrics-changed', () => {
     if (notchWindow && !notchWindow.isDestroyed()) {
-      notchWindow.setBounds(notchBounds(notchExpanded));
+      updateNotchPanelBounds();
       setNotchShape(notchExpanded);
     }
   });
@@ -1267,8 +1415,22 @@ ipcMain.handle('history:get', (_e, limit = 20) => {
 });
 
 ipcMain.handle('notch:jarvis-history', (event, limit = 100) => {
-  if (!notchWindow || event.sender !== notchWindow.webContents || notchWindow.isDestroyed()) return [];
-  return readJarvisConversation(brainDatabasePath(), limit);
+  if (!isNotchSender(event)) return [];
+  try { return readJarvisConversation(brainDatabasePath(), limit); }
+  catch (error) { console.error('[JARVIS] No pude leer el historial:', error.message); return []; }
+});
+
+ipcMain.handle('notch:get-settings', (event) => {
+  if (!isNotchSender(event)) return {};
+  try { return sanitizeNotchSettings(JSON.parse(db.prepare('SELECT value FROM settings WHERE key = ?').get(NOTCH_SETTINGS_KEY)?.value || '{}')); }
+  catch { return {}; }
+});
+ipcMain.handle('notch:save-settings', (event, settings) => isNotchSender(event) && saveNotchSettings(settings));
+ipcMain.handle('notch:settings', (event) => isNotchSender(event) && (restoreMain(), true));
+ipcMain.handle('notch:log', (event, message) => {
+  if (!isNotchSender(event)) return false;
+  console.info('[Coucou]', String(message).slice(0, 500));
+  return true;
 });
 
 ipcMain.handle('history:add', (_e, { role, content }) => {
@@ -1285,15 +1447,14 @@ ipcMain.handle('window:toggleFullscreen', () => {
 ipcMain.handle('window:restore', () => restoreMain());
 
 ipcMain.handle('notch:set-expanded', (event, expanded, contentHeight) => {
-  if (!notchWindow || event.sender !== notchWindow.webContents || notchWindow.isDestroyed() || !notchWindow.isVisible()) return false;
+  if (!isNotchSender(event) || !notchWindow.isVisible()) return false;
   notchExpanded = !!expanded;
-if (notchExpanded && Number.isFinite(Number(contentHeight))) {
-      notchContentHeight = Math.max(120, Math.min(Number(contentHeight), 900));
-    }
-    notchWindow.setBounds(notchBounds(notchExpanded));
-    setNotchShape(notchExpanded);
-    notchWindow.setAlwaysOnTop(true);
-    notchWindow.setIgnoreMouseEvents(!notchExpanded, notchExpanded ? undefined : { forward: true });
+  if (notchExpanded && Number.isFinite(Number(contentHeight))) notchContentHeight = Math.max(120, Math.min(Number(contentHeight), 900));
+  updateNotchPanelBounds();
+  if (process.platform === 'win32') aplicaRegionEntrada();
+  else setNotchShape(notchExpanded);
+  notchWindow.setAlwaysOnTop(true);
+  notchWindow.setIgnoreMouseEvents(!notchExpanded, notchExpanded ? undefined : { forward: true });
   if (!notchExpanded) notchHovered = false;
   return true;
 });
@@ -1342,19 +1503,9 @@ ipcMain.handle('notch:external', (event, rawUrl) => {
 // y el puente no lo tenia: al pulsarlos, '.then' sobre undefined hacia fallar
 // la cadena entera y el Notch se quedaba a medias.
 ipcMain.handle('notch:open-app', (event, id) => {
-  if (!notchWindow || event.sender !== notchWindow.webContents) return false;
-  if (typeof id !== 'string' || !id.trim()) return false;
-  const busca = id.trim().toLowerCase();
-  let apps = [];
-  try { apps = listApps() || []; } catch { apps = []; }
-  const app = apps.find((a) => String(a.id || '').toLowerCase() === busca)
-    || apps.find((a) => String(a.name || '').toLowerCase() === busca)
-    || apps.find((a) => String(a.name || '').toLowerCase().includes(busca));
-  if (!app || !app.path) return false;
-  try {
-    shell.openPath(String(app.path));
-    return true;
-  } catch { return false; }
+  if (!isNotchSender(event)) return false;
+  try { return openNotchApp(id); }
+  catch (error) { console.warn('[JARVIS] No pude abrir la app del notch:', error.message); return false; }
 });
 
 // OJO: esto NO puede quedarse aqui arriba. El modulo 'screen' de Electron
@@ -1448,7 +1599,8 @@ function aplicaRegionEntrada() {
   if (!notchWindow || notchWindow.isDestroyed() || process.platform !== 'win32') return;
   let region;
   if (coucouColapsada) {
-    region = [0, 0, COUCOU_STRIP_W, COUCOU_STRIP_H];
+    region = roundedRectRows(COUCOU_STRIP_W, COUCOU_STRIP_H, 0,
+      Math.round((COUCOU_PANEL_W - COUCOU_STRIP_W) / 2), 0);
   } else if (coucouRect && coucouRect.w > 0) {
     const x0 = Math.max(0, coucouRect.x - HIT_MARGIN);
     const y0 = Math.max(0, coucouRect.y - HIT_MARGIN);
@@ -1463,11 +1615,18 @@ function aplicaRegionEntrada() {
 }
 
 ipcMain.handle('notch:island-rect', (event, x, y, width, height) => {
-  if (event.sender !== notchWindow.webContents) return false;
-  const w = Math.max(0, Math.round(width));
-  const h = Math.max(0, Math.round(height));
+  if (!isNotchSender(event)) return false;
+  const values = [x, y, width, height].map(Number);
+  if (!values.every(Number.isFinite)) return false;
+  const [rawX, rawY, rawW, rawH] = values;
+  const w = Math.max(0, Math.min(COUCOU_PANEL_W, Math.round(rawW)));
+  const h = Math.max(0, Math.min(COUCOU_PANEL_H, Math.round(rawH)));
   const antes = coucouRect;
-  coucouRect = { x: Math.round(x), y: Math.round(y), w, h };
+  coucouRect = {
+    x: Math.max(0, Math.min(COUCOU_PANEL_W - w, Math.round(rawX))),
+    y: Math.max(0, Math.min(COUCOU_PANEL_H - h, Math.round(rawY))),
+    w, h,
+  };
   // Solo cuando cambia de verdad: setShape en cada fotograma es lo que hacia
   // que la ventana parpadeara y no llegara a plegarse.
   if (!antes || antes.x !== coucouRect.x || antes.y !== coucouRect.y ||
@@ -1478,15 +1637,14 @@ ipcMain.handle('notch:island-rect', (event, x, y, width, height) => {
 });
 
 ipcMain.handle('notch:collapsed', (event, collapsed) => {
-  if (event.sender !== notchWindow.webContents) return false;
-  if (coucouColapsada === !!collapsed) return true;
+  if (!isNotchSender(event)) return false;
   coucouColapsada = !!collapsed;
   aplicaRegionEntrada();
   return true;
 });
 
 ipcMain.handle('notch:focus-window', (event, focused) => {
-  if (event.sender !== notchWindow.webContents) return false;
+  if (!isNotchSender(event)) return false;
   try {
     if (focused) notchWindow.focus();
     else notchWindow.blur();
@@ -1494,13 +1652,13 @@ ipcMain.handle('notch:focus-window', (event, focused) => {
   return true;
 });
 
-ipcMain.handle('notch:open-path', async (event, p) => {
-  if (event.sender !== notchWindow.webContents) return false;
-  try { return shell.openPath(p); } catch (err) { return String(err.message); }
+ipcMain.handle('notch:open-path', async (event, targetPath) => {
+  if (!isNotchSender(event) || typeof targetPath !== 'string') return false;
+  try { await shell.openPath(targetPath); return true; } catch { return false; }
 });
 
 ipcMain.handle('notch:save-png', async (event, data, name) => {
-  if (event.sender !== notchWindow.webContents) return false;
+  if (!isNotchSender(event)) return false;
   try {
     const base64 = String(data).replace(/^data:image\/png;base64,/, '');
     const dir = path.join(app.getPath('pictures'), 'JARVIS');
@@ -1515,7 +1673,7 @@ ipcMain.handle('notch:save-png', async (event, data, name) => {
 });
 
 ipcMain.handle('notch:quit', (event) => {
-  if (event.sender !== notchWindow.webContents) return false;
+  if (!isNotchSender(event)) return false;
   app.quit();
   return true;
 });

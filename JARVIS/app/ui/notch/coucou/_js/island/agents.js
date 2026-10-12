@@ -5,7 +5,7 @@ export const KNOWN_AGENTS = {
     cursor: { name: "Cursor", color: "#C0C4CC" },
     antigravity: { name: "Antigravity", color: "#E879F9" },
     codex: { name: "Codex", color: "#2DD4BF" },
-    gemini: { name: "Gemini CLI", color: "#8AB4F8" },
+    freebuff: { name: "Freebuff", color: "#E879F9" },
     copilot: { name: "Copilot CLI", color: "#818CF8" },
     muse: { name: "Muse Code", color: "#38BDF8" },
     opencode: { name: "OpenCode", color: "#4ADE80" },

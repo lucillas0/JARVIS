@@ -66,6 +66,7 @@ export class Island {
     collapsed = false;
     collapseTimer = null;
     wasInIsland = false;
+    pendingPointerInside = null;
     /** Last shape handed to Rust for the click-through test. */
     pushedRect = { x: -1, y: -1, w: -1, h: -1 };
     // Bot hover → love (IslandWindowController.botHoverIn)
@@ -134,6 +135,7 @@ export class Island {
             foldApproval: () => this.foldApproval(),
             setFocus: (id) => {
                 State.setFocus(id);
+                this.fsm.click();
                 Sound.play("blip");
                 // A pill with a waiting request opens on its card: going back to it
                 // after looking at another pill brings the card up again.
@@ -253,8 +255,13 @@ export class Island {
         // the header, which stays visible on top of it exactly as on macOS.
         this.uploadCanvas = new UploadCanvas({
             ask: () => {
-                State.promptContext = State.droppedFile
-                    ? { kind: "file", name: State.droppedFile.name, path: State.droppedFile.path }
+                const file = State.droppedFile;
+                const previous = State.promptContext;
+                State.promptContext = file
+                    ? { kind: "file", name: file.name, path: file.path,
+                        ...(previous?.kind === "file" && previous.path === file.path
+                            ? { content: previous.content, truncated: previous.truncated }
+                            : {}) }
                     : null;
                 this.setView("prompt");
             },
@@ -556,7 +563,10 @@ export class Island {
             if (State.droppedFile?.path !== path)
                 return;
             State.droppedFile = { name: file.name, path: file.path };
-            State.promptContext = { kind: "file", name: file.name, path: file.path };
+            State.promptContext = {
+                kind: "file", name: file.name, path: file.path,
+                content: file.content, truncated: Boolean(file.truncated),
+            };
             State.notify();
         })
             .catch((err) => {
@@ -676,6 +686,19 @@ export class Island {
     }
     // ── Input ───────────────────────────────────────────────────────────────────
     wireInput() {
+        // The panel region is custom-shaped by Electron on Windows; DOM enter events
+        // do not fire consistently on its transparent border. Use the native pointer
+        // events for window enter/leave while keeping mousemove for interactive views.
+        const api = globalThis.jarvisNotchAPI;
+        api?.onHoverOpen?.((p) => {
+            this.pointerInside = true;
+            if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) this.onCursor(p.x, p.y);
+        });
+        api?.onHoverOut?.((p) => {
+            this.pointerInside = false;
+            if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) this.onCursor(p.x, p.y);
+            else this.onCursor(-10_000, -10_000);
+        });
         // The wake strip is the only thing the OS can hit while the island is hidden.
         this.wakeStrip.addEventListener("mouseenter", () => {
             Sound.resume();
@@ -763,10 +786,12 @@ export class Island {
      * reported as a cursor far away, which is what the poll would have said.
      */
     followPageCursor() {
+        // Electron manda posición de puntero de proceso principal; este handler solo
+        // requiere mousemove local para el seguimiento visual en web/Wayland.
+        const api = globalThis.jarvisNotchAPI;
         window.addEventListener("mousemove", (e) => this.onCursor(e.clientX, e.clientY));
         window.addEventListener("mouseout", (e) => {
-            if (e.relatedTarget == null)
-                this.onCursor(-10_000, -10_000);
+            if (e.relatedTarget == null && !api) this.onCursor(-10_000, -10_000);
         });
     }
     /**
@@ -776,6 +801,7 @@ export class Island {
     pointerInside = null;
     setPointerInside(inside) {
         this.pointerInside = inside;
+        if (!inside) this.onCursor(-10_000, -10_000);
     }
     /** Cursor in window-logical coordinates. */
     onCursor(x, y) {
@@ -793,8 +819,8 @@ export class Island {
         if (UploadSeq.isActive && !UploadSeq.dropped) {
             UploadSeq.updateCursor(State.mouseInIsland.x, State.mouseInIsland.y);
         }
-        const inIsland = x >= rect.x - HIT_MARGIN && x <= rect.x + rect.w + HIT_MARGIN &&
-            y >= rect.y - HIT_MARGIN && y <= rect.y + rect.h + HIT_MARGIN;
+        const inIsland = this.pointerInside === true || (x >= rect.x - HIT_MARGIN && x <= rect.x + rect.w + HIT_MARGIN &&
+            y >= rect.y - HIT_MARGIN && y <= rect.y + rect.h + HIT_MARGIN);
         // Recorded before the state machine hears of it: a transition it makes
         // right away (open on hover) reads where the pointer is, and must not see
         // the pointer as still outside.
@@ -1111,6 +1137,7 @@ export class Island {
         // Compact mini grid
         const showGrid = State.mode === "compact";
         this.miniGrid.style.opacity = showGrid ? "1" : "0";
+        this.miniGrid.style.pointerEvents = showGrid ? "auto" : "none";
         if (showGrid) {
             const others = State.otherTasks.slice(0, 4);
             const key = others.map((t) => t.id).join("|");
@@ -1118,7 +1145,25 @@ export class Island {
                 this.miniGrid.dataset.key = key;
                 this.miniGrid.replaceChildren();
                 for (const t of others) {
-                    this.miniGrid.append(createMiniBot(t, 13));
+                    const bot = createMiniBot(t, 13);
+                    bot.title = `Cambiar a ${t.name}`;
+                    bot.setAttribute("role", "button");
+                    bot.tabIndex = 0;
+                    bot.addEventListener("click", (event) => {
+                        event.stopPropagation();
+                        State.setFocus(t.id);
+                        this.fsm.click();
+                        this.fsm.forceHome();
+                        this.expand("overview");
+                        void Bridge.focusWindow(false);
+                    });
+                    bot.addEventListener("keydown", (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            bot.click();
+                        }
+                    });
+                    this.miniGrid.append(bot);
                 }
                 pruneMiniBots();
             }
