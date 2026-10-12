@@ -38,14 +38,18 @@ const mirada = { x: 0, y: 0 };
 let activado = false;
 
 function apartaMochi() {
-  // Mochi tambien se pinta en canvas. Mientras manden las mascotas de JARVIS
-  // se aparta, que si no se ven las dos superpuestas.
-  if (!hueco) return;
-  hueco.style.visibility = 'hidden';
+  // Mochi y el saludo (donde Coucou le pone el gorro y las animations de
+  // saludo) se pintan en canvas. Mientras manden las mascotas de JARVIS se
+  // apartan los dos, que si no el gorro le sale encima de la nuestra.
+  if (hueco) hueco.style.visibility = 'hidden';
+  const saludo = document.getElementById('greeting-canvas');
+  if (saludo) saludo.style.visibility = 'hidden';
 }
 
 function apartaAtras() {
   if (hueco) hueco.style.visibility = '';
+  const saludo = document.getElementById('greeting-canvas');
+  if (saludo) saludo.style.visibility = '';
 }
 
 function medida() {
@@ -60,12 +64,10 @@ function medida() {
   const a = anclaEl.getBoundingClientRect();
   if (!r.width || !r.height) return;
 
-  // El tamaño es el de Coucou: el lado menor de la caja de Mochi. Las cuatro
-  // mascotas se dibujan ahi con su propio estilo (Jarvi, Buffi, Vee y Opi)
-  // pero ocupan el hueco que ocupa Mochi, que es lo que se ve en la isla.
-  // El altoUtil es solo una red de seguridad por si la ventana se encoje.
-  const altoUtil = Math.max(60, Math.min(window.innerHeight - 10, 160));
-  const lado = Math.max(28, Math.min(r.width, r.height, altoUtil));
+  // Las medidas son las de Coucou: la misma caja que Mochi, ancho por alto.
+  // El lienzo se dibuja cuadrado (el de Mochi es un poco mas ancho que alto y
+  // si no se estira), del lado menor de esa caja, y centrado en ella.
+  const lado = Math.max(28, Math.min(r.width, r.height));
 
   const px = Math.round(lado * dpr);
   if (lienzo.width !== px || lienzo.height !== px) {
@@ -327,50 +329,50 @@ function dibujaAvatar(ms) {
 
 let avataresArrancados = false;
 
+// Coloca el avatar ENCIMA del circleito de color y con su tamano exacto. Al
+// lado empujaba la etiqueta y se leia "Code" en vez de "Codex"; encima, lo
+// sustituye y la pastilla queda igual de ancha que la de Coucou.
+function situaAvatar(pill) {
+  const lienzoA = pill.querySelector('canvas.jarvis-avatar');
+  const mini = pill.querySelector('.mini');
+  if (!lienzoA || !mini) return;
+  const mr = mini.getBoundingClientRect();
+  const pr = pill.getBoundingClientRect();
+  if (!mr.width || !pr.width) return;
+  Object.assign(lienzoA.style, {
+    position: 'absolute',
+    left: (mr.left - pr.left) + 'px',
+    top: (mr.top - pr.top) + 'px',
+    width: mr.width + 'px',
+    height: mr.height + 'px',
+    marginLeft: '0',
+    zIndex: '6',
+    pointerEvents: 'none',
+  });
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const lado = Math.max(8, Math.round(mr.width * dpr));
+  if (lienzoA.width !== lado) { lienzoA.width = lado; lienzoA.height = lado; }
+}
+
 export function montaAvatares() {
-  // Los avatares de las pastillas van SIEMPRE, independently de que la mascota
-  // grande este encendida o no: son 15 px al lado del circleito de color y no
-  // cambian a Mochi ni su tamano, que es lo que hay que dejar como estaba.
   if (!avataresArrancados) { avataresArrancados = true; requestAnimationFrame(dibujaAvatar); }
   const pastillas = document.querySelectorAll('#root .pill');
   for (const pill of pastillas) {
-    if (pill.dataset.jarvisAvatar) continue;
+    if (pill.dataset.jarvisAvatar) { situaAvatar(pill); continue; }
     const etiqueta = (pill.innerText || '').trim();
     const id = mascotaDeEtiqueta(etiqueta);
     if (!id) continue;
-    // Se cuelga de la pastilla y NO del squareito de color: si va dentro, el
-    // lienzo agranda el squareito, el squareito agranda la pastilla y al medir
-    // otra vez el avatar sale mas grande. Tamano fijo para que no se mueva.
-    const lado = 26;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const lienzoA = document.createElement('canvas');
     lienzoA.className = 'jarvis-avatar';
-    // Evita que el canvas haga scroll/reflow en layouts raros.
-    lienzoA.style.overflow = 'visible';
-    lienzoA.width = Math.round(lado * dpr);
-    lienzoA.height = Math.round(lado * dpr);
-    // Posicionado en absoluto para no ensanchar el pill (la etiqueta está
-    // centrada con posicion:absolute). Esto lo deja "en segundo plano".
-    Object.assign(lienzoA.style, {
-      width: lado + 'px',
-      height: lado + 'px',
-      pointerEvents: 'none',
-      position: 'absolute',
-      left: '37px', // ajustado: .pill .mini (24px) + margin-left (7px) + hueco (3px)
-      top: '50%',
-      transform: 'translateY(-50%)',
-      zIndex: '4',
-      // Asegura que el canvas no quede recortado por el contenedor
-      // (si algo cambia en CSS/overflow entre vistas).
-    });
-    // En vez de insertarlo como hijo normal (que puede interferir con el layout
-    // del label centrado), lo dejamos como último hijo para asegurar que no
-    // empuja el ancho ni cambia el orden de apilado.
+    lienzoA.width = 26 * dpr;
+    lienzoA.height = 26 * dpr;
     pill.appendChild(lienzoA);
     pill.dataset.jarvisAvatar = id;
     const motor = creaMotor(MASCOTAS[id].def, MASCOTAS[id].estados, MASCOTAS[id].pintar);
     motor.pon('reposo');
     avatares.set(lienzoA, { lienzo: lienzoA, ctx: lienzoA.getContext('2d'), motor });
+    situaAvatar(pill);
   }
 }
 
