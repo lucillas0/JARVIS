@@ -62,7 +62,12 @@ function creaMotor(def, estados, pintar) {
     c.clearRect(0, 0, W, H);
     c.save();
     c.translate(W / 2, H / 2);
-    c.scale(W / 200, W / 200);
+    // Zoom: a 26 px el dibujo entero es una mancha y no se sabe que mascota es.
+    // Con zoom se acerca a la cara, que es lo que la identifica: los ojos, la
+    // pantalla y los colores bastan para reconocerla.
+    const z = st.zoom || 1;
+    c.scale((W / 200) * z, (W / 200) * z);
+    if (z !== 1) c.translate(0, st.zoomY || 0);
     pintar(c, W / 320, st, mirar);
     c.restore();
   }
