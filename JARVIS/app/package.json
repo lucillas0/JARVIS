@@ -17,7 +17,7 @@
     "dist:win": "npm run iconos && electron-builder --win nsis --x64",
 
     "dist:linux": "npm run iconos && electron-builder --linux --x64",
-    "dist:linux:arm": "npm run iconos && electron-builder --linux --arm64",
+    "dist:linux:arm": "npm run iconos && electron-builder --linux AppImage tar.gz --arm64",
 
     "dist:mac": "npm run iconos && electron-builder --mac --x64",
     "dist:mac:arm": "npm run iconos && electron-builder --mac --arm64",
