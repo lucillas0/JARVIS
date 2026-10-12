@@ -1,5 +1,19 @@
-ode: screen;
-  pointer-events: none;
+/* Pantalla de preparacion: lo primero que ve alguien al abrir JARVIS.
+   Se lee de un vistazo donde va, sin tener que adivinar. */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #07040a;
+  color: #ffcf85;
+  font-family: "Courier New", ui-monospace, monospace;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
 }
 
 .splash {
@@ -39,38 +53,49 @@ h1 {
   font-size: 20px;
   letter-spacing: 0.4em;
   text-shadow: 0 0 12px rgba(255, 170, 48, 0.9);
-  margin-bottom: 6px;
+  margin: 0 0 6px;
 }
 
 .tagline {
   font-size: 12px;
   letter-spacing: 0.22em;
   opacity: 0.75;
-  margin-bottom: 26px;
+  margin: 0 0 26px;
 }
+
+/* ---- Barra ---- */
 
 .progress-track {
   width: 100%;
-  max-width: 340px;
-  height: 6px;
+  max-width: 360px;
+  height: 8px;
   border: 1px solid rgba(255, 170, 48, 0.45);
-  border-radius: 3px;
+  border-radius: 4px;
   overflow: hidden;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  background: rgba(255, 170, 48, 0.07);
 }
 
 .progress-bar {
   height: 100%;
   width: 0%;
+  min-width: 2px;
   background: linear-gradient(to right, #ffaa30, #ffcc66);
-  box-shadow: 0 0 10px rgba(255, 170, 48, 0.9);
-  transition: width 0.3s ease;
+  box-shadow: 0 0 12px rgba(255, 170, 48, 0.9);
+  /* Suave para que los saltos de progreso no den tirones. */
+  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.progress-bar.terminada {
+  background: linear-gradient(to right, #4ade80, #86efac);
+  box-shadow: 0 0 14px rgba(74, 222, 128, 0.7);
 }
 
 .pct-line {
   font-size: 11px;
   letter-spacing: 0.15em;
-  opacity: 0.6;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
 }
 
 .pct-line.indeterminate span {
@@ -83,14 +108,71 @@ h1 {
 }
 
 .status {
-  margin-top: 22px;
+  margin: 18px 0 0;
   font-size: 12px;
-  letter-spacing: 0.08em;
-  min-height: 16px;
-  opacity: 0.85;
-  max-width: 380px;
+  line-height: 1.6;
+  letter-spacing: 0.04em;
+  min-height: 18px;
+  opacity: 0.9;
+  max-width: 420px;
   overflow-wrap: break-word;
 }
+
+/* ---- Pasos ----
+   La lista es lo que hace que la espera se entienda: se ve que avanza y en
+   cuanto paso toca. Sin esto solo hay una raya que se mueve y da igual. */
+
+.steps {
+  list-style: none;
+  margin: 22px 0 0;
+  padding: 0;
+  width: 100%;
+  max-width: 340px;
+  text-align: left;
+}
+
+.steps li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 5px 2px;
+  color: rgba(255, 207, 133, 0.35);
+  transition: color 0.3s ease;
+}
+
+.steps li .marca {
+  width: 16px;
+  text-align: center;
+  flex: 0 0 16px;
+  opacity: 0.5;
+}
+
+.steps li.hecho {
+  color: rgba(134, 239, 172, 0.9);
+}
+
+.steps li.hecho .marca { opacity: 1; }
+
+.steps li.actual {
+  color: #ffcf85;
+}
+
+.steps li.actual .marca {
+  opacity: 1;
+  animation: latido 1.2s ease-in-out infinite;
+}
+
+.steps li.fallo { color: #ff8a6b; }
+.steps li.fallo .marca { opacity: 1; }
+
+@keyframes latido {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+/* ---- Error ---- */
 
 .error {
   margin-top: 18px;
@@ -98,7 +180,7 @@ h1 {
   border: 1px solid rgba(255, 85, 51, 0.6);
   border-radius: 6px;
   background: rgba(60, 15, 0, 0.5);
-  max-width: 400px;
+  max-width: 440px;
 }
 
 .error #errorTitle {
@@ -106,7 +188,7 @@ h1 {
   font-weight: bold;
   letter-spacing: 0.1em;
   color: #ff6644;
-  margin-bottom: 6px;
+  margin: 0 0 6px;
 }
 
 .error #errorDetail {
@@ -114,6 +196,8 @@ h1 {
   line-height: 1.6;
   color: #ffaa30;
   opacity: 0.85;
+  margin: 0;
+  overflow-wrap: break-word;
 }
 
 .error-actions {
@@ -129,10 +213,11 @@ h1 {
   border-radius: 4px;
   background: rgba(40, 20, 0, 0.6);
   color: #ffaa30;
-  font-family: "Courier New", monospace;
+  font-family: inherit;
   font-size: 12px;
   letter-spacing: 0.1em;
   cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease;
 }
 
 .btn:hover {
@@ -143,4 +228,9 @@ h1 {
 .btn.ghost {
   background: transparent;
   opacity: 0.7;
+}
+
+/* Sin raton (por ejemplo al abrir desde el dock) la barra debe notarse igual. */
+@media (pointer: coarse) {
+  .btn, .splash { cursor: default; }
 }

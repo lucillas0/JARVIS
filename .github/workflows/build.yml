@@ -39,6 +39,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --quiet pillow
+      - run: python -m pip install --quiet pillow
+      # Las ruedas viajan dentro del instalador para que al abrir JARVIS no
+      # haya que descargar nada: se instala en segundos y sin internet.
+      - name: Descargar las dependencias para esta plataforma
+        run: |
+          rm -rf JARVIS/dist-assets/wheelhouse
+          mkdir -p JARVIS/dist-assets/wheelhouse
+          python -m pip download --dest JARVIS/dist-assets/wheelhouse \
+            -r JARVIS/brain/requirements.txt
+          ls JARVIS/dist-assets/wheelhouse | wc -l
       - run: npm --prefix JARVIS/app run iconos
       - run: npm ci --prefix JARVIS/app
       - name: Compilar
@@ -76,6 +86,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
       - run: python -m pip install --quiet pillow
+      - run: python -m pip install --quiet pillow
+      # Las ruedas viajan dentro del instalador para que al abrir JARVIS no
+      # haya que descargar nada: se instala en segundos y sin internet.
+      - name: Descargar las dependencias para esta plataforma
+        run: |
+          rm -rf JARVIS/dist-assets/wheelhouse
+          mkdir -p JARVIS/dist-assets/wheelhouse
+          python -m pip download --dest JARVIS/dist-assets/wheelhouse \
+            -r JARVIS/brain/requirements-desktop.txt
+          ls JARVIS/dist-assets/wheelhouse | wc -l
       - run: npm --prefix JARVIS/app run iconos
       - run: npm ci --prefix JARVIS/app
       - name: Compilar
@@ -117,6 +137,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfuse2 libssl3 rpm
       - run: python -m pip install --quiet pillow
+      - run: python -m pip install --quiet pillow
+      # Las ruedas viajan dentro del instalador para que al abrir JARVIS no
+      # haya que descargar nada: se instala en segundos y sin internet.
+      - name: Descargar las dependencias para esta plataforma
+        run: |
+          rm -rf JARVIS/dist-assets/wheelhouse
+          mkdir -p JARVIS/dist-assets/wheelhouse
+          python -m pip download --dest JARVIS/dist-assets/wheelhouse \
+            -r JARVIS/brain/requirements-desktop.txt
+          ls JARVIS/dist-assets/wheelhouse | wc -l
       - run: npm --prefix JARVIS/app run iconos
       - run: npm ci --prefix JARVIS/app
       - name: Compilar
@@ -154,6 +184,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --quiet pillow
+      - run: python -m pip install --quiet pillow
+      # Las ruedas viajan dentro del instalador para que al abrir JARVIS no
+      # haya que descargar nada: se instala en segundos y sin internet.
+      - name: Descargar las dependencias para esta plataforma
+        run: |
+          rm -rf JARVIS/dist-assets/wheelhouse
+          mkdir -p JARVIS/dist-assets/wheelhouse
+          python -m pip download --dest JARVIS/dist-assets/wheelhouse \
+            -r JARVIS/brain/requirements-desktop.txt
+          ls JARVIS/dist-assets/wheelhouse | wc -l
       - run: npm --prefix JARVIS/app run iconos
       - run: npm ci --prefix JARVIS/app
       - name: Compilar
@@ -185,6 +225,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --quiet pillow
+      - run: python -m pip install --quiet pillow
+      # Las ruedas viajan dentro del instalador para que al abrir JARVIS no
+      # haya que descargar nada: se instala en segundos y sin internet.
+      - name: Descargar las dependencias para esta plataforma
+        run: |
+          rm -rf JARVIS/dist-assets/wheelhouse
+          mkdir -p JARVIS/dist-assets/wheelhouse
+          python -m pip download --dest JARVIS/dist-assets/wheelhouse \
+            -r JARVIS/brain/requirements-desktop.txt
+          ls JARVIS/dist-assets/wheelhouse | wc -l
       - run: npm --prefix JARVIS/app run iconos
       - run: npm ci --prefix JARVIS/app
       - name: Compilar

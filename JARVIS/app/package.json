@@ -65,6 +65,13 @@
         "to": "assets"
       },
       {
+        "from": "../dist-assets/wheelhouse",
+        "to": "wheelhouse",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
         "from": "../wa-bridge",
         "to": "wa-bridge",
         "filter": [
@@ -79,12 +86,6 @@
     "afterPack": "scripts/after-pack.js",
     "compression": "maximum",
     "win": {
-      "extraResources": [
-        {
-          "from": "../dist-assets/wheelhouse",
-          "to": "wheelhouse"
-        }
-      ],
       "target": [
         "nsis"
       ],
