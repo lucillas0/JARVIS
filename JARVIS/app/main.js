@@ -849,11 +849,12 @@ const COUCOU_PANEL_W = 720;
 const COUCOU_PANEL_H = 320;
 // Coucou saca a Mochi unos 40 px por encima del panel (el lienzo de la mascota
 // va en top:-40). En macOS la ventana puede subirse por encima del techo, pero
-// en Windows no: la ventana arranca en y=0 y lo que sobresalga se corta. Por eso
-// la ventana crece en esa medida y la pagina baja el contenido lo mismo, para
-// que la mascota quepa entera sin cambiar su sitio respecto al panel.
+// en Windows no. La ventana se deja como estaba; el recorte lo arregla la
+// pagina ajustando el tamano de la mascota grande.
 const MOCHI_SOBRESALTO = 44;
-const COUCOU_VENTANA_H = COUCOU_PANEL_H + MOCHI_SOBRESALTO;
+// La ventana se queda como estaba: 720x320 pegada al techo, como Coucou. Lo
+// que sobresalga por arriba lo ajusta la pagina, no la ventana.
+const COUCOU_VENTANA_H = COUCOU_PANEL_H;
 const COUCOU_STRIP_W = 240;
 const COUCOU_STRIP_H = 6;
 const HIT_MARGIN = 14;

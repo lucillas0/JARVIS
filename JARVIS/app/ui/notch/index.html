@@ -7,16 +7,7 @@
          hoja @import desde el CSS bloquearia el resto bajo la CSP. -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:8000; connect-src 'self' ws://127.0.0.1:8000 http://127.0.0.1:8000;" />
     <title>JARVIS</title>
-    <link rel="stylesheet" href="./coucou/style.css" />
-    <style>
-      /* Coucou saca a Mochi unos 40 px por encima del panel. En macOS la
-         ventana puede subirse por encima del techo de la pantalla, pero en
-         Windows no: la ventana arranca en y=0 y lo que sobresalga se ve
-         cortado. main.js agranda la ventana en esa misma medida, y aqui se
-         baja el contenido lo mismo para que la mascota quepa entera sin
-         cambiar su sitio respecto al panel. */
-      #root { transform: translateY(44px); }
-    </style>
+<link rel="stylesheet" href="./coucou/style.css" />
   </head>
   <body>
     <div id="root"></div>

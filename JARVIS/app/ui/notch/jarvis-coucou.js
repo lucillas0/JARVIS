@@ -180,7 +180,7 @@ function empiezaMirada() {
 //
 // El trabajo de estado (trabajando, compilando, pensando, pidiendo permiso) y
 // las florituras en reposo solo hacen falta si estan encendidas.
-let QUIERO_MASCOTAS = false;
+let QUIERO_MASCOTAS = true;
 
 // Espera a que Coucou haya montado la isla: el contenedor de la mascota no
 // existe hasta entonces.
