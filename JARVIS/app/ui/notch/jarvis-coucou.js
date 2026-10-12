@@ -203,6 +203,14 @@ conecta();
 empiezaMirada();
 enganchaAtajos();
 sigueElFoco();
+
+// Enganche de pruebas: deja ver que pastilla tiene el foco y cuales existen.
+globalThis.__isla = {
+  foco: () => State.focusId,
+  pastillas: () => State.tasks.map((t) => ({ id: t.id, nombre: t.name, estado: t.status })),
+  mascota: () => (globalThis.__mascotas ? globalThis.__mascotas.activo() : null),
+};
+
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", esperaIsla);
 } else {
