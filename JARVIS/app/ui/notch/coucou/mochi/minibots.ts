@@ -3,6 +3,7 @@
 
 import { BotEngine, hexToRGB } from "./engine";
 import type { AgentTask } from "../core/state";
+import type { Outfit } from "./wardrobe";
 
 interface MiniBot {
   canvas: HTMLCanvasElement;
@@ -14,6 +15,19 @@ interface MiniBot {
 }
 
 const live = new Map<HTMLCanvasElement, MiniBot>();
+
+// Outfit applied to all live mini bots (pill icons + compact mini grid).
+let miniOutfit: Outfit = "none";
+
+export function syncMiniBotOutfit(outfit: Outfit, animated = true) {
+  // Avoid re-triggering tweens when nothing changed.
+  if (miniOutfit === outfit) return;
+  miniOutfit = outfit;
+  for (const mb of live.values()) {
+    mb.engine.setOutfit(outfit, animated);
+  }
+}
+
 
 /**
  * Creates a mini Mochi whose **body** is `bodySize` CSS pixels across.
@@ -31,7 +45,7 @@ export function createMiniBot(task: AgentTask, bodySize: number, dancing?: () =>
   slot.style.height = `${bodySize}px`;
 
   const canvas = document.createElement("canvas");
-  const engineSize = bodySize / 0.6;
+  const engineSize = bodySize / 0.55;
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   canvas.width = Math.round(engineSize * dpr);
   canvas.height = Math.round(engineSize * dpr);
@@ -42,6 +56,8 @@ export function createMiniBot(task: AgentTask, bodySize: number, dancing?: () =>
   const engine = new BotEngine();
   engine.isMini = true;
   engine.bodyColor = hexToRGB(task.color);
+  // Keep mini bots' skins in sync with Mochi's current wardrobe selection.
+  engine.setOutfit(miniOutfit, false);
   engine.setState(task.state, true);
   if (task.emote) engine.setPermanentEmote(task.emote);
   if (task.miniEye) {

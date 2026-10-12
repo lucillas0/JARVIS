@@ -25,7 +25,9 @@ const JARVI_S = {
   // Adornos: solo en reposo.
   vuelo: { l: 'en vuelo', sy: '↑', fl: 1, tl: .3, hn: 1, hm: 1, rX: 44, rY: 30, lX: -44, lY: 30, bobA: 4, bobS: 3, rr: 3, eh: .8, an: .3 },
   disparo: { l: '¡repulsor!', sy: '»', ch: 1, hn: 1, hm: .8, rX: 64, rY: 4, lX: -40, lY: 22, an: .6, eh: .7, tl: -.1, rr: 5, shake: .15, h: 200 },
-  baile: { l: '♪', sy: '♪', hp: 1, sw: 1, swS: 5, hop: 1, hs: 1, bobA: 3, bobS: 5, rr: 4, hn: 1, hm: 1, rX: 58, rY: 6, lX: -58, lY: 6, hwx: 9, hwy: 11, nt: 1 },
+  // Jarvi baila sin notitas: en su HTML el baile es solo el salto y el
+  // contoneo, las notas musicales son de Vee, Opi y Buffi.
+  baile: { l: '♪', sy: '♪', hp: 1, sw: 1, swS: 5, hop: 1, hs: 1, bobA: 3, bobS: 5, rr: 4, hn: 1, hm: 1, rX: 58, rY: 6, lX: -58, lY: 6, hwx: 9, hwy: 11 },
   mareado: { l: '@_@', sy: '@', eh: .9, dz: 1, sw: .25, swS: 7, h: 170 },
   dormido: { l: 'zzz', sy: 'z', eh: .05, h: 225, bobA: 3, bobS: 1, rr: .2, tl: .35 },
 };
@@ -99,8 +101,10 @@ function pintaJarvi(c, u, st, mirar) {
   c.strokeStyle = SK.ol; c.lineWidth = 1.3; c.stroke();
   c.fillStyle = 'rgba(255,255,255,.45)';
   c.beginPath(); c.ellipse(-14, -14, 11, 3.5, -.25, 0, 7); c.fill();
-  mofletes(c, '.33');
-  ojos(c, P, ph, t, L.x, ly, ee, 13, SK.eye, 13, u);
+  mofletes(c, '.33', '255,90,90', 6, 5, 3);
+  // Jarvi los quiere un pelin mas grandes, con puntito de brillo y puntas
+  // redondeadas: es lo unico que lo distingue de los otros tres.
+  ojos(c, P, ph, t, L.x, ly, ee, 13, SK.eye, 13, u, { rx: 3.7, ry: 6.2, lw: 2.6, brillo: true, redondo: true });
   c.restore();
   // Estrellas de mareo.
   if (P.dz > .02) {
@@ -136,18 +140,11 @@ function pintaJarvi(c, u, st, mirar) {
     c.fillStyle = hc(78, .8 + ch * .2); c.beginPath(); c.arc(0, 0, 2.4 + ch * 2.6, 0, 7); c.fill();
     c.restore();
   }
-  if (P.nt > .02) {
-    c.fillStyle = hc(72, 1); c.font = 'bold 14px system-ui';
-    for (let i = 0; i < 3; i++) {
-      const p = (ph.w * .15 + i / 3) % 1;
-      c.globalAlpha = Math.min(1, P.nt) * (1 - p);
-      c.fillText('♪', 52 + Math.sin(p * 9 + i) * 7, -10 - p * 44);
-    }
-    c.globalAlpha = 1;
-  }
+  // Jarvi no tiene notitas musicales: en su HTML el baile es solo el salto
+  // con el contoneo. Las ♪ son de Vee, Opi y Buffi.
   for (const p of sp) { c.fillStyle = hc(80, p.l); c.fillRect(p.x, p.y, 2.2, 2.2); }
   c.restore();
-  globo(c, st.ancho, h, P, ph, sy, P.bp, { sy: JARVI_S[estado] ? JARVI_S[estado].sy : 'dots', globoS: 90, globoL: 52 }, P.bobA, hop, 0);
+  globo(c, st.ancho, h, P, ph, sy, P.bp, { sy: JARVI_S[estado] ? JARVI_S[estado].sy : 'dots', globoS: 90, globoL: 52 }, P.bobA, hop, -40);
 }
 
 // ── Vee · VS Code ────────────────────────────────────────────────────────────
@@ -169,6 +166,7 @@ const VEE_S = {
   permiso: { l: '¿confías en esta carpeta?', sy: '!', eh: 1.4, h: 42, sg: 1, hn: 1, hm: 1, rX: 56, rY: -2, lX: -56, lY: -2, bobA: 4, bobS: 4, hwy: 3, swS: 5 },
   error: { l: '3 problemas', sy: '×', eh: .8, h: 355, shake: 1, xx: 1, sg: 1, hn: 1, hm: 1, rX: 34, rY: -34, lX: -34, lY: -34 },
   terminado: { l: '0 problemas', sy: '✓', hp: 1, h: 125, hop: .9, sw: .2, swS: 6, hn: 1, hm: 1, rX: 56, rY: -38, lX: -56, lY: -38, hwy: 5 },
+  tema: { l: 'tema claro', sy: '☀', hp: .6, eh: 1.1, th: 1, h: 48, hn: 1, rX: 56, rY: -14, hwy: 2, swS: 4, hop: .2 },
   baile: { l: '♪', sy: '♪', hp: 1, sw: 1, swS: 5, hop: 1, hs: 1, bobA: 3, bobS: 5, hn: 1, hm: 1, rX: 58, rY: 6, lX: -58, lY: 6, hwx: 9, hwy: 11, nt: 1 },
   mareado: { l: '@_@', sy: '@', eh: .9, dz: 1, sw: .25, swS: 7, h: 170 },
   dormido: { l: 'zzz', sy: 'z', eh: .05, h: 225, bobA: 3, bobS: 1, tl: .35 },
@@ -236,7 +234,7 @@ function pintaVee(c, u, st, mirar) {
   c.shadowBlur = 0;
   mofletes(c, '.3');
   c.shadowBlur = 9 * u;
-  ojos(c, P, ph, t, L.x, ly, ee, 11, mixC('#eaf6ff', '#14283d', P.th), 11, 1);
+  ojos(c, P, ph, t, L.x, ly, ee, 11, mixC('#eaf6ff', '#14283d', P.th), 11, u);
   // Cursor como boca.
   c.shadowBlur = 5 * u; c.lineWidth = 1.4; c.lineCap = 'round';
   c.globalAlpha = Math.max(0, Math.min(1, Math.sin(t * 5) * 3 + .6)) * Math.max(0, 1 - P.hp - P.xx);
@@ -333,7 +331,7 @@ function pintaVee(c, u, st, mirar) {
   for (const p of sp) { c.globalAlpha = Math.max(0, p.l); c.fillStyle = p.c || hc(70, 1); c.fillRect(p.x, p.y, 2.6, 2.6); }
   c.globalAlpha = 1;
   c.restore();
-  globo(c, ancho, h, P, ph, sy, P.bp, { sy: VEE_S[estado] ? VEE_S[estado].sy : 'dots', globoS: 85, globoL: 45 }, P.bobA, hop, 0);
+  globo(c, ancho, h, P, ph, sy, P.bp, { sy: VEE_S[estado] ? VEE_S[estado].sy : 'dots', globoS: 85, globoL: 45 }, P.bobA, hop, -44);
 }
 
 // ── Opi · OpenCode ───────────────────────────────────────────────────────────
@@ -425,7 +423,7 @@ function pintaOpi(c, u, st, mirar) {
   c.restore();
   sq(c, 36, 23);
   c.strokeStyle = hc(60, .7); c.lineWidth = 1.3; c.shadowColor = hc(62, 1); c.shadowBlur = 6 * u; c.stroke();
-  ojos(c, P, ph, t, L.x, ly, ee, 13, hc(78, 1), 13, 1);
+  ojos(c, P, ph, t, L.x, ly, ee, 13, hc(78, 1), 13, u);
   c.globalAlpha = Math.max(0, Math.min(1, Math.sin(t * 5) * 3 + .6)) * Math.max(0, 1 - P.hp - P.xx);
   c.beginPath(); c.roundRect(-4.5, 12, 9, 2.8, 1); c.fill();
   if (P.hp > .01) { c.globalAlpha = P.hp; c.beginPath(); c.arc(0, 8, 5, .45, 2.7); c.stroke(); }
@@ -472,7 +470,7 @@ function pintaOpi(c, u, st, mirar) {
   for (const p of sp) { c.globalAlpha = Math.max(0, p.l); c.fillStyle = p.c || hc(70, 1); c.fillRect(p.x, p.y, 2.6, 2.6); }
   c.globalAlpha = 1;
   c.restore();
-  globo(c, ancho, h, P, ph, sy, P.bp, { sy: OPI_S[estado] ? OPI_S[estado].sy : 'dots', globoS: 85, globoL: 48 }, P.bobA, hop, 0);
+  globo(c, ancho, h, P, ph, sy, P.bp, { sy: OPI_S[estado] ? OPI_S[estado].sy : 'dots', globoS: 85, globoL: 48 }, P.bobA, hop, -40);
 }
 
 // ── Buffi · Freebuff ─────────────────────────────────────────────────────────
@@ -579,7 +577,7 @@ function pintaBuffi(c, u, st, mirar) {
   c.restore();
   sq(c, 36, 23);
   c.strokeStyle = hc(60, .7); c.lineWidth = 1.3; c.shadowColor = hc(62, 1); c.shadowBlur = 6 * u; c.stroke();
-  ojos(c, P, ph, t, L.x, ly, ee, 13, hc(86, 1), 13, 1);
+  ojos(c, P, ph, t, L.x, ly, ee, 13, hc(86, 1), 13, u);
   c.globalAlpha = Math.max(0, Math.min(1, Math.sin(t * 5) * 3 + .6)) * Math.max(0, 1 - P.hp - P.xx);
   c.beginPath(); c.roundRect(-4.5, 12, 9, 2.8, 1); c.fill();
   if (P.hp > .01) { c.globalAlpha = P.hp; c.beginPath(); c.arc(0, 8, 5, .45, 2.7); c.stroke(); }
@@ -688,7 +686,7 @@ function pintaBuffi(c, u, st, mirar) {
   }
   c.globalAlpha = 1;
   c.restore();
-  globo(c, ancho, h, P, ph, sy, P.bp, { sy: BUFFI_S[estado] ? BUFFI_S[estado].sy : 'dots', globoS: 80, globoL: 38 }, P.bobA, hop, 0);
+  globo(c, ancho, h, P, ph, sy, P.bp, { sy: BUFFI_S[estado] ? BUFFI_S[estado].sy : 'dots', globoS: 80, globoL: 38 }, P.bobA, hop, -44);
 }
 
 // ── Tablas ───────────────────────────────────────────────────────────────────
@@ -702,9 +700,16 @@ export const MASCOTAS = {
 
 export const DE_PASTILLA = {
   jarvis: 'jarvi',
+  // La pastilla de VS Code se llama integration_claude en el catalogo de
+  // Coucou; la de Claude Desktop es agent_claude-desktop. Las dos van con Vee,
+  // que es la mascota que salio del HTML de VS Code.
   integration_claude: 'vee',
+  'agent_claude-desktop': 'vee',
   vee: 'vee',
   freebuff: 'buffi',
+  // La pastilla de Freebuff tambien aparece como agente suelto cuando corre
+  // por su cuenta; es la misma mascota, asi que va al mismo sitio.
+  agent_freebuff: 'buffi',
   buffi: 'buffi',
   agent_opencode: 'opi',
   opi: 'opi',
@@ -742,9 +747,22 @@ export function estadoPara(id, canonico) {
 
 // Adornos de cada una: son los que salen en reposo, nunca mientras trabaja.
 // En los HTML eran estados sueltos; aqui son florituras.
+//
+// Esta es la lista entera de lo que cada mascota traia programado para cuando
+// no esta trabajando: volar y disparar el repulsor (Jarvi), la extension, el
+// depurador y el cambio de tema (Vee), las pesas, los agentes, los Freebucks,
+// el anuncio y el flex (Buffi). Dormir lo traian las cuatro.
+//
+// Compilar NO esta aqui a proposito: en los HTML es un estado de trabajo (sale
+// el portatil con la barra de progreso), asi que se dispara mientras el agente
+// trabaja, no en reposo. De eso se encarga programaCompilacion() en
+// jarvis-mascotas.js.
 export const TIENE = {
-  jarvi: ['baile', 'vuelo', 'disparo'],
-  vee: ['baile', 'extension', 'depurando'],
-  opi: ['baile'],
-  buffi: ['baile', 'flex', 'pesas', 'freebucks', 'agentes', 'anuncio'],
+  jarvi: ['baile', 'vuelo', 'disparo', 'dormido'],
+  vee: ['baile', 'extension', 'depurando', 'tema', 'dormido'],
+  opi: ['baile', 'dormido'],
+  buffi: ['baile', 'flex', 'pesas', 'freebucks', 'agentes', 'anuncio', 'dormido'],
 };
+
+// Las cuatro traen el estado `compilando` en su tabla; el que se ponga a
+// compilar mientras trabaja lo decide jarvis-mascotas.js mirando si existe.

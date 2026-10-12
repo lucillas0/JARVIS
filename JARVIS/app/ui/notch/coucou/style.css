@@ -686,6 +686,7 @@ body {
 
 .pill {
   position: relative;
+  z-index: 0;
   height: 28px;
   border-radius: 999px;
   background: var(--card-flat);
@@ -699,10 +700,12 @@ body {
 
 .pill .mini {
   margin-left: 7px;
+  z-index: 2;
 }
 
 .pill .lbl {
   position: absolute;
+  z-index: 3;
   left: 0;
   right: 0;
   text-align: center;

@@ -793,7 +793,7 @@ export class BotEngine {
     if (this.tilt !== 0) x.rotate(this.tilt);
     x.scale(this.sx, this.sy);
 
-    const dressed = !this.isMini && this.outfit !== "none";
+    const dressed = this.outfit !== "none";
     const head = dressed ? makeHead(R, this.yaw, this.pitch, this.physDx, this.physDy) : null;
     const outfitState = { presence: this.outfitPresence, morph: this.morph };
     if (head) drawOutfitBehind(x, this.outfit, head, outfitState);
