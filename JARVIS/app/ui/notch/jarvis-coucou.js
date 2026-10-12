@@ -9,7 +9,7 @@
 
 import { Bridge, emiteEvento } from "./coucou/_js/core/bridge.js";
 import { State } from "./coucou/_js/core/state.js";
-import { montaMascotas, muestra, sincroniza, montaAvatares } from "./jarvis-mascotas.js";
+import { montaMascotas, muestra, sincroniza, montaAvatares, activa, fijaFoco } from "./jarvis-mascotas.js";
 
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 const MAIN = "jarvis";
@@ -171,16 +171,22 @@ function empiezaMirada() {
 }
 
 // ── Mascotas ─────────────────────────────────────────────────────────────────
-// La isla pinta a Mochi, que es de Coucou. Aqui se superpone una capa con las
-// mascotas de JARVIS (Jarvi, Vee, Opi y Buffi), que cambian con la pastilla que
-// tenga el foco y con el estado en el que este: trabajando, compilando,
-// pensando, pidiendo permiso... y cuando no hay nada que hacer, se lucen.
+// Coucou pinta a Mochi y se queda con el. Las mascotas de JARVIS (Jarvi, Vee,
+// Opi y Buffi) siguen aqui, pero apagadas: se encienden en caliente con
+//   __mascotas.activa(true)
+// y se vuelven a apagar con false, que devuelve a Mochi.
+//
+// El trabajo de estado (trabajando, compilando, pensando, pidiendo permiso) y
+// las florituras en reposo solo hacen falta si estan encendidas.
+let QUIERO_MASCOTAS = false;
 
 // Espera a que Coucou haya montado la isla: el contenedor de la mascota no
 // existe hasta entonces.
 function esperaIsla() {
   const ancla = document.querySelector("#bot-canvas") && document.querySelector("#bot-canvas").parentElement;
   if (!ancla) { setTimeout(esperaIsla, 300); return; }
+  // Por defecto se queda Mochi, que es la mascota de Coucou. Las de JARVIS
+  // solo entran si alguien las activa con __mascotas.activa(true).
   montaMascotas(ancla);
   muestra(State.focusId || MAIN);
   sincroniza("idle");
@@ -203,6 +209,30 @@ function sigueElFoco() {
   }, 500);
 }
 
+// El interruptor. La fuente de verdad es esta variable; __mascotas.activa solo
+// aplica el cambio. Antes el puente reconfirmaba el valor apagado cada medio
+// segundo y por eso no se podia encender a mano.
+setInterval(() => {
+  if (!window.__mascotas) return;
+  fijaFoco(State.focusId || MAIN);
+  if (QUIERO_MASCOTAS) {
+    const ancla = document.querySelector("#bot-canvas");
+    if (ancla) montaMascotas(ancla.parentElement);
+    montaAvatares();
+  }
+}, 900);
+
+function ponMascotas(on) {
+  QUIERO_MASCOTAS = !!on;
+  if (!window.__mascotas) return QUIERO_MASCOTAS;
+  window.__mascotas.activa(QUIERO_MASCOTAS);
+  if (QUIERO_MASCOTAS) {
+    const ancla = document.querySelector("#bot-canvas");
+    if (ancla) { montaMascotas(ancla.parentElement); montaAvatares(); }
+  }
+  return QUIERO_MASCOTAS;
+}
+
 conecta();
 empiezaMirada();
 enganchaAtajos();
@@ -213,6 +243,7 @@ globalThis.__isla = {
   foco: () => State.focusId,
   pastillas: () => State.tasks.map((t) => ({ id: t.id, nombre: t.name, estado: t.status })),
   mascota: () => (globalThis.__mascotas ? globalThis.__mascotas.activo() : null),
+  mascotas: (on) => (on === undefined ? QUIERO_MASCOTAS : ponMascotas(on)),
 };
 
 if (document.readyState === "loading") {
