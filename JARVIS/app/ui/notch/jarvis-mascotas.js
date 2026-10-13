@@ -345,23 +345,56 @@ function avataresVisibles(on) {
   }
 }
 
-// Coloca el avatar ENCIMA del circleito de color y con su tamano exacto. Al
-// lado empujaba la etiqueta y se leia "Code" en vez de "Codex"; encima, lo
-// sustituye y la pastilla queda igual de ancha que la de Coucou.
-function situaSobre(anfitrion, mini, lienzoA) {
+// Coloca el avatar ENCIMA del circleito de color, centrado en el. Al lado
+// empujaba la etiqueta y se leia "Code" en vez de "Codex"; encima, lo sustituye
+// y la pastilla queda igual de ancha que la de Coucou.
+// Coucou deja el mini justo a su tamano, y a 13 px (la rejilla de la isla
+// encogida) no se distingue una mascota de otra. Se agranda un poco mas que el
+// hueco y se centra en el, pero nunca pasa del borde de la pastilla ni encima de
+// la etiqueta: si no cabe entero se queda en el tamano de Coucou.
+const AVATAR_K = 1.2;
+
+// La caja de .lbl se estira a todo lo ancho de la pastilla, asi que medirla
+// decía que el mini estaba encima del texto y el recorte salia siempre al
+// tamano de Coucou. Lo que hay que medir es donde EMPIEZA el texto.
+function dondeEmpiezaElTexto(el) {
+  if (!el) return null;
+  const r = document.createRange();
+  let n = el.firstChild;
+  while (n && n.nodeType !== 3) n = n.firstChild;
+  if (!n) return null;
+  r.selectNodeContents(n);
+  const b = r.getBoundingClientRect();
+  return b.width ? b : null;
+}
+
+// El lienzo cuelga siempre del mini, que ya es position:relative. Colgarlo de
+// la pastilla descentraba un pixel por su borde, y de la rejilla no cabia.
+function situaSobre(mini, lienzoA) {
   const mr = mini.getBoundingClientRect();
-  const pr = anfitrion.getBoundingClientRect();
-  if (!mr.width || !pr.width) return;
-  // Cuando el lienzo cuelga del propio mini (que ya es position:relative), se
-  // pega a su esquina: medir el desplazamiento aqui se descuadraba unos pixeles
-  // porque el canvas se accounta a si mismo en la medida.
-  const dentro = anfitrion === mini;
+  if (!mr.width) return;
+  const cx = mr.left + mr.width / 2;
+  const cy = mr.top + mr.height / 2;
+  let lado = mr.width * AVATAR_K;
+  const pastilla = mini.closest('.pill');
+  if (pastilla) {
+    const pr = pastilla.getBoundingClientRect();
+    const texto = dondeEmpiezaElTexto(pastilla.querySelector('.lbl'));
+    const der = Math.min(pr.right, texto ? texto.left - 4 : pr.right);
+    // El avatar va en absoluto, asi que al crecer no empuja la etiqueta: el
+    // limite es el radio que hay a cada lado del centro del mini. Si se tomaba
+    // ese radio como si fuera el ancho entero, nunca llegaba a crecer.
+    lado = Math.min(lado, 2 * (der - cx), 2 * (cx - pr.left), pr.height - 1);
+    lado = Math.max(lado, Math.min(mr.width, mr.height));
+  }
+  // En la rejilla no hay pastilla: el limite es el hueco, y las celdas estan a
+  // 16 px, asi que 1,2 no llega a tocarse.
   Object.assign(lienzoA.style, {
     position: 'absolute',
-    left: dentro ? '0px' : (mr.left - pr.left) + 'px',
-    top: dentro ? '0px' : (mr.top - pr.top) + 'px',
-    width: mr.width + 'px',
-    height: mr.height + 'px',
+    left: ((cx - lado / 2 - mr.left) + 'px'),
+    top: ((cy - lado / 2 - mr.top) + 'px'),
+    width: lado + 'px',
+    height: lado + 'px',
     marginLeft: '0',
     // El CSS de Coucou centra su lienzo con translate(-50%,-50%) porque el suyo
     // es mas grande que el hueco. El nuestro va justa al hueco, asi que ese
@@ -371,8 +404,8 @@ function situaSobre(anfitrion, mini, lienzoA) {
     pointerEvents: 'none',
   });
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const lado = Math.max(8, Math.round(mr.width * dpr));
-  if (lienzoA.width !== lado) { lienzoA.width = lado; lienzoA.height = lado; }
+  const px = Math.max(8, Math.round(lado * dpr));
+  if (lienzoA.width !== px) { lienzoA.width = px; lienzoA.height = px; }
   // Coucou pinta ahi su squareito de color, y su lienzo es mas grande que el
   // hueco a proposito, para que el gorro y las particulas no se corten. Por eso
   // el gorro se veia por encima de nuestra skin: se oculta su lienzo entero.
@@ -385,21 +418,21 @@ function situaAvatar(pill) {
   const mini = pill.querySelector('.mini');
   if (!mini) return;
   const lienzoA = mini.querySelector('canvas.jarvis-avatar');
-  if (lienzoA) situaSobre(mini, mini, lienzoA);
+  if (lienzoA) situaSobre(mini, lienzoA);
 }
 
-function creaAvatar(anfitrion, mini, id, marca) {
+function creaAvatar(mini, id, marca) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const lienzoA = document.createElement('canvas');
   lienzoA.className = 'jarvis-avatar';
   lienzoA.width = 26 * dpr;
   lienzoA.height = 26 * dpr;
-  anfitrion.appendChild(lienzoA);
+  mini.appendChild(lienzoA);
   if (marca) marca.dataset.jarvisAvatar = id;
   const motor = creaMotor(MASCOTAS[id].def, MASCOTAS[id].estados, MASCOTAS[id].pintar);
   motor.pon('reposo');
   avatares.set(lienzoA, { lienzo: lienzoA, ctx: lienzoA.getContext('2d'), motor, mini });
-  situaSobre(anfitrion, mini, lienzoA);
+  situaSobre(mini, lienzoA);
 }
 
 export function montaAvatares() {
@@ -417,7 +450,7 @@ export function montaAvatares() {
     // Se cuelga del mini y no de la pastilla: el mini es el hueco, y ahi dentro
     // el lienzo es justo del tamano del circleito, sin el desplazamiento que le
     // mete el borde de la pastilla.
-    creaAvatar(mini, mini, id, pill);
+    creaAvatar(mini, id, pill);
   }
 
   // Coucou, cuando la isla esta compacta, enseña 4 minibots con su gorro. Tambien
@@ -430,9 +463,9 @@ export function montaAvatares() {
     for (let i = 0; i < minis.length; i++) {
       const mini = minis[i];
       if (!mini.querySelector('canvas.jarvis-avatar')) {
-        creaAvatar(mini, mini, ids[i] || 'jarvi');
+        creaAvatar(mini, ids[i] || 'jarvi');
       } else {
-        situaSobre(mini, mini, mini.querySelector('canvas.jarvis-avatar'));
+        situaSobre(mini, mini.querySelector('canvas.jarvis-avatar'));
       }
     }
   }

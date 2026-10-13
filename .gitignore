@@ -4,6 +4,7 @@ venv/
 dist/
 build/
 dist-installer/
+dist-temp*/
 
 # Las ruedas de Python se descargan al compilar (ver build.yml). Son cientos
 # de MB y son distintas para cada plataforma, asi que no van en el repo.
