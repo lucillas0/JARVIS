@@ -352,7 +352,7 @@ function avataresVisibles(on) {
 // encogida) no se distingue una mascota de otra. Se agranda un poco mas que el
 // hueco y se centra en el, pero nunca pasa del borde de la pastilla ni encima de
 // la etiqueta: si no cabe entero se queda en el tamano de Coucou.
-const AVATAR_K = 1.2;
+const AVATAR_K = 1.35;
 
 // La caja de .lbl se estira a todo lo ancho de la pastilla, asi que medirla
 // decía que el mini estaba encima del texto y el recorte salia siempre al
@@ -384,11 +384,23 @@ function situaSobre(mini, lienzoA) {
     // El avatar va en absoluto, asi que al crecer no empuja la etiqueta: el
     // limite es el radio que hay a cada lado del centro del mini. Si se tomaba
     // ese radio como si fuera el ancho entero, nunca llegaba a crecer.
-    lado = Math.min(lado, 2 * (der - cx), 2 * (cx - pr.left), pr.height - 1);
-    lado = Math.max(lado, Math.min(mr.width, mr.height));
+    lado = Math.min(lado, 2 * (der - cx), 2 * (cx - pr.left));
+  } else if (mini.parentElement) {
+    // En la rejilla no hay etiqueta: el tope es la separacion entre celdas, que
+    // es por donde se tocarian una con otra.
+    const hueco = parseFloat(getComputedStyle(mini.parentElement).columnGap) || 0;
+    lado = Math.min(lado, mr.width + hueco);
   }
-  // En la rejilla no hay pastilla: el limite es el hueco, y las celdas estan a
-  // 16 px, asi que 1,2 no llega a tocarse.
+  const isla = mini.closest('#island');
+  if (isla) {
+    // Antes lo acotaba el alto de la pastilla (28 px) y ahi se quedaba en 24.
+    // Lo que manda es la isla: dentro de ella hay sitio de sobra.
+    const ir = isla.getBoundingClientRect();
+    lado = Math.min(lado, 2 * Math.min(cy - ir.top - 1, ir.bottom - 1 - cy));
+  }
+  lado = Math.max(lado, Math.min(mr.width, mr.height));
+  // En la rejilla las celdas estan separadas por el hueco del CSS, asi que 1,35
+  // no llega a tocarse.
   Object.assign(lienzoA.style, {
     position: 'absolute',
     left: ((cx - lado / 2 - mr.left) + 'px'),

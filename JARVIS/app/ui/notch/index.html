@@ -8,6 +8,22 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:8000; connect-src 'self' ws://127.0.0.1:8000 http://127.0.0.1:8000;" />
     <title>JARVIS</title>
 <link rel="stylesheet" href="./coucou/style.css" />
+    <!-- Ajustes de JARVIS sobre el CSS de Coucou. Van aqui porque style.css es
+         suyo y no queremos tocarlo. -->
+    <style>
+      /* La rejilla compacta de Coucou usa celdas de 13 px, y ahi una mascota no
+         se distingue de otra. Se ensanchan a 15 con 2 de separacion: Coucou la
+         centra con left/top calculados para 29 px, asi que el desplazamiento
+         del translate es lo que la vuelve a dejar centrada. */
+      #mini-grid {
+        width: 32px !important;
+        height: 32px !important;
+        grid-template-columns: 15px 15px !important;
+        grid-auto-rows: 15px !important;
+        gap: 2px !important;
+        transform: translate(-1.5px, -1.5px);
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
