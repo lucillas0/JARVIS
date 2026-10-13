@@ -7,107 +7,135 @@ ni dependencias de audio en la imagen: en un NAS no hay ni pantalla ni tarjeta
 de sonido, y lo que falta se avisa en `/health` como `"sin hardware"` en vez de
 tirar el arranque.
 
-## Tres vías, de menos a más fights
+## Lo primero, y lo importante
+
+**No hace falta que crees ninguna carpeta, ni que compiles nada, ni que
+instales modelos.** El `docker-compose.yml` de este repositorio está hecho
+para eso:
+
+- **No compila.** No lleva `build:`, así que Container Manager no construye
+  nada: tira de la imagen ya publicada. En un NAS el build va por SMB y se
+  queda colgado (o no termina nunca en un DS220+).
+- **No usa carpetas.** Los datos van a volúmenes con nombre, que crea Docker
+  solo. Es la causa número uno de «no funciona»: Synology no crea la carpeta
+  que le pongas a un bind mount y el arranque muere con `Bind mount failed`.
+- **No necesita `.env`.** Cada variable tiene su valor por defecto. Si pones
+  un `.env` al lado, se usa; si no, el proyecto se crea igual.
+
+Solo hay dos cosas que no se pueden automatizar y que son tuyas: **la carpeta
+del proyecto** (DSM la pide siempre) y **la clave de IA**.
+
+## Dos vías, y las dos son cortas
 
 | Vía | Cuándo |
 |---|---|
-| [1. Un solo script](#1-un-solo-sin-compose) | **La recomendada.** Un `docker run` y se acabó. Sin `.yml`. |
-| [2. Imagen publicada](#2-imagen-publicada-sin-compilar) | Lo mismo, pero sin compilar en el NAS. |
-| [3. Container Manager (compose)](#3-container-manager-compose) | Solo si ya usas proyectos de Container Manager. |
-
-## Ficheros
-
-| Fichero | Para qué |
-|---|---|
-| `instalar-nas.sh` | **La vía recomendada en NAS.** Crea lo que falta, tira la imagen y arranca, todo con `docker run`. |
-| `instalar-docker.sh` | Lo mismo para un Linux normal. |
-| `docker-compose.yml` | El proyecto para Container Manager, ya sin las trampas de Synology. |
-| `Dockerfile` | Imagen mínima: Python + el cerebro. Multi-arch (amd64 y arm64) sin compilar nada. |
-| `docker/entrypoint.sh` | Lo que va antes de uvicorn: comprueba permisos, avisa de lo que falta y baja a PUID/PGID. |
-| `configuracion.env.example` | Todas las opciones, comentadas y con los valores por defecto reales. Se copia a `.env`. |
-
-Si lo que quieres es instalarlo en tu PC, usa `instalar.bat` / `instalar.sh` y
-mira `INSTALAR.md`.
+| [1. Container Manager](#1-container-manager-lo-mas-corto) | **La recomendada.** 4 clics y ya. |
+| [2. Un script por SSH](#2-un-solo-script-ssh) | Si prefieres no usar la interfaz, o si quieres una instalación totalmente desatendida. |
 
 ---
 
-## 1. Un solo, sin compose
+## 1. Container Manager (lo más corto)
 
-Desde SSH del NAS:
+### Paso 1 · Copiar la carpeta
+
+Desde File Station, copia esta carpeta `JARVIS` a una carpeta compartida, por
+ejemplo `/volume1/docker/jarvis`. Es lo único que hay que hacer a mano, y es
+porque DSM exige una ruta de proyecto.
+
+### Paso 2 · El comando que prepara el resto
+
+Por SSH, dentro de esa carpeta:
+
+```sh
+sh instalar-docker.sh
+```
+
+Eso, y solo eso. El script:
+
+1. Arranca Container Manager si está parado.
+2. **Baja la imagen**, para que el proyecto de Container Manager no tenga que
+   compilar nada.
+3. **Crea el `.env`** con tus ids de usuario del DSM, para que los ficheros
+   no acaben como `root` y no puedas borrarlos desde File Station. Sin esto es
+   el problema número dos.
+4. **Te pregunta la clave de IA** al final y la guarda.
+5. **Comprueba que el puerto esté libre**, para no perder después tres
+   minutos de descarga en un puerto que ya tenía otro.
+
+Si la clave no la tienes a mano, no pasa nada: pulsa Intro y sigue. La pones
+después en el navegador.
+
+### Paso 3 · Los 4 clics
+
+En **Container Manager → Proyecto → Crear**:
+
+1. **Ruta del proyecto**: la carpeta donde dejaste `JARVIS`.
+2. **Fuente**: *Usar un archivo `docker-compose.yml` existente*.
+3. **Nombre**: `jarvis`.
+4. **Crear**.
+
+Espera un par de minutos a que termine de tirar la imagen y abre:
+
+```
+http://IP-DEL-NAS:8000/setup     <- si no pusiste la clave antes, aquí
+http://IP-DEL-NAS:8000/         <- la interfaz
+```
+
+La clave que pongas en `/setup` **se guarda en el volumen**, no en el
+contenedor. Antes se perdía en cada actualización y había que volver a
+pegarla; ahora sobrevive.
+
+### Para actualizar a una versión nueva
+
+```sh
+sh instalar-docker.sh --actualizar
+```
+
+Y luego, en Container Manager, botón derecho sobre el proyecto → *Acción* →
+*Detener* y luego *Construir*. Tus datos y tus claves se quedan: viven en el
+volumen, no en el contenedor.
+
+---
+
+## 2. Un solo script (SSH)
+
+Si no quieres usar la interfaz de Container Manager nunca:
 
 ```sh
 cd /volume1/docker/jarvis
-cp configuracion.env.example .env
-nano .env          # pega al menos una clave: Groq, Gemini u OpenRouter
 sh instalar-nas.sh
 ```
 
-Y para actualizar cuando haya versión nueva:
-
-```sh
-sh instalar-nas.sh --actualizar
-```
-
-El script se encarga de lo que suele fallar:
-
-- **Crea las carpetas de los montajes antes de arrancar.** Synology no las crea:
-  si `./data` no existe, Docker responde `Bind mount failed` y ahí se acabó.
-- **Tira la imagen ya construida** y, si no está, construye en el NAS.
-- **Espera a que `/health` conteste** y, si no contesta en 2 minutos, saca los
-  logs y dice por qué.
-- **Te da la dirección** al final.
-
-Variables que puedes cambiar en el `.env` o en la llamada:
+Un `docker run` y se acabó. Sin `.yml`, sin redes propias, sin claves de
+despliegue y sin build en el NAS. Crea las carpetas que falten, tira de la
+imagen y espera a que `/health` conteste.
 
 ```sh
 JARVIS_PUERTO=8080 sh instalar-nas.sh          # otro puerto
 JARVIS_DATOS=/volume2/jarvis sh instalar-nas.sh # datos en otro volumen
 PUID=1026 PGID=100 sh instalar-nas.sh           # tu usuario del NAS
+sh instalar-nas.sh --actualizar                 # actualizar
 ```
 
-## 2. Imagen publicada, sin compilar
+---
 
-Compilar en el NAS va por SMB y es lentísimo; en un DS220+ con 1 GB de RAM puede
-quedarse colgado y DSM acaba diciendo que el proyecto falló aunque esté bien.
+## Ficheros
 
-Por eso la imagen se publica ya construida en cada release, para `amd64` y
-`arm64`:
+| Fichero | Para qué |
+|---|---|
+| `docker-compose.yml` | El proyecto de Container Manager. Sin build, sin carpetas, sin `.env` obligatorio. |
+| `instalar-docker.sh` | Prepara el proyecto y te deja a 4 clics de que funcione. |
+| `instalar-nas.sh` | La vía de un solo `docker run`, sin compose. |
+| `Dockerfile` | Imagen mínima: Python + el cerebro. Multi-arch (amd64 y arm64). |
+| `docker/entrypoint.sh` | Lo que va antes de uvicorn: comprueba permisos, avisa de lo que falta y baja a PUID/PGID. |
+| `configuracion.env.example` | Todas las opciones, comentadas y con los valores por defecto reales. Se copia a `.env` si lo quieres. |
 
-```
-ghcr.io/lucillas0/jarvis:latest
-```
+---
 
-El script de arriba ya la usa sola. Si quieres hacerlo a mano:
+## Por qué el compose es así
 
-```sh
-docker pull ghcr.io/lucillas0/jarvis:latest
-docker run -d --name jarvis --restart unless-stopped \
-  -p 8000:8000 \
-  -e JARVIS_SERVER_MODE=1 -e JARVIS_DATA_DIR=/data \
-  -e PUID=1026 -e PGID=100 -e SCREEN_ANALYSIS_MODE=off \
-  --env-file .env \
-  -v /volume1/docker/jarvis/data:/data \
-  ghcr.io/lucillas0/jarvis:latest
-```
-
-La imagen sale multi-arch, así que el mismo comando vale para un DS918+ (Realtek,
-`arm64`) y para un DS923+ (AMD Ryzen, `amd64`). Si tu NAS es de otra cosa, mira
-`uname -m` y añade `--platform`.
-
-## 3. Container Manager (compose)
-
-1. Copia esta carpeta a una carpeta compartida, por ejemplo
-   `/volume1/docker/jarvis`.
-2. **Antes de nada**, en File Station, crea dentro la carpeta `data`. Es
-   obligatoria: Synology no crea los puntos de montaje.
-3. Copia `configuracion.env.example` a `.env` y pon al menos una clave de API.
-4. En **Container Manager → Proyecto → Crear**, elige esa carpeta como ruta.
-5. Fuente: *usar un archivo `docker-compose.yml` existente*.
-6. **Crear**.
-
-El `docker-compose.yml` de este repositorio viene ya con lo que rompía en
-Container Manager resuelto. Por si te lo encuentras en otra parte, esto es lo que
-importa y por qué:
+Si te lo encuentras en otra parte, esto es lo que importa y por qué. Los cuatro
+puntos del fichero original que rompían algo están resueltos:
 
 - **No declara `networks:`.** Docker Compose 5.1.0, el que lleva DSM 7.1 y 7.2,
   falla con `Container cannot be connected to network endpoints` contra cualquier
@@ -119,9 +147,30 @@ importa y por qué:
   arranque moría con un `PermissionError`.
 - **No lleva `deploy:`.** Fuera de Swarm se ignora, y hay versiones de Container
   Manager que se atascan al leerlo.
-- **No monta `./.env` en `/app/.env`.** El sitio donde lo lee `brain/config.py` es
-  `/app/brain/.env`, así que ese montaje era decorativo. La configuración llega
-  por `env_file`, que sí funciona.
+- **No usa `env_file:` ni monta `./.env` en `/app/.env`.** El proyecto se crea
+  aunque no haya `.env`, y el que haya solo sirve para sustituir los
+  `${VAR:-defecto}`. Montar el `.env` era además decorativo: el sitio donde lo
+  lee `brain/config.py` es `/app/brain/.env`, no `/app/.env`.
+
+### El fallo que quedaba: las claves se perdían
+
+`_keys_env_path()` en `brain/main.py` devolvía `%APPDATA%/JARVIS/keys.env`, y en
+Linux y en Docker `APPDATA` no existe: devolvía cadena vacía. Las claves que
+ponías en `/setup` se guardaban **dentro del contenedor**, en `/app/brain/.env`,
+y se evaporaban en cuanto se recreaba. En un NAS eso significaba pegar la
+clave otra vez en cada actualización, a mano.
+
+Ahora `brain/config.py` busca las claves en tres sitios, en este orden, y el
+segundo es el que faltaba:
+
+```
+%APPDATA%/JARVIS/keys.env   →  Windows
+DATA_DIR/keys.env           →  Linux, NAS y Docker (el volumen)
+brain/keys.env              →  por si acaso
+```
+
+Y al guardar, `Config` se actualiza en memoria, así que la clave **funciona sin
+reiniciar el contenedor**.
 
 ---
 
@@ -135,8 +184,7 @@ Tres cosas, en orden de probabilidad:
    es de root y ahí no se puede crear. Ahora el `makedirs` está protegido y el
    Dockerfile deja esa carpeta creada y con permisos de escritura.
 2. **`Bind mount failed`.** Synology no crea las carpetas que aparecen en un
-   bind mount. El entrypoint lo avisa con el texto a seguir, y `instalar-nas.sh`
-   las crea antes.
+   bind mount. Ya no hay bind mounts: los volúmenes con nombre los crea Docker.
 3. **La red del compose**, con el fallo de Compose 5.1.0 sobre daemons viejos
    descrito más arriba.
 
@@ -155,23 +203,23 @@ Tres cosas, en orden de probabilidad:
 
 ## Configuración
 
-Todo se configura en `.env`, que se copia de `configuracion.env.example`. Lo
-mínimo para que conteste algo:
+Casi todo se puede cambiar desde el navegador, en `http://IP:8000/setup` y en
+`/config`. Lo que sigue es para lo que prefieras tener en un fichero: copia
+`configuracion.env.example` a `.env` en la carpeta del proyecto y pon lo que
+quieras. Si no lo pones, se usan los valores por defecto del compose.
+
+Lo único imprescindible para que conteste algo es **una** clave de modelo
+(Groq, Gemini u OpenRouter). Sin ninguna, el contenedor **arranca pero no
+responde**: es un aviso, no un fallo, y el entrypoint lo dice al arrancar y en
+los logs. Además, si no hay clave, `/` te manda a `/setup` en vez de a la
+interfaz, para que la pongas sin buscar nada.
+
+Lo que conviene poner en un NAS:
 
 ```env
-GROQ_API_KEY=...
-```
-
-Sin ninguna clave el contenedor **arranca pero no responde**: es un aviso, no un
-fallo, y el entrypoint lo dice al arrancar y en los logs.
-
-Dos cosas que conviene poner en un NAS:
-
-```env
-# En un NAS no hay pantalla, y por defecto el análisis continuo está en ON.
-SCREEN_ANALYSIS_MODE=off
-PUID=1026
-PGID=100
+SCREEN_ANALYSIS_MODE=off   # en un NAS no hay pantalla
+PUID=1026                  # id -u de tu usuario del DSM
+PGID=100                   # id -g de tu usuario del DSM
 ```
 
 ## Seguridad
@@ -180,6 +228,10 @@ PGID=100
 solo en la LAN, y conviene que siga así. Si necesitas llegar desde fuera, pon
 delante algo que autentique (Caddy, nginx con basic auth, Cloudflare Tunnel) y
 no expongas el 8000 a internet.
+
+Ojo también a la cámara: `/api/camara/*` responde con
+`Access-Control-Allow-Origin: *` para poder usarse desde el tracker de gestos.
+En la LAN da igual; no lo expongas a internet.
 
 ## Comandos
 
@@ -190,8 +242,14 @@ docker stop jarvis             # parar
 docker rm -f jarvis            # borrar el contenedor (los datos se quedan)
 ```
 
-Los datos viven en `data/` (o donde pongas `JARVIS_DATOS`): base de datos,
-memoria y registros. Borrar el contenedor no los toca.
+Los datos viven en el volumen `jarvis_data`: base de datos, memoria, registros
+y tus claves. Borrar el contenedor no los toca.
+
+Para verlo:
+
+```sh
+docker volume inspect jarvis_data
+```
 
 ## Comprobar que va
 

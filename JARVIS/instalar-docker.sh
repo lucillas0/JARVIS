@@ -1,299 +1,269 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # =============================================================================
-#  JARVIS · instalador del servidor
+#  JARVIS · preparador del proyecto para Container Manager (Synology / Xpenology)
 # =============================================================================
-#  Deja el servidor de JARVIS funcionando en Docker. Pensado para servidores
-#  Linux y, en concreto, para Synology/Xenology con Container Manager, que es
-#  donde el camino se hace con la interfaz en vez de con docker compose.
+#  Esto NO es un instalador: es el paso previo que hace que lo de despues sea
+#  solo abrir Container Manager y pulsar "Crear". No deja nada a medias.
 #
-#  Uso:
-#     ./instalar.sh                  instala, construye y arranca
-#     ./instalar.sh --puerto 9000    con otro puerto
-#     ./instalar.sh --sin-clave      arranca sin clave (servidor sin modelos)
-#     ./instalar.sh --reconstruir    rehace la imagen desde cero
-#     ./instalar.sh --parar          para el contenedor
-#     ./instalar.sh --registrar      registra el proyecto en Container Manager
-#     ./instalar.sh --estado         dice como va
-#     ./instalar.sh --registros      enseña el log
-#     ./instalar.sh --ayuda          esta ayuda
+#  Que hace, en este orden:
+#    1. Comprueba que Docker responde (y lo arranca si esta parado).
+#    2. Descarga la imagen ya publicada, para que Container Manager no tenga que
+#       compilar nada. Si no se puede descargar, la compila aqui una sola vez.
+#    3. Crea el .env con TUS ids de usuario del DSM, que es lo que evita que los
+#       ficheros acaben como root y no puedas borrarlos desde File Station.
+#    4. Al final te pregunta la clave de IA y la guarda.
+#    5. Te dice los 4 clics que quedan en Container Manager.
+#
+#  Como se ejecuta (una sola vez, por SSH):
+#      cd /volume1/docker/jarvis
+#      sh instalar-docker.sh
+#
+#  Y para actualizar a una version nueva, cuando salga:
+#      sh instalar-docker.sh --actualizar
 # =============================================================================
-set -euo pipefail
+set -e
 
-RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RAIZ="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$RAIZ/.env"
 EJEMPLO="$RAIZ/configuracion.env.example"
-COMPOSE="$RAIZ/docker-compose.yml"
+IMAGEN="${JARVIS_IMAGEN:-ghcr.io/lucillas0/jarvis:latest}"
+CONTENEDOR="${JARVIS_CONTENEDOR:-jarvis}"
 
-PUERTO=""
-SIN_CLAVE=0
-RECONSTRUIR=0
-ACCION="instalar"
+ACCION="preparar"
+PREGUNTAR_CLAVE=1
+SALTAR_TODO=0
 
-# --- Colores (se desactivan si la salida no es una terminal) -----------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --actualizar)  ACCION="actualizar" ;;
+    --comprobar)   ACCION="comprobar" ;;
+    --pulsos)      SALTAR_TODO=1 ;;   # no pregunta nada
+    --puerto)      PUERTO_PEDIDO="${2:-}"; shift ;;
+    --ayuda|-h)    ACCION="ayuda" ;;
+    *) printf 'Opcion desconocida: %s\n' "$1"; ACCION="ayuda" ;;
+  esac
+  shift
+done
+
+# --- Colores -----------------------------------------------------------------
 if [ -t 1 ]; then
-  R=$'\033[31m'; V=$'\033[32m'; A=$'\033[33m'; AZ=$'\033[36m'; N=$'\033[0m'
+  V=$(printf '\033[32m'); A=$(printf '\033[33m'); R=$(printf '\033[31m')
+  AZ=$(printf '\033[36m'); N=$(printf '\033[0m'); G=$(printf '\033[90m')
 else
-  R=""; V=""; A=""; AZ=""; N=""
+  V=""; A=""; R=""; AZ=""; N=""; G=""
 fi
-
-info()  { printf '%s\n' "${AZ}>${N} $*"; }
-ok()    { printf '%s\n' "${V}OK${N}  $*"; }
-aviso() { printf '%s\n' "${A}!${N}  $*"; }
-error() { printf '%s\n' "${R}x${N}  $*" >&2; }
+info() { printf '%s> %s%s\n' "$AZ" "$*" "$N"; }
+ok()   { printf '%sOK  %s%s\n' "$V" "$*" "$N"; }
+aviso(){ printf '%s!  %s%s\n' "$A" "$*" "$N"; }
+error(){ printf '%sx  %s%s\n' "$R" "$*" "$N"; }
+nota() { printf '%s   %s%s\n' "$G" "$*" "$N"; }
 
 ayuda() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Del 2 al 23: justo el bloque de comentario de la cabecera, ni una linea mas.
+  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
-# --- Opciones -----------------------------------------------------------------
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --puerto)      PUERTO="${2:-}"; shift 2 ;;
-    --sin-clave)   SIN_CLAVE=1; shift ;;
-    --reconstruir) RECONSTRUIR=1; shift ;;
-    --parar)       ACCION="parar"; shift ;;
-    --registrar)   ACCION="registrar"; shift ;;
-    --estado)      ACCION="estado"; shift ;;
-    --registros)   ACCION="registros"; shift ;;
-    --ayuda|-h)    ayuda ;;
-    *) error "Opcion desconocida: $1"; ayuda ;;
-  esac
-done
+# --- Docker ------------------------------------------------------------------
+docker_() {
+  if docker version >/dev/null 2>&1; then docker "$@"; else sudo docker "$@"; fi
+}
 
-# --- Que maquina es esta ------------------------------------------------------
-detectar_sistema() {
-  if [ -f /etc/synologyrelease ] || [ -d /etc/synology ]; then
-    SISTEMA="Synology/Xenology"
-    # Container Manager corre sus proyectos como este usuario del DSM.
-    PUID_DEF="$(id -u)"
-    PGID_DEF="$(id -g)"
-  elif [ -f /etc/os-release ]; then
-    SISTEMA="$(. /etc/os-release && echo "$NAME $VERSION_ID")"
-    PUID_DEF=1000; PGID_DEF=1000
+arrancar_docker() {
+  docker version >/dev/null 2>&1 && return 0
+  # En Xpenology el paquete se llama SynoCommunity/ContainerManager; en Synology
+  # oficial, ContainerManager. Se prueban los dos y no se pasa de ahi.
+  if [ -f /etc/synologyrelease ]; then
+    nota "Docker no responde; intento arrancar Container Manager..."
+    sudo synopkg start ContainerManager >/dev/null 2>&1 || \
+      sudo synopkg start SynoCommunity-ContainerManager >/dev/null 2>&1 || true
+    i=0
+    while [ $i -lt 20 ]; do
+      docker version >/dev/null 2>&1 && return 0
+      i=$((i + 1)); sleep 1
+    done
+  fi
+  error "Docker no responde."
+  aviso "En Xpenology: Package Center > instalado > Container Manager > Iniciar."
+  aviso "O por SSH:  sudo synopkg start ContainerManager"
+  exit 1
+}
+
+# --- Sistema -----------------------------------------------------------------
+PUID_DEF=1026
+PGID_DEF=100
+detectar_nas() {
+  if [ -f /etc/synologyrelease ]; then
+    # En DSM el id real del usuario con el que entras por SSH. Es el que debe
+    # tener los ficheros del volumen, si no se quedan como root.
+    PUID_DEF="$(id -u)"; PGID_DEF="$(id -g)"
+    echo "Synology/Xenology  ($(cat /etc/synologyrelease 2>/dev/null | head -1))"
   else
-    SISTEMA="Linux"
-    PUID_DEF=1000; PGID_DEF=1000
+    uname -sr
   fi
 }
 
-# --- Como se llama a Docker ---------------------------------------------------
-detectar_docker() {
-  if ! command -v docker >/dev/null 2>&1; then
-    error "No encuentro docker."
-    case "$SISTEMA" in
-      Synology*)
-        aviso "En Synology, abre Package Center e instala 'Container Manager'."
-        aviso "Tambien hace falta activar SSH (Panel de control > Terminal y SNMP)."
-        ;;
-      *)
-        aviso "Instala Docker: https://docs.docker.com/engine/install/"
-        ;;
-    esac
-    exit 1
-  fi
-
-  if docker compose version >/dev/null 2>&1; then
-    COMPOSE_CMD=(docker compose)
-  elif command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE_CMD=(docker-compose)
+# --- .env --------------------------------------------------------------------
+poner() {  # poner CLAVE VALOR  -> cambia la linea del .env sin duplicarla
+  clave="$1"; valor="$2"
+  if grep -q "^${clave}=" "$ENV_FILE" 2>/dev/null; then
+    grep -v "^${clave}=" "$ENV_FILE" > "$ENV_FILE.tmp" || true
+    printf '%s=%s\n' "$clave" "$valor" >> "$ENV_FILE.tmp"
+    mv "$ENV_FILE.tmp" "$ENV_FILE"
   else
-    error "No encuentro Docker Compose v2."
-    aviso "En Synology deberia venir con Container Manager."
-    exit 1
+    printf '%s=%s\n' "$clave" "$valor" >> "$ENV_FILE"
   fi
 }
 
-# --- Estado del contenedor ---------------------------------------------------
-estado() {
-  if docker ps --format '{{.Names}}' | grep -qx jarvis; then
-    ok "El contenedor esta en marcha."
-    if curl -fsS "http://127.0.0.1:${PUERTO_ACTUAL:-8000}/health" 2>/dev/null; then
-      echo
-    fi
-  else
-    aviso "El contenedor no esta en marcha."
-  fi
-}
+leer_() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '\r'; }
 
-PUERTO_ACTUAL=""
-
-leer_puerto() {
-  if [ -f "$ENV_FILE" ]; then
-    p="$(grep -E '^JARVIS_PUERTO=' "$ENV_FILE" | tail -n1 | cut -d= -f2 | tr -d '[:space:]')"
-    PUERTO_ACTUAL="$p"
-  fi
-  PUERTO_ACTUAL="${PUERTO_ACTUAL:-8000}"
-}
-
-# --- Configuracion -----------------------------------------------------------
 crear_env() {
-  if [ -f "$ENV_FILE" ]; then
-    ok "Ya existe .env (no lo toco)."
-    return
-  fi
-  if [ ! -f "$EJEMPLO" ]; then
-    error "No encuentro $EJEMPLO"
-    exit 1
-  fi
-  cp "$EJEMPLO" "$ENV_FILE"
-  # Detecta el usuario para que los datos no queden como root.
-  sed -i.bak "s/^PUID=.*/PUID=${PUID_DEF}/" "$ENV_FILE"
-  sed -i.bak "s/^PGID=.*/PGID=${PGID_DEF}/" "$ENV_FILE"
-  [ -n "$PUERTO" ] && sed -i.bak "s/^JARVIS_PUERTO=.*/JARVIS_PUERTO=${PUERTO}/" "$ENV_FILE"
-  rm -f "$ENV_FILE.bak"
-  # El .env lleva claves: solo el propietario debe poder leerlo.
-  chmod 600 "$ENV_FILE" 2>/dev/null || true
-  # Comprobacion: algunos sistemas de ficheros (NTFS) no hacen caso a chmod.
-  if [ "$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo 600)" != "600" ]; then
-    aviso "No he podido dejar .env en 600 (sistema de ficheros que no lo soporta)."
-    aviso "Restringelo a mano antes de continuar: chmod 600 .env"
-  fi
-  ok "He creado .env con tus permisos (PUID=$PUID_DEF PGID=$PGID_DEF)."
-}
-
-comprobar_claves() {
-  if [ "$SIN_CLAVE" -eq 1 ]; then
-    aviso "Arrancando sin claves: el servidor levantara pero no respondera."
-    return
-  fi
-  if grep -qE '^(GROQ|GEMINI|OPENROUTER)_API_KEY=.+' "$ENV_FILE" 2>/dev/null; then
-    ok "Hay al menos una clave de modelo."
+  if [ ! -f "$ENV_FILE" ]; then
+    [ -f "$EJEMPLO" ] || { error "No encuentro $EJEMPLO"; exit 1; }
+    cp "$EJEMPLO" "$ENV_FILE"
+    ok ".env creado a partir del ejemplo."
   else
-    aviso "No hay ninguna clave de modelo en .env."
-    aviso "Abrelo y pega al menos una: GROQ_API_KEY, GEMINI_API_KEY u OPENROUTER_API_KEY."
-    aviso "El servidor arrancara igualmente, pero no podra responder."
+    ok ".env ya existe (no lo toco)."
+  fi
+
+  # PUID/PGID: solo se rellenan si estan en el defecto o vacios. Si ya los
+  # cambiaste a mano, no se pisan.
+  actual_p="$(leer_ PUID)"; actual_g="$(leer_ PGID)"
+  if [ -z "$actual_p" ] || [ "$actual_p" = "1026" ]; then poner PUID "$PUID_DEF"; fi
+  if [ -z "$actual_g" ] || [ "$actual_g" = "100" ];  then poner PGID "$PGID_DEF"; fi
+
+  [ -n "$PUERTO_PEDIDO" ] && poner JARVIS_PUERTO "$PUERTO_PEDIDO"
+
+  chmod 600 "$ENV_FILE" 2>/dev/null || true
+  modo="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo 600)"
+  if [ "$modo" != "600" ]; then
+    aviso "El .env no ha quedado en 600 (sistema de ficheros que no lo admite)."
+    aviso "No lo subas a ningun sitio: lleva tus claves en claro."
+  else
+    ok ".env en 600, con tus ids: PUID=$(leer_ PUID) PGID=$(leer_ PGID)"
   fi
 }
 
-# --- Carpetas ----------------------------------------------------------------
-crear_carpetas() {
-  mkdir -p "$RAIZ/data"
-  mkdir -p "$RAIZ/assets"
-  # Los permisos los pone el contenedor; aqui solo evitamos surprises.
-  if [ -n "$PUID_DEF" ]; then
-    chmod 0777 "$RAIZ/data" 2>/dev/null || true
+# --- La clave, al final ------------------------------------------------------
+preguntar_clave() {
+  if [ "$PREGUNTAR_CLAVE" -eq 0 ]; then return 0; fi
+  if grep -qE '^(GROQ_API_KEY|GEMINI_API_KEY|OPENROUTER_API_KEY)=.+' "$ENV_FILE" 2>/dev/null; then
+    ok "Ya hay una clave de modelo en .env. No la toco."
+    return 0
   fi
-  ok "Carpetas data/ y assets/ listas."
+
+  printf '\n'
+  info "Ultimo paso: la clave de IA. Es lo unico que no puedo poner yo."
+  nota "Groq (gratis y rapido):  https://console.groq.com/keys"
+  nota "Gemini:                 https://aistudio.google.com/apikey"
+  printf '\n'
+  printf '  Pega la clave de Groq y pulsa Intro para continuar.\n'
+  printf '  (vacio = seguir sin ella; la pones luego en http://IP:%s/setup)\n\n' "$(leer_ JARVIS_PUERTO)"
+
+  printf '  Clave: '
+  read -r clave || clave=""
+  # Si viene pegada con el raton puede traer espacios o comillas.
+  clave="$(printf '%s' "$clave" | tr -d ' \r"')"
+
+  if [ -n "$clave" ]; then
+    poner GROQ_API_KEY "$clave"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    ok "Clave guardada en .env"
+  else
+    aviso "Sin clave. El proyecto arranca igualmente."
+    aviso "La pones en el navegador: http://IP-NAS:$(leer_ JARVIS_PUERTO)/setup"
+  fi
 }
 
+# --- Imagen ------------------------------------------------------------------
+asegurar_imagen() {
+  info "Bajo la imagen de JARVIS (${IMAGEN})..."
+  if docker_ pull "$IMAGEN" >/dev/null 2>&1; then
+    ok "Imagen descargada. Container Manager no va a compilar nada."
+    return 0
+  fi
+
+  # Si no se puede descargar, se compila aqui una vez. Compilar en el NAS va por
+  # SMB y es lentisimo, pero es mejor que un proyecto de Container Manager que
+  # no arranca porque no encuentra la imagen.
+  if [ ! -f "$RAIZ/Dockerfile" ]; then
+    error "No se ha podido descargar $IMAGEN y aqui no hay Dockerfile."
+    error "Copia la carpeta JARVIS entera en el NAS y ejecuta esto otra vez."
+    return 1
+  fi
+  aviso "No se ha podido descargar la imagen; la compilo aqui. Tarda."
+  if docker_ build -t "$IMAGEN" "$RAIZ"; then
+    ok "Imagen compilada: $IMAGEN"
+    aviso "Container Manager seguira bajando de ghcr.io. Si vuelve a fallar,"
+    aviso "en el proyecto pon la fuente 'Usar una imagen' con:  $IMAGEN"
+  else
+    error "El build ha fallado. Lo mas comun: falta espacio en el volumen"
+    error "donde esta la carpeta, o no esta en un volumen compatible."
+    docker_ images | head -5
+    return 1
+  fi
+}
+
+# --- Comprobaciones ----------------------------------------------------------
 comprobar_puerto() {
-  if command -v ss >/dev/null 2>&1; then
-    if ss -ltn 2>/dev/null | grep -q ":${PUERTO_ACTUAL} "; then
-      aviso "El puerto ${PUERTO_ACTUAL} ya esta ocupado."
-      aviso "Cambia JARVIS_PUERTO en .env o pasa --puerto con otro."
-      return 1
-    fi
+  p="$(leer_ JARVIS_PUERTO)"; p="${p:-8000}"
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${p} "; then
+    aviso "El puerto ${p} ya esta ocupado en este equipo."
+    aviso "Cambia JARVIS_PUERTO en .env y vuelve a ejecutar esto."
+    return 1
   fi
   return 0
 }
 
-IP_LOCAL() {
-  hostname -I 2>/dev/null | awk '{print $1}'
-}
+resumen() {
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -z "$ip" ] && ip="IP-DEL-NAS"
+  p="$(leer_ JARVIS_PUERTO)"; p="${p:-8000}"
 
-# --- Container Manager (Synology) -------------------------------------------
-registrar_proyecto() {
-  if [ "$SISTEMA" != "Synology/Xenology" ]; then
-    aviso "El registro en Container Manager solo tiene sentido en Synology."
-    aviso "Aqui basta con: ${COMPOSE_CMD[*]} up -d"
-    return
-  fi
-  info "Creando el proyecto en Container Manager a mano:"
-  echo
-  echo "  1. Copia esta carpeta a una carpeta compartida, por ejemplo /volume1/docker/jarvis"
-  echo "  2. Container Manager > Proyecto > Crear"
-  echo "  3. Ruta del proyecto: la carpeta donde esta este archivo"
-  echo "  4. Fuente: 'Usar un archivo docker-compose.yml existente'"
-  echo "  5. Pulsa 'Crear' y espera al build (la primera vez tarda)"
-  echo
-  aviso "El boton Build de Container Manager no lee este script; usa la interfaz."
-  aviso "Si prefieres la linea de ordenes, el equivalente es:"
-  echo "     ${COMPOSE_CMD[*]} -f $COMPOSE up -d --build"
-}
-
-# --- Arranque y espera -------------------------------------------------------
-arrancar() {
-  info "Construyendo la imagen (la primera vez tarda varios minutos)..."
-  if [ "$RECONSTRUIR" -eq 1 ]; then
-    "${COMPOSE_CMD[@]}" -f "$COMPOSE" build --no-cache
-  else
-    "${COMPOSE_CMD[@]}" -f "$COMPOSE" build
-  fi
-  ok "Imagen construida."
-
-  info "Arrancando..."
-  "${COMPOSE_CMD[@]}" -f "$COMPOSE" up -d
-  ok "Contenedor arrancado."
-
-  info "Esperando a que responda..."
-  for i in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:${PUERTO_ACTUAL}/health" >/dev/null 2>&1; then
-      ok "Responde en http://127.0.0.1:${PUERTO_ACTUAL}"
-      IP="$(IP_LOCAL)"
-      [ -n "$IP" ] && ok "Y desde la red, en http://${IP}:${PUERTO_ACTUAL}"
-      echo
-      curl -fsS "http://127.0.0.1:${PUERTO_ACTUAL}/health" || true
-      echo
-      return 0
-    fi
-    sleep 4
-  done
-  aviso "Tarda mas de lo normal. Mira los registros con:"
-  echo "     ${COMPOSE_CMD[*]} -f $COMPOSE logs -f jarvis"
-  return 1
+  printf '\n'
+  ok "Todo listo. En Container Manager solo queda esto:"
+  printf '\n'
+  printf '    1. Proyecto > Crear\n'
+  printf '    2. Ruta del proyecto:  %s\n' "$RAIZ"
+  printf '    3. Fuente: "Usar un archivo docker-compose.yml existente"\n'
+  printf '    4. Nombre: jarvis   ->  Crear\n'
+  printf '\n'
+  nota "Espera un par de minutos a que tire la imagen y abre:"
+  printf '\n'
+  printf '    http://%s:%s/setup     <- pon aqui la clave, si no la pusiste antes\n' "$ip" "$p"
+  printf '    http://%s:%s/           <- la interfaz\n' "$ip" "$p"
+  printf '\n'
+  nota "La clave que pongas se guarda en el volumen, no se pierde al actualizar."
+  printf '\n'
 }
 
 # --- Programa ----------------------------------------------------------------
 main() {
-  detectar_sistema
-  info "Sistema: ${SISTEMA}"
+  [ "$ACCION" = "ayuda" ] && ayuda
 
-  # Primero la configuracion: si Docker no esta, el usuario al menos se queda
-  # con el .env listo para cuando lo instale (en Synology, Container Manager).
+  printf '\n'
+  printf '  J.A.R.V.I.S.  ·  preparador para Container Manager\n'
+  printf '  --------------------------------------------------\n\n'
+
+  info "Este equipo: $(detectar_nas)"
+  arrancar_docker
+  ok "Docker responde (version $(docker_ version --format '{{.Server.Version}}' 2>/dev/null || echo '?'))."
+
   crear_env
-  leer_puerto
-  [ -n "$PUERTO" ] && PUERTO_ACTUAL="$PUERTO"
+  comprobar_puerto || exit 1
 
-  case "$ACCION" in
-    estado)
-      estado
-      exit 0
-      ;;
-    registros)
-      detectar_docker
-      "${COMPOSE_CMD[@]}" -f "$COMPOSE" logs -f --tail=100 jarvis
-      exit 0
-      ;;
-    registrar)
-      registrar_proyecto
-      exit 0
-      ;;
-  esac
-
-  detectar_docker
-
-  case "$ACCION" in
-    parar)
-      "${COMPOSE_CMD[@]}" -f "$COMPOSE" down
-      ok "Contenedor parado."
-      exit 0
-      ;;
-  esac
-
-  comprobar_claves
-  crear_carpetas
-  if ! comprobar_puerto; then
-    exit 1
+  if [ "$ACCION" = "comprobar" ]; then
+    asegurar_imagen || exit 1
+    printf '\n'; ok "Todo correcto."; printf '\n'
+    exit 0
   fi
 
-  arrancar
-  echo
-  info "Siguientes pasos:"
-  echo "  - Registros:  ./instalar.sh --registros"
-  echo "  - Estado:     ./instalar.sh --estado"
-  echo "  - Parar:      ./instalar.sh --parar"
-  echo "  - Container Manager (Synology): ./instalar.sh --registrar"
+  # En actualizar no se vuelve a preguntar la clave: la que hay es la buena.
+  [ "$ACCION" = "actualizar" ] && PREGUNTAR_CLAVE=0
+
+  asegurar_imagen || exit 1
+  preguntar_clave
+  resumen
 }
 
 main "$@"

@@ -33,6 +33,11 @@ let cuerpo = 73;   // el ancho que le queda a la mascota dentro de la caja
 let centroY = 36;  // su centro vertical, que en Coucou no es el de la caja
 let hueco = null; // el canvas de Mochi: es el sitio donde va la mascota
 let anclaEl = null; // su contenedor, para medir en coordenadas relativas
+// Recorte de la isla, en coordenadas del lienzo. Coucou pone el lienzo de
+// Mochi 40 px POR ENCIMA del panel (su BOT_OVERHANG) y nuestras particulas
+// suben hasta 80 px por encima del centro, de modo que sin este recorte se
+// dibujan fuera de la ventana y se ven recortadas por el borde del notch.
+let recorte = null;
 const mirada = { x: 0, y: 0 };
 
 // Coucou pinta a Mochi, que es su mascota. Las de JARVIS son un extra: por
@@ -79,6 +84,19 @@ function medida() {
   lienzo.style.height = alto + 'px';
   lienzo.style.left = (r.left - a.left) + 'px';
   lienzo.style.top = (r.top - a.top) + 'px';
+
+  // El recorte son los limites de la isla traducidos al lienzo. Se guarda en
+  // pixeles CSS porque el contexto ya lleva su escala de dpr.
+  const isla = document.getElementById('island');
+  if (isla) {
+    const ir = isla.getBoundingClientRect();
+    recorte = {
+      x: ir.left - r.left, y: ir.top - r.top,
+      w: ir.width, h: ir.height,
+    };
+  } else {
+    recorte = null;
+  }
 
   // Coucou dibuja a Mochi con un margen de BOT_SIDE a cada lado, asi que el
   // cuerpo mide (ancho - 48), y lo baja con la mitad del voladizo mas un pelo
@@ -181,10 +199,27 @@ function bucle(ms) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const W = lienzo.width / dpr;
   const H = lienzo.height / dpr;
+
   ctx.save();
   ctx.scale(dpr, dpr);
-  motorActivo.dibuja(ctx, W, H, st, mirada);
-  ctx.restore();
+  // El clear va ANTES de recortar, y con limpia=false en el dibujo. clearRect
+  // tambien respeta el clip: si se limpiara despues, lo que quedara del frame
+  // anterior fuera del recorte se quedaria pegado para siempre.
+  ctx.clearRect(0, 0, W, H);
+
+  // Recorte contra la isla. Coucou deja el lienzo de Mochi 40 px POR ENCIMA
+  // del panel (su BOT_OVERHANG) y las particulas de las cuatro mascotas suben
+  // hasta 80 px por encima del centro, asi que sin esto se dibujan fuera de la
+  // ventana y aparecen cortadas justo por el borde del notch. El recorte lo
+  // hace el lienzo entero, las dos mascotas, para que el desvanecido no se
+  // escape un frame.
+  if (recorte && recorte.w > 0 && recorte.h > 0) {
+    ctx.beginPath();
+    ctx.rect(recorte.x, recorte.y, recorte.w, recorte.h);
+    ctx.clip();
+  }
+
+  motorActivo.dibuja(ctx, W, H, st, mirada, false);
   // Encima, la que se va, cada vez mas transparente. Se dibuja sin limpiar
   // para no borrar la nueva, y con su ultimo estado congelado.
   if (saliente) {
@@ -195,11 +230,11 @@ function bucle(ms) {
       const stS = { ...(saliente.st || ultimoSt), ref: cuerpo, cy: centroY };
       ctx.save();
       ctx.globalAlpha = 1 - k;
-      ctx.scale(dpr, dpr);
       saliente.motor.dibuja(ctx, W, H, stS, mirada, false);
       ctx.restore();
     }
   }
+  ctx.restore();   // cierra el scale(dpr) y el recorte de la isla
 }
 
 // ── Florituras de reposo ─────────────────────────────────────────────────────
@@ -383,6 +418,10 @@ function avataresVisibles(on) {
 // hueco y se centra en el, pero nunca pasa del borde de la pastilla ni encima de
 // la etiqueta: si no cabe entero se queda en el tamano de Coucou.
 const AVATAR_K = 1.35;
+// Suelo del tamaño: por debajo de esto la mascota es una mancha de color. No
+// es un minimo de holgura, es un minimo de legibilidad, y NUNCA se usa para
+// volver a tapar un recorte (que es lo que hacia el Math.max de antes).
+const AVATAR_MIN = 10;
 
 // La caja de .lbl se estira a todo lo ancho de la pastilla, asi que medirla
 // decía que el mini estaba encima del texto y el recorte salia siempre al
@@ -423,14 +462,24 @@ function situaSobre(mini, lienzoA) {
   }
   const isla = mini.closest('#island');
   if (isla) {
-    // Antes lo acotaba el alto de la pastilla (28 px) y ahi se quedaba en 24.
-    // Lo que manda es la isla: dentro de ella hay sitio de sobra.
+    // La isla es el recorte real de la ventana: lo que se salga de aqui no se ve
+    // y ademas tapa lo de al lado.
     const ir = isla.getBoundingClientRect();
     lado = Math.min(lado, 2 * Math.min(cy - ir.top - 1, ir.bottom - 1 - cy));
   }
-  lado = Math.max(lado, Math.min(mr.width, mr.height));
-  // En la rejilla las celdas estan separadas por el hueco del CSS, asi que 1,35
-  // no llega a tocarse.
+  // ANTES aqui habia:  lado = Math.max(lado, Math.min(mr.width, mr.height))
+  // Eso deshacia TODO lo de arriba: venia DESPUES de acotar, y con un Math.max
+  // devolvia el tamaño del mini siempre, aunque la isla no dejara sitio. Cuando
+  // la isla va encogida el avatar salia por encima y por abajo. Era el unico
+  // punto en el que no cabia el recorte, y por eso tocaba el mismo numero (1,35,
+  // luego 1,9, luego el zoom) en commit tras commit sin arreglarlo de verdad.
+  //
+  // El suelo ahora es un minimo de legibilidad y nada mas: una mascota mas
+  // pequeña se distingue menos, pero una mascota fuera del notch se ve. NO se
+  // vuelve a acotar por el mini, porque en la rejilla las celdas estan separadas
+  // por el hueco del CSS y ese hueco es justo el sitio donde puede crecer.
+  lado = Math.max(lado, AVATAR_MIN);
+  if (!Number.isFinite(lado) || lado <= 0) lado = mr.width;
   Object.assign(lienzoA.style, {
     position: 'absolute',
     left: ((cx - lado / 2 - mr.left) + 'px'),

@@ -4330,8 +4330,18 @@ async def raiz():
     Antes / devolvia 404 y en un NAS abriste http://nas:8000 y te comias un
     error en blanco, con la interfaz escondida en /ui. Ahora la raiz lleva
     alli, que es lo unico que se abre en el navegador.
+
+    Si no hay ninguna clave de modelo, va antes a /setup. Es el caso normal de
+    un contenedor recien creado: el proyecto de Container Manager arranca sin
+    .env, y lo unico que hay que hacer a mano es pegar la clave. Que la pagina
+    que se abre al poner la IP sea esa, y no un orbe que no contesta nada.
     """
     from fastapi.responses import RedirectResponse
+    try:
+        if not Config.has_any_key():
+            return RedirectResponse("/setup")
+    except Exception:
+        pass
     return RedirectResponse("/ui")
 
 
@@ -4731,6 +4741,12 @@ def _cfg_save(payload: dict) -> dict:
                         lines.append(f"{k}={v}")
                         have[k] = len(lines) - 1
                     _os.environ[k] = v
+                    # Config se evalua al importar el modulo, asi que cambiar
+                    # solo os.environ no hace nada hasta reiniciar. En un NAS
+                    # eso significa reiniciar el contenedor entero para poder
+                    # usar la clave que acabas de pegar, asi que se actualiza
+                    # la clase tambien y funciona al instante.
+                    setattr(Config, k, v)
                 if sobrantes:
                     lines = [ln for i, ln in enumerate(lines) if i not in sobrantes]
                 with open(path, "w", encoding="utf-8") as f:
@@ -4741,9 +4757,19 @@ def _cfg_save(payload: dict) -> dict:
 
 
 def _keys_env_path() -> str:
+    """Donde se guardan las claves que se ponen desde /setup y /config.
+
+    En Windows es %APPDATA%/JARVIS/keys.env, fuera de la instalacion para que
+    sobrevivan a reinstalar. En Linux y en Docker no hay APPDATA, asi que antes
+    esta funcion devolvia "" y las claves se guardaban solo en brain/.env,
+    DENTRO del contenedor: se perdian al recrearlo y habia que volver a ponerlas
+    en cada actualizacion. Ahora caen en DATA_DIR, que es el volumen.
+    """
     try:
         base = os.environ.get("APPDATA", "")
-        return os.path.join(base, "JARVIS", "keys.env")
+        if base:
+            return os.path.join(base, "JARVIS", "keys.env")
+        return str(DATA_DIR / "keys.env")
     except Exception:
         return ""
 

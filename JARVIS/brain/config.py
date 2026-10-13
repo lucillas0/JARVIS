@@ -9,24 +9,6 @@ ASSETS_DIR = ROOT_DIR / "assets"
 
 load_dotenv(BRAIN_DIR / ".env")
 
-# Fuente única de verdad: keys.env (%APPDATA%/JARVIS) manda sobre brain/.env.
-# Así el launcher y el brain nunca divergen (incidente del token Discord).
-try:
-    _appd = os.environ.get("APPDATA", "")
-    _keys = os.path.join(_appd, "JARVIS", "keys.env") if _appd else ""
-    if _keys and os.path.isfile(_keys):
-        with open(_keys, "r", encoding="utf-8-sig") as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if not _line or _line.startswith("#") or "=" not in _line:
-                    continue
-                _k, _, _v = _line.partition("=")
-                _k, _v = _k.strip(), _v.strip().strip('"')
-                if _k and _v:
-                    os.environ[_k] = _v
-except Exception:
-    pass
-
 # Directorio de datos persistente (venv + db), fuera de la instalación.
 # La app lo inyecta vía JARVIS_DATA_DIR; en desarrollo cae en brain/db.
 _DATA_DIR = Path(os.environ.get("JARVIS_DATA_DIR", "").strip() or (BRAIN_DIR / "db"))
@@ -35,6 +17,40 @@ try:
 except OSError:
     pass
 DATA_DIR = _DATA_DIR
+
+# Fuente única de verdad para las claves: keys.env manda sobre brain/.env, para
+# que el launcher y el brain nunca divergan (incidente del token Discord).
+#
+# Se buscan dos sitios porque son los dos que sobreviven a una actualización:
+#   · %APPDATA%/JARVIS/keys.env  -> Windows (instalador y app de escritorio)
+#   · DATA_DIR/keys.env          -> Linux, NAS y Docker (el volumen /data)
+#
+# El segundo es el que faltaba: en un contenedor, APPDATA no existe, asi que las
+# claves que se ponian en /setup se guardaban dentro del contenedor y se perdian
+# en cuanto se recreaba. Ahora van al volumen y sobreviven a la actualizacion.
+def _cargar_claves(ruta: Path) -> None:
+    try:
+        if not ruta.is_file():
+            return
+        with open(ruta, "r", encoding="utf-8-sig") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line or _line.startswith("#") or "=" not in _line:
+                    continue
+                _k, _, _v = _line.partition("=")
+                _k, _v = _k.strip(), _v.strip().strip('"')
+                if _k and _v:
+                    os.environ[_k] = _v
+    except Exception:
+        pass
+
+
+_appd = os.environ.get("APPDATA", "")
+if _appd:
+    _cargar_claves(Path(_appd) / "JARVIS" / "keys.env")
+_cargar_claves(DATA_DIR / "keys.env")
+# Por si el volumen se montó en otra parte y alguien lo fio en brain/.
+_cargar_claves(BRAIN_DIR / "keys.env")
 
 
 def _get(key: str, default: str = "") -> str:

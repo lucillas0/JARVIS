@@ -11,7 +11,14 @@
 
 # --- Servidor y websocket ------------------------------------------------- #
 fastapi>=0.115
-uvicorn[standard]>=0.30
+# uvicorn SIN [standard] a propósito. Ese extra arrastra PyYAML, que uvicorn
+# solo usa si le pasas un --log-config en YAML (no se lo pasamos nunca) y que
+# no tiene ruedas precompiladas para los Python más nuevos: pip cae a
+# compilarlo, hace falta Visual Studio Build Tools y, como va en el grupo
+# obligatorio, tumba el servidor entero. Los aceleradores que sí aportan
+# (httptools, uvloop, watchfiles) están en requirements-extras.txt y se
+# instalan aparte: si falta alguno, da igual.
+uvicorn>=0.30
 websockets>=13
 pydantic>=2.8
 python-dotenv>=1.0
