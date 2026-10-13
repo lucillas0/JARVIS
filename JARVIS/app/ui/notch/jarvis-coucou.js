@@ -9,7 +9,7 @@
 
 import { Bridge, emiteEvento } from "./coucou/_js/core/bridge.js";
 import { State } from "./coucou/_js/core/state.js";
-import { montaMascotas, muestra, sincroniza, montaAvatares, activa, fijaFoco } from "./jarvis-mascotas.js";
+import { montaMascotas, muestra, sincroniza, montaAvatares, activa, fijaFoco, sustituyeMochiDelSoltar } from "./jarvis-mascotas.js";
 
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 const MAIN = "jarvis";
@@ -187,6 +187,10 @@ let QUIERO_MASCOTAS = true;
 function esperaIsla() {
   const ancla = document.querySelector("#bot-canvas") && document.querySelector("#bot-canvas").parentElement;
   if (!ancla) { setTimeout(esperaIsla, 300); return; }
+  // En la secuencia de soltar un archivo Coucou pinta su propio Mochi dentro de
+  // su lienzo. Se cambia ese dibujo por la mascota que este enfocada, para que
+  // las cuatro tengan la animacion y no salga Mochi a medio notch.
+  sustituyeMochiDelSoltar();
   // ponMascotas enciende de verdad (activa + monta): montaMascotas a secas
   // solo crea el lienzo y se queda con Mochi delante.
   ponMascotas(QUIERO_MASCOTAS);

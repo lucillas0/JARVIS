@@ -8,6 +8,7 @@
 
 import { creaMotor } from './jarvis-mascotas-nucleo.js';
 import { MASCOTAS, DE_PASTILLA, deEstado, estadoPara, TIENE } from './jarvis-mascotas-datos.js';
+import { UploadCanvas } from './coucou/_js/upload/canvas.js';
 
 const motores = {};
 for (const id in MASCOTAS) {
@@ -112,15 +113,25 @@ export function montaMascotas(ancla) {
   requestAnimationFrame(bucle);
 }
 
+// La mascota que se va. Al cambiar de pastilla Coucou cambia el dibujo entero de
+// golpe, y eso se leia como un parpadeo. Se deja la anterior encima
+// desvaneciendose un momento: el cambio sigue siendo de personaje, pero sin el
+// tajo.
+let saliente = null;
+const CRUCE_MS = 280;
+
 function pide() {
   const id = pedido || 'jarvi';
   if (!motores[id]) return;
   const cambiado = activoId !== id;
   if (cambiado) {
     activoId = id;
-    motores[id].reinicia();
+    saliente = motorActivo ? { motor: motorActivo, st: ultimoSt, t0: performance.now() } : null;
     clearTimeout(temporizador);
     clearTimeout(relojCompila);
+    // Sin reinicia(): al cambiar de pastilla la mascota nueva daba un salto a
+    // la pose inicial y se notaba como un parpadeo. El motor ya esta en reposo
+    // y suelta de forma continua, asi que con pon() llega sola a donde toca.
     // La mascota nueva nace en reposo, pero si ya habia un estado en marcha
     // hay que ponerselo: si no se queda en reposo mientras trabaja.
     if (canonicoActual && canonicoActual !== 'reposo') {
@@ -149,6 +160,7 @@ export function muestraPorId(id) {
 
 let ultimo = 0;
 let relojParpadeo = 0;
+let ultimoSt = null;   // el estado ya calculado: lo reaprovecha el soltar
 function bucle(ms) {
   requestAnimationFrame(bucle);
   if (!motorActivo || !ctx) return;
@@ -165,6 +177,7 @@ function bucle(ms) {
   st.parpadeo = relojParpadeo;
   st.ref = cuerpo;
   st.cy = centroY;
+  ultimoSt = st;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const W = lienzo.width / dpr;
   const H = lienzo.height / dpr;
@@ -172,6 +185,21 @@ function bucle(ms) {
   ctx.scale(dpr, dpr);
   motorActivo.dibuja(ctx, W, H, st, mirada);
   ctx.restore();
+  // Encima, la que se va, cada vez mas transparente. Se dibuja sin limpiar
+  // para no borrar la nueva, y con su ultimo estado congelado.
+  if (saliente) {
+    const k = (performance.now() - saliente.t0) / CRUCE_MS;
+    if (k >= 1) {
+      saliente = null;
+    } else {
+      const stS = { ...(saliente.st || ultimoSt), ref: cuerpo, cy: centroY };
+      ctx.save();
+      ctx.globalAlpha = 1 - k;
+      ctx.scale(dpr, dpr);
+      saliente.motor.dibuja(ctx, W, H, stS, mirada, false);
+      ctx.restore();
+    }
+  }
 }
 
 // ── Florituras de reposo ─────────────────────────────────────────────────────
@@ -267,10 +295,12 @@ export function activa(on) {
     sincroniza('idle');
     programaFloritura();
     avataresVisibles(true);
+    document.documentElement.dataset.jarvisMascotas = '1';
   } else {
     apartaAtras();
     if (lienzo) lienzo.style.display = 'none';
     avataresVisibles(false);
+    delete document.documentElement.dataset.jarvisMascotas;
   }
   return activado;
 }
@@ -449,6 +479,7 @@ function creaAvatar(mini, id, marca) {
 
 export function montaAvatares() {
   if (!avataresArrancados) { avataresArrancados = true; requestAnimationFrame(dibujaAvatar); }
+  vigilaRejilla();
   const pastillas = document.querySelectorAll('#root .pill');
   const ids = [];
   for (const pill of pastillas) {
@@ -491,6 +522,47 @@ export function montaAvatares() {
   avataresVisibles(activado);
 }
 
+// Coucou rehace la cuadricula con replaceChildren, y nuestros lienzos se van con
+// ella. Esperar al siguiente montage dejaba un rato sin mascota y con el gorro
+// de Coucou a la vista, que es justo el parpadeo. Con un observer se repone en
+// cuanto Coucou inserta las celdas nuevas, en el mismo frame.
+function vigilaRejilla() {
+  const cuadricula = document.getElementById('mini-grid');
+  if (!cuadricula || cuadricula.dataset.jarvisVigilada) return;
+  cuadricula.dataset.jarvisVigilada = '1';
+  const reponer = () => { if (activado) montaAvatares(); };
+  try {
+    new MutationObserver(reponer).observe(cuadricula, { childList: true });
+  } catch (e) { /* sin observer */ }
+}
+
+// ── Apartado de soltar ───────────────────────────────────────────────────────
+// Coucou pinta su propio Mochi en la secuencia de soltar un archivo, dentro de
+// su lienzo. Como los modulos de ES son una sola instancia por URL, se puede
+// cambiar ese dibujo desde aqui: se sustituye por la mascota que este enfocada,
+// con su misma caja, inclinacion y salto. Las cuatro tienen la animacion porque
+// dibuja la que toque, no una fija.
+export function sustituyeMochiDelSoltar() {
+  UploadCanvas.prototype.drawMochi = function (ctx, f) {
+    const motor = motorActivo;
+    if (!motor) return;
+    const radio = f.d / 2 / 1.04;
+    if (!(radio > 0)) return;
+    ctx.save();
+    ctx.translate(f.x, f.y + f.hop);
+    ctx.rotate(f.tilt);
+    ctx.scale(f.sx, f.sy);
+    // Se reutiliza el estado del ultimo frame en vez de avanzar el motor otra
+    // vez: Coucou dibuja desde su propio bucle y dos avances seguidos descuadran
+    // los saltos.
+    const st = ultimoSt || motor.avanza(performance.now());
+    const st2 = { ...st, ref: radio * 2, cy: 0, grande: radio > 75, parpadeo: st.parpadeo };
+    motor.dibuja(ctx, radio * 2, radio * 2, st2, mirada, false);
+    ctx.restore();
+  };
+}
+
+// ── Aviso de pruebas ─────────────────────────────────────────────────────────
 // Enganche para probar y depurar desde la consola del renderer: sin esto no
 // hay forma de forzar un estado ni cambiar de mascota a mano.
 globalThis.__mascotas = {

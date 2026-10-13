@@ -23,6 +23,15 @@
         gap: 2px !important;
         transform: translate(-1.5px, -1.5px);
       }
+
+      /* Coucou pinta su mini en un lienzo MAYOR que el hueco, a proposito, para
+         que el gorro y las particulas no se corten. Mientras nuestras skins
+         estan puestas ese lienzo sobra, y si no se tapa el gorro asoma por
+         encima en cuanto Coucou rehace la rejilla: por eso se tapa por CSS y no
+         desde JS, que llega tarde. Se quita al apagar las mascotas. */
+      html[data-jarvis-mascotas] .mini canvas:not(.jarvis-avatar) {
+        visibility: hidden;
+      }
     </style>
   </head>
   <body>

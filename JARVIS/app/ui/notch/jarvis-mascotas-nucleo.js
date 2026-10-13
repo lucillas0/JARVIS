@@ -57,9 +57,9 @@ function creaMotor(def, estados, pintar) {
     return { dt, t, ph, P, sp, estado };
   }
 
-  function dibuja(c, W, H, st, mirar) {
+  function dibuja(c, W, H, st, mirar, limpia = true) {
     st.ancho = W;
-    c.clearRect(0, 0, W, H);
+    if (limpia) c.clearRect(0, 0, W, H);
     c.save();
     // Coucou no centra la mascota en la caja: la caja lleva 24 px de margen a
     // cada lado y 40 de voladizo arriba, y el cuerpo va al 79 % de la altura.
