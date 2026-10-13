@@ -4323,6 +4323,18 @@ def _ui_dir() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
 
+@app.get("/")
+async def raiz():
+    """La raiz manda a la interfaz.
+
+    Antes / devolvia 404 y en un NAS abriste http://nas:8000 y te comias un
+    error en blanco, con la interfaz escondida en /ui. Ahora la raiz lleva
+    alli, que es lo unico que se abre en el navegador.
+    """
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/ui")
+
+
 @app.get("/ui")
 @app.get("/ui/")
 async def ui_page():
@@ -5409,7 +5421,24 @@ def get_modo() -> str:
             return m
     except Exception:
         pass
+    # Sin archivo no hay eleccion hecha. En un servidor (Docker, NAS) lo
+    # razonable es LITE, porque la pizarra web no puede ni sermonselo de lo
+    # que hace el escritorio. Antes salia FULL y habia que entrar a /modo a
+    # mano; ahora se decide solo la primera vez y luego manda el archivo.
+    if _es_servidor():
+        try:
+            set_modo("lite")
+            return "lite"
+        except Exception:
+            pass
     return "full"
+
+
+def _es_servidor() -> bool:
+    """Servidor sin Electron: lo delata la variable o el propio contenedor."""
+    if os.environ.get("JARVIS_SERVER_MODE", "").strip():
+        return True
+    return os.path.exists("/.dockerenv")
 
 
 def set_modo(m: str) -> str:

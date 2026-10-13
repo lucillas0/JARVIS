@@ -120,7 +120,7 @@ PUERTO_ACTUAL=""
 
 leer_puerto() {
   if [ -f "$ENV_FILE" ]; then
-    p="$(grep -E '^JARVIS_PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2 | tr -d '[:space:]')"
+    p="$(grep -E '^JARVIS_PUERTO=' "$ENV_FILE" | tail -n1 | cut -d= -f2 | tr -d '[:space:]')"
     PUERTO_ACTUAL="$p"
   fi
   PUERTO_ACTUAL="${PUERTO_ACTUAL:-8000}"
@@ -140,7 +140,7 @@ crear_env() {
   # Detecta el usuario para que los datos no queden como root.
   sed -i.bak "s/^PUID=.*/PUID=${PUID_DEF}/" "$ENV_FILE"
   sed -i.bak "s/^PGID=.*/PGID=${PGID_DEF}/" "$ENV_FILE"
-  [ -n "$PUERTO" ] && sed -i.bak "s/^JARVIS_PORT=.*/JARVIS_PORT=${PUERTO}/" "$ENV_FILE"
+  [ -n "$PUERTO" ] && sed -i.bak "s/^JARVIS_PUERTO=.*/JARVIS_PUERTO=${PUERTO}/" "$ENV_FILE"
   rm -f "$ENV_FILE.bak"
   # El .env lleva claves: solo el propietario debe poder leerlo.
   chmod 600 "$ENV_FILE" 2>/dev/null || true
@@ -181,7 +181,7 @@ comprobar_puerto() {
   if command -v ss >/dev/null 2>&1; then
     if ss -ltn 2>/dev/null | grep -q ":${PUERTO_ACTUAL} "; then
       aviso "El puerto ${PUERTO_ACTUAL} ya esta ocupado."
-      aviso "Cambia JARVIS_PORT en .env o pasa --puerto con otro."
+      aviso "Cambia JARVIS_PUERTO en .env o pasa --puerto con otro."
       return 1
     fi
   fi

@@ -251,21 +251,57 @@ jobs:
           name: jarvis-macos-x64
           path: JARVIS/dist-installer/*.dmg
 
+  imagen-docker:
+    name: Imagen Docker del servidor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      # En un NAS, compilar la imagen va por SMB y es lentisimo. Publicandola
+      # aqui para amd64 y arm64, el NAS solo hace `docker pull` y ya.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/jarvis
+          tags: |
+            type=raw,value=latest
+            type=ref,event=tag
+      - uses: docker/build-push-action@v6
+        with:
+          context: JARVIS
+          file: JARVIS/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     name: Publicar release
-    needs: [windows, linux, linux-arm, macos-arm, macos-intel]
+    needs: [windows, linux, linux-arm, macos-arm, macos-intel, imagen-docker]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       # Sin esto no hay ficheros en disco: este job no compila, pero necesita
       # leer el .yml y el .env de ejemplo para publicarlos.
       - uses: actions/checkout@v4
-      # El .yml y el .env de ejemplo se publican sueltos: quien monta el
-      # servidor en un NAS no descarga el instalador de escritorio.
+      # El modo servidor se publica suelto: quien monta el servidor en un NAS no
+      # descarga el instalador de escritorio. Va el script sin compose tambien,
+      # que es la via que mas problemas haquitado en Container Manager.
       - name: Recoger los ficheros del modo servidor
         run: |
           mkdir -p servidor
-          cp JARVIS/docker-compose.yml servidor/
+          cp JARVIS/docker-compose.yml JARVIS/instalar-nas.sh servidor/
           cp JARVIS/configuracion.env.example servidor/
           cp JARVIS/DOCKER.md servidor/
       - uses: actions/download-artifact@v4
@@ -307,5 +343,6 @@ jobs:
             artefactos/*.tar.gz
             artefactos/*.dmg
             servidor/docker-compose.yml
+            servidor/instalar-nas.sh
             servidor/configuracion.env.example
             servidor/DOCKER.md
