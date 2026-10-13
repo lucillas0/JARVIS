@@ -1,12 +1,23 @@
 # =============================================================================
-#  JARVIS · servidor
+#  JARVIS · servidor en Docker, para Synology / Xpenology
 # =============================================================================
-#  Pensado para Docker en general y, en concreto, para Synology/Xenology con
-#  Container Manager: crea el proyecto apuntando a esta carpeta y el boton
-#  "Build" se encarga de todo.
+#  Si vienes de Container Manager y el proyecto no levantaba, los motivos
+#  estaban en este fichero, y ya estan corregidos:
 #
-#  Container Manager lee el `.env` de la misma carpeta, asi que la configuracion
-#  vive en un solo sitio.
+#   · No hay red propia. Docker Compose 5.1.0, el que lleva DSM 7.1 y 7.2, rompe
+#     con "Container cannot be connected to network endpoints" en cualquier
+#     daemon con API menor de 1.44 cuando el servicio declara `networks:`.
+#     Sin declarar nada, el contenedor va a la red por defecto y se acabo.
+#   · No hay `user:`. El contenedor arranca como root y ya baja a PUID/PGID solo
+#     en el entrypoint, que ademas deja /app/brain/db escribible. Con `user:` el
+#     entrypoint corria sin permisos y no podia arreglar nada.
+#   · No hay `deploy.resources`. Fuera de Swarm lo ignora, y hay versiones de
+#     Container Manager que se atascan al leerlo.
+#   · Los puntos de montage usan rutas absolutas y tienen que existir. Synology
+#     no las crea: si ./data no esta, falla con "Bind mount failed".
+#
+#  Si aun assim prefieres no usar compose, instalar-nas.sh hace lo mismo con un
+#  solo `docker run`.
 # =============================================================================
 
 services:
@@ -14,43 +25,36 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: jarvis:local
+    image: ghcr.io/lucillas0/jarvis:latest
     container_name: jarvis
     restart: unless-stopped
 
-    # El puerto se abre solo en la LAN. Si el NAS esta exposing este puerto a
-    # internet, pon una contraseña delante: el endpoint /api/apps y /api/recap
-    # no piden autenticacion.
     ports:
-      - "${JARVIS_PORT:-8000}:8000"
+      # Solo en la LAN. /health, /api/* y /ws no piden contrasena: si esto llega
+      # a internet, pon algo delante.
+      - "${JARVIS_PUERTO:-8000}:8000"
 
-    # Toda la configuracion vive en .env. El contenedor lo lee de /app/.env
-    # (asi lo hace brain/config.py) y tambien de las variables del entorno.
+    # Toda la configuracion se inyecta como variables de entorno. El .env tambien
+    # se lee dentro del contenedor, pero sin montarlo: config.py busca
+    # /app/brain/.env y el montaje de /app/.env no lo pillaba.
     env_file:
       - .env
     environment:
       TZ: "${TZ:-Europe/Madrid}"
-      BRAIN_HOST: "${BRAIN_HOST:-0.0.0.0}"
-      BRAIN_PORT: "${BRAIN_PORT:-8000}"
-      JARVIS_DATA_DIR: /data
       JARVIS_SERVER_MODE: "1"
+      JARVIS_DATA_DIR: /data
+      # El entrypoint baja a este usuario y le deja /data y /app/brain/db suyos.
+      PUID: "${PUID:-1026}"
+      PGID: "${PGID:-100}"
+      # En un NAS no hay pantalla: por defecto el análisis continuo se apagaba
+      # solo, pero solo si estaba en el .env. Aqui se pone a off.
+      SCREEN_ANALYSIS_MODE: "${SCREEN_ANALYSIS_MODE:-off}"
 
     volumes:
       # Datos: base de datos, memoria, registros. Sobrevive a las actualizaciones.
-      - ./data:/data
-      # La configuracion entra como solo lectura; el contenedor nunca la escribe.
-      - ./.env:/app/.env:ro
-      # Assets compartidos (audio de aviso, imagenes). Opcional.
-      - ./assets:/app/assets:ro
+      # ESTA CARPETA TIENE QUE EXISTIR ANTES de crear el proyecto.
+      - "${JARVIS_DATOS:-./data}:/data"
 
-    # Corre con el usuario indicado en .env. Sin esto Docker crea todo como
-    # root y luego no puedes editar ni borrar los ficheros desde DSM.
-    user: "${PUID:-1026}:${PGID:-100}"
-
-    networks:
-      - jarvis
-
-    # El servidor no necesita root ni capabilities: se las quitamos todas.
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -65,20 +69,10 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 45s
+      start_period: 60s
 
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-
-    deploy:
-      resources:
-        limits:
-          # 0 = sin limite. En un NAS con poca RAM bajalo a 2048m.
-          memory: ${JARVIS_MEMORY_LIMIT:-0}
-
-networks:
-  jarvis:
-    driver: bridge

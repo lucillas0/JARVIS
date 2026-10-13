@@ -43,7 +43,15 @@ def get_conn() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         import os
-        os.makedirs(Config.BRAIN_DIR / "db", exist_ok=True)
+        # Esta carpeta es un resto de cuando todo vivia junto a los assets. En
+        # Docker /app se copia como root y el contenedor corre con el PUID del
+        # NAS, asi que aqui no se puede crear. Como el makedirs no llevaba
+        # try/except, un PermissionError tumbaba el arranque entero. El .db de
+        # verdad esta en DATA_DIR, que si es un volumen escribible.
+        try:
+            os.makedirs(Config.BRAIN_DIR / "db", exist_ok=True)
+        except OSError:
+            pass
         _conn = sqlite3.connect(Config.DB_PATH, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
         # WAL + synchronous=NORMAL: antes cada mensaje se guardaba con
