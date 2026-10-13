@@ -1,7 +1,10 @@
 # Dependencias compartidas de JARVIS para Linux y macOS.
 # La automatización de ventanas, teclas y ajustes de Windows queda desactivada allí.
 fastapi>=0.110
-uvicorn[standard]>=0.29
+# uvicorn sin [standard]: ese extra arrastra PyYAML, que no trae ruedas para
+# los Python más nuevos y hacía fallar la instalación entera. Los aceleradores
+# van en requirements-extras.txt.
+uvicorn>=0.29
 websockets>=12
 python-dotenv>=1.0
 requests>=2.31

@@ -125,7 +125,57 @@ function requirementsFile() {
   return path.join(BRAIN_DIR, process.platform === 'win32' ? 'requirements.txt' : 'requirements-desktop.txt');
 }
 function requirementsHash() {
-  return crypto.createHash('sha256').update(fs.readFileSync(requirementsFile())).digest('hex');
+  // Se hashean los dos ficheros: si se anade un acelerador tambien hay que
+  // pasar por el instalador, o el usuario se queda sin el sin enterarse.
+  const partes = [requirementsFile(), path.join(BRAIN_DIR, 'requirements-extras.txt')];
+  const h = crypto.createHash('sha256');
+  for (const f of partes) {
+    h.update('\n#' + path.basename(f) + '\n');
+    try { h.update(fs.readFileSync(f)); } catch { h.update('(ausente)'); }
+  }
+  return h.digest('hex');
+}
+
+// ------------------------------------------------------------------ //
+// Version: si la app se ha actualizado y el cerebro no, hay que repairarlo
+// ------------------------------------------------------------------ //
+// El sello va en los datos de usuario, no en la instalacion, para que sobreviva
+// a reinstalar. Empaquetado manda la version del propio ejecutable; en
+// desarrollo se lee JARVIS/VERSION, que es la fuente unica del repo.
+function installStatePath() {
+  const ud = userDataPath();
+  return ud ? path.join(ud, 'install-state.json') : null;
+}
+function appVersion() {
+  if (app.isPackaged) { try { return String(app.getVersion()); } catch { /* sin version */ } }
+  try { return fs.readFileSync(path.join(ROOT_DIR, 'VERSION'), 'utf8').trim() || '0.0.0'; }
+  catch { return '0.0.0'; }
+}
+function readInstallState() {
+  const file = installStatePath();
+  if (!file) return {};
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { return {}; }
+}
+function writeInstallState(extra = {}) {
+  const file = installStatePath();
+  if (!file) return;
+  try {
+    fs.writeFileSync(file, JSON.stringify({
+      version: appVersion(), deps: requirementsHash(), at: new Date().toISOString(), ...extra,
+    }, null, 2), 'utf8');
+  } catch (err) {
+    console.error('[JARVIS] No pude guardar el sello de version:', err.message);
+  }
+}
+// El sello solo se mira si ya hay venv: sin venv no hay nada que comparar y el
+// instalador se encarga. Y si no hay sello (instalacion anterior a esto), se
+// acepta tal cual: darlo por bueno evita una reinstalacion de varios minutos
+// solo por no tener un fichero.
+function versionAlDia() {
+  if (!venvUsable()) return false;
+  const s = readInstallState();
+  if (!s.version) return true;
+  return s.version === appVersion();
 }
 function pythonLaunchCandidates() { return process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python']; }
 function resolveVenvHome(home) {
@@ -320,6 +370,36 @@ function startBrain() {
   }
 }
 
+// Para el proceso anterior antes de arrancar otro. Sin esto, "Reiniciar
+// cerebro" hacia brainProcess = null y startBrain(): el uvicorn viejo se
+// quedaba huerfano y sin poder matarlo, y el nuevo se caia con "address
+// already in use". El proceso estaba en unref(), asi que tampoco se iba solo
+// al salir de la app.
+function stopBrain() {
+  const viejo = brainProcess;
+  brainProcess = null;
+  if (!viejo) return;
+  try { viejo.kill(); } catch { /* ya estaba */ }
+}
+
+function restartBrain() {
+  stopBrain();
+  setTimeout(() => startBrain(), 500);
+}
+
+// "Reparar instalacion" desde el menu: borra el sello de version y el testigo
+// de dependencias y vuelve a pasar por el instalador, que ya es idempotente.
+// Es lo mismo que hace falta cuando el venv se rompe por una actualizacion de
+// Python, pero sin salir de la app ni abrir una consola.
+function repararInstalacion() {
+  try { fs.rmSync(VENV_OK(), { force: true }); } catch { /* noop */ }
+  const sello = installStatePath();
+  if (sello) { try { fs.rmSync(sello, { force: true }); } catch { /* noop */ } }
+  stopBrain();
+  createSplash();
+  ensureBrainEnv().then(() => startBrain());
+}
+
 // ------------------------------------------------------------------ //
 // Instalación del venv del brain al primer arranque (pantalla de carga)
 // ------------------------------------------------------------------ //
@@ -482,8 +562,49 @@ function crearSeguimiento(desde, hasta, total) {
   };
 }
 
+// requirements-extras.txt, paquete a paquete. Nada de esto es imprescindible:
+// si uno no tiene rueda para el Python de este equipo, se pierde y se sigue.
+async function instalaExtrasOpcionales(seg, hasLocal, wheelhouse) {
+  const extras = path.join(BRAIN_DIR, 'requirements-extras.txt');
+  if (!fs.existsSync(extras)) return;
+  const paquetes = fs.readFileSync(extras, 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    // Se quitan las condiciones de entorno (los ";" de sys_platform): pip las
+    // respeta solo, y aquí se instalan de uno en uno sin saber el SO.
+    .filter((l) => l && !l.startsWith('#') && !l.includes(';'))
+    .map((l) => l.split('#')[0].trim())
+    .filter(Boolean);
+  if (!paquetes.length) return;
+
+  const faltan = [];
+  for (const paquete of paquetes) {
+    const args = hasLocal
+      ? ['-m', 'pip', 'install', '--no-index', '--find-links', wheelhouse, paquete, '--no-input']
+      : ['-m', 'pip', 'install', paquete, '--no-input'];
+    try {
+      await runCmd(venvPy(), args, { onLine: (line) => seg.linea(line) });
+    } catch (err) {
+      // Con red, un fallo aqui casi siempre es "no hay rueda para este Python".
+      faltan.push(paquete.split(/[<>=!~ ]/)[0]);
+      console.warn('[JARVIS] Acelerador opcional no instalado:', paquete, '-', err && err.message);
+    }
+  }
+  if (faltan.length) {
+    // No es un error: son mejoras de rendimiento, no dependencias.
+    seg.linea(`Opcionales sin rueda para tu Python: ${faltan.join(', ')}. Da igual.`);
+  }
+}
+
 async function runSetup() {
-  sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Buscando Python…', percent: 2 });
+  // No es lo mismo la primera vez que otra. Si ya habia venv y el sello dice
+  // otra version, esto es una actualizacion: decirlo evita que el usuario
+  // piense que se ha roto algo al ver la pantalla de carga.
+  const esReparacion = !!readInstallState().version;
+  const primerPaso = esReparacion
+    ? { title: 'Actualizando', detail: 'JARVIS se ha actualizado; preparo su cerebro…' }
+    : { title: 'Preparando el cerebro', detail: 'Buscando Python…' };
+  sendSetup({ phase: 'setup', ...primerPaso, percent: 2 });
   const python = findPython();
   if (!python) {
     sendSetup({
@@ -534,7 +655,7 @@ async function runSetup() {
       : total;
     const seg = crearSeguimiento(16, 90, Math.max(piezas, total));
     sendSetup({
-      phase: 'setup', title: 'Preparando el cerebro',
+      phase: 'setup', title: esReparacion ? 'Actualizando' : 'Preparando el cerebro',
       detail: hasLocal
         ? 'Instalando dependencias incluidas (sin internet)…'
         : 'Descargando dependencias (la primera vez tarda unos minutos)…',
@@ -558,7 +679,13 @@ async function runSetup() {
     } finally {
       clearInterval(tic);
     }
-    sendSetup({ phase: 'setup', title: 'Preparando el cerebro', detail: 'Dependencias instaladas.', percent: 90 });
+    sendSetup({ phase: 'setup', title: esReparacion ? 'Actualizando' : 'Preparando el cerebro', detail: 'Dependencias instaladas.', percent: 90 });
+
+    // 2b. Los aceleradores, uno a uno y sin que un fallo pare nada.
+    //     Van aparte del grupo obligatorio a propósito: dentro, un solo paquete
+    //     sin rueda para tu Python (PyYAML, tipicamente) tumbaba el servidor
+    //     entero. Aquí, como mucho, se pierde un acelerador.
+    await instalaExtrasOpcionales(seg, hasLocal, wheelhouse);
 
     // 3. .env y recursos
     writeEnvFromExample();
@@ -568,6 +695,7 @@ async function runSetup() {
     } catch { /* no crítico */ }
 
     try { fs.writeFileSync(VENV_OK(), currentHash); } catch { /* noop */ }
+    writeInstallState();
     sendSetup({ phase: 'done', title: 'Cerebro listo', detail: 'Arrancando JARVIS…', percent: 100 });
     setTimeout(() => {
       if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
@@ -587,9 +715,12 @@ async function runSetup() {
 }
 
 // Punto de entrada: asegura el venv, mostrando la pantalla de carga si hace falta.
+// Se dispara tambien cuando la app se ha actualizado a una version nueva: las
+// dependencias del cerebro pueden haber cambiado y hay que reinstalarlas, o
+// queda una app nueva con un cerebro viejo.
 function ensureBrainEnv() {
   return new Promise((resolve) => {
-    if (venvReady()) return resolve();
+    if (venvReady() && versionAlDia()) return resolve();
     setupResolve = resolve;
     createSplash();
     runSetup();
@@ -1377,6 +1508,7 @@ function trayIconPath() {
 }
 
 function createTray() {
+  if (tray && !tray.isDestroyed()) return tray;
   const iconPath = trayIconPath();
   try {
     const img = fs.existsSync(iconPath) ? iconPath : emptyIcon();
@@ -1387,7 +1519,8 @@ function createTray() {
       { label: 'Mostrar JARVIS', click: () => restoreMain() },
       { label: 'Abrir / cerrar la isla', click: () => toggleNotch() },
       { type: 'separator' },
-      { label: 'Reiniciar cerebro', click: () => { brainProcess = null; startBrain(); } },
+      { label: 'Reiniciar cerebro', click: () => restartBrain() },
+      { label: 'Reparar instalación', click: () => repararInstalacion() },
       { label: 'Abrir carpeta del proyecto', click: () => shell.openPath(ROOT_DIR) },
       { label: `Iniciar con ${platformName}`, type: 'checkbox', checked: isAutostartOn(),
         click: (item) => { if (!setAutostart(item.checked)) item.checked = !item.checked; } },

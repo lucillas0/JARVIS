@@ -20,10 +20,10 @@ if errorlevel 1 (
 )
 
 for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
-echo [1/3] Python detectado: %PYVER%
+echo [1/4] Python detectado: %PYVER%
 
 if not exist "venv" (
-  echo [2/3] Creando el entorno propio...
+  echo [2/4] Creando el entorno propio...
   python -m venv venv
   if errorlevel 1 (
     echo [X] No se pudo crear el entorno virtual.
@@ -31,18 +31,29 @@ if not exist "venv" (
     exit /b 1
   )
 ) else (
-  echo [2/3] El entorno virtual ya existe.
+  echo [2/4] El entorno virtual ya existe.
 )
 
-echo [3/3] Instalando dependencias (tarda unos minutos la primera vez)...
+echo [3/4] Instalando dependencias del servidor (tarda unos minutos la primera vez)...
 call venv\Scripts\python.exe -m pip install --upgrade pip --quiet
-call venv\Scripts\python.exe -m pip install -r requirements.txt
+rem requirements-server.txt y NO requirements.txt: este dice ser LITE y lo que
+rem trae el otro son torch, spacy, stanza, piper y openwakeword, que son cientos
+rem de megabytes y son justo lo que el modo LITE deja fuera.
+call venv\Scripts\python.exe -m pip install -r requirements-server.txt
 if errorlevel 1 (
   echo.
   echo [X] Faltaron dependencias. Si falla por red, copie la carpeta
   echo     wheelhouse\ y ejecute esto otra vez.
+  echo.
+  echo     Si el error dice "Failed building wheel", tu Python es demasiado
+  echo     nuevo para algun paquete. Instala Python 3.12 y vuelve a intentarlo.
   pause
   exit /b 1
+)
+
+echo [4/4] Aceleradores opcionales (si faltan, no pasa nada)...
+for %%p in (httptools websockets) do (
+  call venv\Scripts\python.exe -m pip install %%p --quiet --disable-pip-version-check
 )
 
 echo.

@@ -1,0 +1,27 @@
+# Aceleradores de JARVIS. Ninguno es imprescindible: si tu Python es demasiado
+# nuevo y alguno no tiene rueda, se pierde sin drama y todo lo demas funciona.
+#
+# Salen de uvicorn[standard] pero NO se dejan dentro a proposito. El extra
+# "standard" arrastra tambien PyYAML, que uvicorn solo usa si le pasas un
+# --log-config en YAML (no se lo pasamos nunca) y que no trae ruedas para los
+# Python mas recientes. Con PyYAML dentro del grupo obligatorio, una sola
+# dependencia sin rueda hacia fallar TODO: no el acelerador, el servidor entero.
+#
+# Por eso van aparte y se instalan uno a uno, tolerando que falten.
+#
+#   pip install -r requirements.txt          # esto es obligatorio
+#   pip install -r requirements-extras.txt   # esto, mejor que sí
+
+# Parser de HTTP más rápido que el de la librería estándar.
+httptools>=0.6.3
+
+# Bucle de eventos más rápido. Solo tiene sentido fuera de Windows.
+uvloop>=0.15.1; sys_platform != "win32" and sys_platform != "cygwin"
+
+# Recarga al guardar. Solo se usa en modo desarrollo.
+watchfiles>=0.13
+
+# Transporte del WebSocket, que es por donde habla la interfaz con el cerebro.
+# También está en requirements.txt porque de él depende el arranque; aquí se
+# repite para que este fichero sirva por sí solo.
+websockets>=12.0

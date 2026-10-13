@@ -16,6 +16,7 @@ NAS o cualquier servidor con Python 3.10.
 - [Qué es](#qué-es)
 - [Cómo funciona](#cómo-funciona)
 - [Instalación](#instalación)
+- [Dejarlo al día](#dejarlo-al-día)
 - [El modo servidor](#el-modo-servidor)
 - [La interfaz](#la-interfaz)
 - [La isla de Coucou](#la-isla-de-coucou)
@@ -150,14 +151,38 @@ responda antes de darse por terminado.
 
 ### En Synology / Xenology
 
-Container Manager no ejecuta scripts, así que se instala desde su interfaz.
-Copia esta carpeta a una carpeta compartida del NAS y, en **Proyecto →
-Crear**, apúntala como ruta del proyecto con el `docker-compose.yml` que trae.
-Container Manager lee el `.env` de la misma carpeta.
+Lo normal es hacerlo con Container Manager, y son **cuatro clics**. El
+`docker-compose.yml` viene hecho para eso: no compila nada, no usa carpetas
+(a los datos van a volúmenes que crea Docker solo) y no necesita un `.env`.
 
-El `PUID` y `PGID` del `.env` son tus ids de usuario del DSM. Si no los pones,
-Docker creará los ficheros como `root` y luego no podrás borrarlos desde la
-interfaz.
+1. Copia la carpeta `JARVIS` a una compartida, por ejemplo
+   `/volume1/docker/jarvis`. Es lo único que hay que hacer a mano, porque DSM
+   siempre pide una ruta de proyecto.
+2. Por SSH, dentro de esa carpeta:
+
+   ```sh
+   sh instalar-docker.sh
+   ```
+
+   Baja la imagen, crea el `.env` con tus ids del DSM y te pregunta la clave
+   de IA. Si la clave no la tienes a mano, pulsa Intro y ponla después en el
+   navegador.
+3. En **Container Manager → Proyecto → Crear**, apunta a esa carpeta, fuente
+   *usar un archivo `docker-compose.yml` existente*, nombre `jarvis`, ydale a
+   **Crear**.
+4. Abre `http://IP-DEL-NAS:8000/setup` para la clave, o `http://IP-DEL-NAS:8000/`
+   para la interfaz.
+
+Para actualizar a una versión nueva: `sh instalar-docker.sh --actualizar`, y
+luego *Detener* y *Construir* en el proyecto. **Los datos y las claves no se
+pierden**: viven en un volumen, no en el contenedor.
+
+> El `PUID` y el `PGID` los pone el script con los ids de tu usuario del DSM. Si
+> no los tiene, Docker deja los ficheros como `root` y luego no puedes
+> borrarlos desde File Station.
+
+Si prefieres no usar la interfaz nunca, `sh instalar-nas.sh` hace lo mismo con
+un solo `docker run`.
 
 Más detalle en [DOCKER.md](JARVIS/DOCKER.md).
 
@@ -169,6 +194,32 @@ python -m venv venv
 venv/bin/pip install -r requirements-server.txt
 venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
+
+## Dejarlo al día
+
+JARVIS sabe qué versión tiene puesta y la compara con la del código. Si no
+cuadran, se arregla solo; y siempre tienes una forma de forzarlo.
+
+| Cómo | Cuándo |
+|---|---|
+| **Nada** | La app lo comprueba al arrancar. Si se ha actualizado y el cerebro no, rehace las dependencias solo. |
+| Menú de la bandeja → **Reparar instalación** | Cuando quieras forzarlo sin salir de la app. |
+| `reparar.bat` (doble clic) | Lo mismo, desde el explorador. |
+| `instalar.bat --reparar` | Lo mismo, con salida por consola. |
+| `instalar.bat --estado` | Dice qué versión hay puesta. **No toca nada.** |
+
+Qué arregla, en orden:
+
+- **El entorno roto.** El caso normal: se ha actualizado Python y el entorno
+  virtual sigue apuntando al intérprete viejo, que ya no existe. Tiene todas sus
+  carpetas y su `python.exe`, así que parece sano, pero no arranca. Esto lo
+  detecta y lo rehace.
+- **La versión vieja.** Compara contra `JARVIS/VERSION`.
+- **Las dependencias cambiadas.** Si el código pide un paquete nuevo, lo
+  instala. Solo compara los paquetes: añadir un comentario al fichero de
+  requisitos no dispara una reinstalación.
+
+No toca nunca tus claves, ni la base de datos, ni el historial.
 
 ---
 

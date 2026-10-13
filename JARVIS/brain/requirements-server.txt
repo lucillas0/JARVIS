@@ -9,7 +9,11 @@
 
 # --- Servidor y websocket ----------------------------------------------------
 fastapi>=0.115
-uvicorn[standard]>=0.30
+# Sin [standard] a propósito: arrastra PyYAML, que no trae ruedas para los
+# Python más nuevos y hacía fallar el build entero. Aquí la imagen usa Python
+# 3.12 y PyYAML sí tiene rueda, pero el mismo fichero se lee desde un portátil
+# con Python 3.15 y ahí no. Los aceleradores van en requirements-extras.txt.
+uvicorn>=0.30
 python-dotenv>=1.0
 requests>=2.32
 httpx>=0.27

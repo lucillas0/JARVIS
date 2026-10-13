@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Instalador de JARVIS: codigo, dependencias y claves de API.
 
@@ -17,13 +17,18 @@ Uso:
     python instalar.py --todo          ademas voz y modelos locales
     python instalar.py --sin-claves    no preguntar por las claves
     python instalar.py --rehacer       rehacer el entorno desde cero
+    python instalar.py --reparar       dejar la instalacion al dia (solo si hace falta)
     python instalar.py --solo-claves   solo configurar las claves
+    python instalar.py --estado        decir que version esta puesta
     python instalar.py --ayuda
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import hashlib
+import json
 import os
 import platform
 import shutil
@@ -82,8 +87,15 @@ def detalle(texto: str) -> None:
 # Cada grupo se instala por separado. Si uno falla se avisa y se sigue: lo
 # importante es que el nucleo quede puesto.
 GRUPOS_NUCLEO = [
+    # uvicorn SIN [standard] a proposito. El extra "standard" arrastra PyYAML,
+    # que uvicorn solo usa si le pasas un --log-config en YAML (no se lo pasamos
+    # nunca) y que no tiene ruedas precompiladas para los Python mas nuevos:
+    # pip cae a compilarlo desde el fuente, hace falta Visual Studio Build Tools
+    # y, como PyYAML va en el mismo grupo que fastapi, un solo paquete sin rueda
+    # tumbaba el servidor entero. Los extras que si aportan se ponen aparte,
+    # uno a uno y sin que un fallo arraste (ver EXTRAS_UVICORN).
     ("servidor", [
-        "fastapi>=0.115", "uvicorn[standard]>=0.30", "python-dotenv>=1.0",
+        "fastapi>=0.115", "uvicorn>=0.30", "python-dotenv>=1.0",
         "requests>=2.32", "httpx>=0.27", "psutil>=5.9",
     ]),
     ("memoria y datos", [
@@ -95,6 +107,15 @@ GRUPOS_NUCLEO = [
     ("red y herramientas", [
         "paramiko>=3.4", "geocoder>=1.38",
     ]),
+]
+
+# Lo que aporta uvicorn[standard] menos PyYAML. Son aceleradores: si alguno no
+# tiene rueda para tu Python se pierde sin drama, y el servidor funciona igual.
+EXTRAS_UVICORN = [
+    ("httptools", "parser de HTTP mas rapido"),
+    ("uvloop", "bucle de eventos, solo en Linux y macOS"),
+    ("watchfiles", "recarga al guardar, solo el modo desarrollo"),
+    ("websockets", "el WebSocket que usa JARVIS"),
 ]
 
 GRUPOS_ESCRITORIO = [
@@ -210,10 +231,13 @@ FALLOS: list[tuple[tuple[str, ...], str, list[str]]] = [
      ["Hacen falta unos 1,5 GB. Libera espacio y vuelve a intentarlo."]),
 
     (("Failed building wheel", "error: Microsoft Visual C\\+\\+ 14.0",
-      "error: command 'cl.exe' failed", "Building wheel for"),
-     "falta un compilador para construir ese paquete",
-     ["En Windows hace falta Visual Studio Build Tools.",
-      "Si solo quieres el servidor sin voz ni escritorio, usa:  instalar.bat --rapido"]),
+      "error: command 'cl.exe' failed", "Building wheel for",
+      "requires a compiler", "error: metadata-generation-failed"),
+     "ese paquete no trae ruedas para tu Python y hay que compilarlo",
+     ["Casi siempre es que tu Python es demasiado nuevo para el paquete.",
+      "La solucion no es instalar un compilador, es usar Python 3.12 o 3.13,",
+      "que es dondeestan las ruedas de todo.",
+      "Si solo quieres el servidor sin voz ni escritorio:  instalar.bat --rapido"]),
 
     (("ModuleNotFoundError", "No module named"),
      "falta un modulo de Python",
@@ -241,6 +265,255 @@ def avisar_fallo(nombre: str, salida: str) -> None:
     detalle(ultimo_error(salida))
     for c in consejos:
         detalle(c)
+
+
+# --- Version y reparacion ----------------------------------------------------
+# Que version hay ahora en el codigo. Se lee de JARVIS/VERSION, que es la
+# unica fuente de verdad; si no esta, se cae al package.json de la app. Antes
+# esto vivia repartido (4.0.0 en main.py, 4.1.0 en package.json) y por eso no
+# se podia saber si una instalacion estaba vieja.
+def version_actual() -> str:
+    f = RAIZ / "VERSION"
+    try:
+        if f.is_file():
+            v = f.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    try:
+        pkg = json.loads((RAIZ / "app" / "package.json").read_text(encoding="utf-8"))
+        return str(pkg.get("version") or "0.0.0")
+    except Exception:  # noqa: BLE001 - el package.json no tiene que estar
+        return "0.0.0"
+
+
+def compara(a: str, b: str) -> int:
+    """ -1 si a < b, 0 si iguales, 1 si a > b. Tolera 'v4.1.0' y '4.1'."""
+    def partes(v: str) -> list:
+        limpio = str(v or "").strip().lstrip("vV")
+        return [int(x) if x.isdigit() else 0
+                for x in limpio.split("-")[0].split(".")[:3]]
+
+    pa, pb = partes(a), partes(b)
+    pa += [0] * (3 - len(pa))
+    pb += [0] * (3 - len(pb))
+    return (pa > pb) - (pa < pb)
+
+
+def huella_dependencias() -> str:
+    """Huella de lo que hay que instalar. Si cambia, hay que reinstalar."""
+    trocitos = []
+    for nombre in ("requirements.txt", "requirements-server.txt",
+                   "requirements-desktop.txt", "requirements-extras.txt"):
+        f = BRAIN / nombre
+        try:
+            # Solo las lineas de paquete: los comentarios no cambian las cosas y
+            # si no, cada retoque al fichero dispara una reinstalacion entera.
+            lineas = [l.strip() for l in f.read_text(encoding="utf-8").splitlines()
+                      if l.strip() and not l.strip().startswith("#")]
+            trocitos.append(nombre + "\n" + "\n".join(lineas))
+        except OSError:
+            trocitos.append(nombre + "\n(ausente)")
+    return hashlib.sha256("\n".join(trocitos).encode("utf-8")).hexdigest()[:16]
+
+
+def sello(venv: Path) -> Path:
+    """El testigo de 'que version esta instalada'. Vive DENTRO del venv: si se
+    borra el venv, el testigo se va con el, que es justo lo que queremos."""
+    return venv / "instalada.json"
+
+
+def leer_sello(venv: Path) -> dict:
+    try:
+        return json.loads(sello(venv).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - un sello ilegible es lo mismo que no haberlo
+        return {}
+
+
+def escribir_sello(venv: Path, extras: list[str]) -> None:
+    try:
+        sello(venv).write_text(json.dumps({
+            "version": version_actual(),
+            "dependencias": huella_dependencias(),
+            "extras": sorted(extras),
+            "fecha": _dt.datetime.now().isoformat(timespec="seconds"),
+            "python": platform.python_version(),
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        aviso(f"No he podido guardar el testigo de version: {e}")
+
+
+def entorno_sano(venv: Path) -> bool:
+    """El venv existe y su Python arranca de verdad.
+
+    Esto no es teoria: un venv cuyo interprete base se ha desinstalado (por
+    ejemplo al actualizar Python de 3.12 a 3.13) sigue teniendo sus carpetas y
+    sus Scripts/python.exe, pero no arranca. El entorno parece estar bien y
+    todo falla luego con un error que no explica nada.
+    """
+    try:
+        py = python_del_venv(venv)
+    except RuntimeError:
+        return False
+    codigo, salida = ejecutar([str(py), "-c", "import sys; print(sys.version.split()[0])"], timeout=60)
+    return codigo == 0 and bool(salida.strip())
+
+
+# Importa solo lo del nucleo, sin tocar config.py ni el .env: es una pregunta
+# barata que se puede hacer antes de instalar nada.
+_NUCLEO_TEST = (
+    "import sys\n"
+    "faltan = []\n"
+    "for m in ('fastapi', 'uvicorn', 'dotenv', 'requests', 'psutil'):\n"
+    "    try:\n"
+    "        __import__(m)\n"
+    "    except Exception:\n"
+    "        faltan.append(m)\n"
+    "print(','.join(faltan))\n"
+)
+
+
+def entorno_completo(venv: Path) -> tuple[bool, list[str]]:
+    """Â¿El entorno tiene lo que el cerebro necesita para arrancar?
+
+    Antes no se miraba, y era un agujero gordo: un venv con el Python vivo pero
+    sin ni el fastapi pasaba por sano. --reparar decia "ya esta al dia", no
+    instalaba nada, y luego el cerebro no arrancaba con un ImportError. Ahora se
+    pregunta de verdad.
+    """
+    try:
+        py = python_del_venv(venv)
+    except RuntimeError:
+        return False, ["(no hay Python en el entorno)"]
+    codigo, salida = ejecutar([str(py), "-c", _NUCLEO_TEST], timeout=120)
+    if codigo != 0:
+        return False, ["(el Python del entorno no responde)"]
+    faltan = [x for x in (salida.strip().splitlines() or [""])[-1].split(",") if x]
+    return (not faltan), faltan
+
+
+def estado() -> int:
+    """--estado: dice que hay puesto, sin tocar nada."""
+    print()
+    v = ruta_venv_existente()
+    ahora = version_actual()
+    print(f"  Version en el codigo:  {ahora}")
+    if not v:
+        aviso("No hay ningun entorno instalado. Ejecuta:  python instalar.py")
+        return 1
+    print(f"  Entorno:               {v}")
+    s = leer_sello(v)
+    puesta = str(s.get("version") or "")
+    fecha = s.get("fecha", "")
+    if puesta:
+        print(f"  Version instalada:     {puesta}" + (f"  ({fecha})" if fecha else ""))
+        print(f"  Extras:                {', '.join(s.get('extras') or []) or 'ninguno'}")
+    else:
+        print("  Version instalada:     sin testigo (se instalo antes de que lo hubiera)")
+    print()
+
+    # El estado del entorno va primero: da igual que la version cuadre si el
+    # entorno no tiene lo que el cerebro necesita para arrancar.
+    estado_venv, motivo = _estado_instalacion(v)
+    if estado_venv == "roto":
+        error(f"El entorno esta roto: {motivo}.")
+        detalle("Arreglalo con:  python instalar.py --reparar")
+        return 1
+    if estado_venv == "incompleto":
+        aviso(f"El entorno esta vivo pero incompleto: {motivo}.")
+        detalle("Por eso el cerebro no arranca aunque el Python sÃ­. Arreglalo con:")
+        detalle("    python instalar.py --reparar")
+        return 1
+
+    if not puesta:
+        ok(f"El entorno esta bien, pero no hay testigo de version ({ahora}).")
+        detalle("Para sellarlo:  python instalar.py --reparar")
+        return 0
+
+    c = compara(puesta, ahora)
+    if c < 0:
+        aviso(f"Desactualizada: tienes la {puesta} y en el codigo hay la {ahora}.")
+        detalle("Arreglalo con:  python instalar.py --reparar")
+        return 1
+    if s.get("dependencias") and s["dependencias"] != huella_dependencias():
+        aviso("Las dependencias del codigo han cambiado desde la ultima vez.")
+        detalle("Arreglalo con:  python instalar.py --reparar")
+        return 1
+    ok(f"Instalacion al dia (version {ahora}).")
+    return 0
+
+
+def _estado_instalacion(venv: Path) -> tuple[str, str]:
+    """Diagnostica el entorno. Devuelve (estado, motivo).
+
+    Estados: "roto" (el Python no arranca), "incompleto" (arranca pero le
+    faltan paquetes) y "bien".
+    """
+    if not entorno_sano(venv):
+        return "roto", "su Python no arranca"
+    completo, faltan = entorno_completo(venv)
+    if not completo:
+        return "incompleto", "le faltan " + ", ".join(faltan)
+    return "bien", ""
+
+
+def reparar() -> int:
+    """--reparar: deja la instalacion al dia, y no toca nada si ya lo esta.
+
+    Cuatro cosas se miran, y solo se rehace lo que hace falta:
+      Â· que el interprete del entorno arranque (puede haber muerto con una
+        actualizacion de Python y dejar el venv con buena pinta pero inservible);
+      Â· que esten los paquetes del nucleo, no solo un Python vivo;
+      Â· la version, comparada con JARVIS/VERSION;
+      Â· la huella de las dependencias, por si se anadio algo nuevo.
+    """
+    print()
+    paso("Miro que hay puesto...")
+    ahora = version_actual()
+    v = ruta_venv_existente()
+
+    if not v:
+        aviso("No hay entorno instalado: hago la instalacion entera.")
+        return instalar()
+
+    s = leer_sello(v)
+    puesta = str(s.get("version") or "")
+    huella_ahora = huella_dependencias()
+    estado_venv, motivo = _estado_instalacion(v)
+
+    if estado_venv == "roto":
+        error(f"El entorno de {v} esta roto: {motivo}.")
+        detalle("Suele pasar tras actualizar Python: el venv sigue apuntando")
+        detalle("al interprete viejo, que ya no esta. Lo rehago.")
+        return _instalar_extras(True, _extras_del_sello(s))
+
+    if estado_venv == "incompleto":
+        aviso(f"El entorno esta vivo pero le falta cosido: {motivo}.")
+        detalle("Instalo solo lo que falta; no rehago el entorno entero.")
+        return _instalar_extras(False, _extras_del_sello(s))
+
+    if not puesta:
+        aviso("No hay testigo de version, pero el entorno esta bien.")
+        ok(f"Sello la version {ahora} y no instalo nada.")
+        escribir_sello(v, _extras_del_sello(s))
+        return 0
+
+    c = compara(puesta, ahora)
+    if c == 0 and s.get("dependencias") == huella_ahora:
+        ok(f"Ya esta al dia (version {ahora}). No toco nada.")
+        return 0
+
+    if c < 0:
+        paso(f"Actualizo: hay {ahora} en el codigo y tienes {puesta}.")
+    if s.get("dependencias") and s["dependencias"] != huella_ahora:
+        paso("Las dependencias han cambiado: las reinstalo.")
+    return _instalar_extras(False, _extras_del_sello(s))
+
+
+def _extras_del_sello(s: dict) -> list[str]:
+    """Que grupos se instalaron la ultima vez, para no perderlos."""
+    return list(s.get("extras") or [])
 
 
 # --- Pasos -------------------------------------------------------------------
@@ -297,6 +570,34 @@ def instalar_grupos(py: Path, grupos: list, obligatorio: bool = True) -> list:
                 error(f"Sin el grupo del servidor JARVIS no arranca ({motivo}).")
                 sys.exit(1)
     return fallidos
+
+
+def instalar_extras_uvicorn(py: Path) -> list[str]:
+    """Pone los aceleradores de uvicorn, uno a uno y sin que un fallo tumbe nada.
+
+    Antes venian dentro de uvicorn[standard] y compartian grupo con fastapi, de
+    modo que un solo paquete sin rueda para tu Python (PyYAML, tipicamente)
+    tumbaba el servidor entero. Ahora se prueban por separado: los que no tienen
+    rueda simplemente no se ponen, y JARVIS funciona igual de rapido casi.
+    """
+    paso("Aceleradores de uvicorn (opcionales)...")
+    puestos: list[str] = []
+    for paquete, para_que in EXTRAS_UVICORN:
+        codigo, salida = ejecutar(
+            [str(py), "-m", "pip", "install", "--no-warn-script-location",
+             "--disable-pip-version-check", paquete],
+            timeout=900,
+        )
+        if codigo == 0:
+            puestos.append(paquete)
+        else:
+            detalle(f"{paquete}: sin rueda para Python {platform.python_version()} "
+                    f"({para_que}). No es problema: JARVIS funciona igual.")
+    if puestos:
+        ok("Puestos: " + ", ".join(puestos))
+    else:
+        aviso("Ninguno de los aceleradores tiene rueda para tu Python. Da igual.")
+    return puestos
 
 
 def actualizar_pip(py: Path) -> None:
@@ -400,7 +701,7 @@ def preguntar_claves(forzar: bool = False) -> None:
     for nombre, etiqueta, pista in CLAVES:
         actual = actuales.get(nombre, "")
         if actual:
-            print(f"  {VERDE}·{FIN} {nombre:<22} ya puesta")
+            print(f"  {VERDE}Â·{FIN} {nombre:<22} ya puesta")
             continue
         if pista:
             detalle(pista)
@@ -475,34 +776,13 @@ def esperar_si_falla() -> None:
 
 
 # --- Programa ----------------------------------------------------------------
-def main() -> int:
-    ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--rapido", action="store_true",
-                    help="solo lo esencial, sin escritorio ni voz")
-    ap.add_argument("--todo", action="store_true",
-                    help="incluye voz y modelos locales (bastante pesado)")
-    ap.add_argument("--sin-claves", action="store_true", help="no preguntar por las claves")
-    ap.add_argument("--rehacer", action="store_true", help="rehacer el entorno desde cero")
-    ap.add_argument("--solo-claves", action="store_true", help="solo configurar las claves")
-    ap.add_argument("--ayuda", "-h", action="store_true")
-    args = ap.parse_args()
+def _instalar_extras(rehacer: bool, extras: list[str]) -> int:
+    """Instala el nucleo y los grupos extra que se le pidan, y sella la version.
 
-    if args.ayuda:
-        print(__doc__)
-        return 0
-
-    print()
-    print("  J.A.R.V.I.S.  ·  instalacion")
-    print("  " + "-" * 40)
-    print()
-
-    comprobar_python()
-
-    if args.solo_claves:
-        preguntar_claves(forzar=True)
-        return 0
-
-    venv = crear_entorno(args.rehacer)
+    Es idempotente a proposito: --reparar pasa por aqui sin tocar lo que ya esta
+    bien, porque pip solo descarga lo que falta o ha cambiado.
+    """
+    venv = crear_entorno(rehacer)
     py = python_del_venv(venv)
     actualizar_pip(py)
 
@@ -510,23 +790,27 @@ def main() -> int:
     print()
     paso("Dependencias")
     fallidos += instalar_grupos(py, GRUPOS_NUCLEO)
+    instalar_extras_uvicorn(py)
 
-    if not args.rapido:
-        if ES_WINDOWS:
-            fallidos += instalar_grupos(py, GRUPOS_ESCRITORIO, obligatorio=False)
-        else:
-            detalle("El escritorio solo es de Windows; me lo salto.")
-    if args.todo:
-        fallidos += instalar_grupos(py, GRUPOS_VOZ, obligatorio=False)
-        fallidos += instalar_grupos(py, GRUPOS_PESADOS, obligatorio=False)
-    else:
-        detalle("Me salto la voz y torch. Usa --todo si los quieres.")
+    for grupo in extras:
+        if grupo == "escritorio":
+            if ES_WINDOWS:
+                fallidos += instalar_grupos(py, GRUPOS_ESCRITORIO, obligatorio=False)
+            else:
+                detalle("El escritorio solo es de Windows; me lo salto.")
+        elif grupo == "voz":
+            fallidos += instalar_grupos(py, GRUPOS_VOZ, obligatorio=False)
+            fallidos += instalar_grupos(py, GRUPOS_PESADOS, obligatorio=False)
 
-    if not args.sin_claves:
-        print()
-        preguntar_claves()
+    return _cierre(venv, py, fallidos, extras)
 
+
+def _cierre(venv: Path, py: Path, fallidos: list[str], extras: list[str]) -> int:
     bien = verificar(py)
+    # Solo se sella si la instalacion sirve para algo: sellar una instalacion
+    # rota haria que --reparar dijera "ya esta al dia" sin que lo este.
+    if bien:
+        escribir_sello(venv, list(extras))
 
     print()
     if bien and not fallidos:
@@ -544,10 +828,65 @@ def main() -> int:
     print("    http://127.0.0.1:8000/health")
     print("  Poner o cambiar las claves:")
     print(f"    python {Path(__file__).name} --solo-claves")
+    print("  Ver si esto esta al dia:")
+    print(f"    python {Path(__file__).name} --estado")
     print()
     # Codigo 0 solo si esta todo bien. Con avisos se devuelve 1 para que el
     # lanzador (.bat) lo diga y no cante un "instalacion terminada" en falso.
     return 0 if (bien and not fallidos) else 1
+
+
+# Los grupos opcionales que se han pedido en esta ejecucion.
+def instalar(rapido: bool = False, todo: bool = False, rehacer: bool = False) -> int:
+    """La instalacion de siempre: nucleo + lo que se haya pedido."""
+    extras: list[str] = [] if rapido else ["escritorio"]
+    if todo:
+        extras.append("voz")
+    return _instalar_extras(rehacer, extras)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--rapido", action="store_true",
+                    help="solo lo esencial, sin escritorio ni voz")
+    ap.add_argument("--todo", action="store_true",
+                    help="incluye voz y modelos locales (bastante pesado)")
+    ap.add_argument("--sin-claves", action="store_true", help="no preguntar por las claves")
+    ap.add_argument("--rehacer", action="store_true", help="rehacer el entorno desde cero")
+    ap.add_argument("--reparar", action="store_true",
+                    help="dejar la instalacion al dia; si ya lo esta, no hace nada")
+    ap.add_argument("--solo-claves", action="store_true", help="solo configurar las claves")
+    ap.add_argument("--estado", action="store_true",
+                    help="decir que version esta puesta, sin tocar nada")
+    ap.add_argument("--ayuda", "-h", action="store_true")
+    args = ap.parse_args()
+
+    if args.ayuda:
+        print(__doc__)
+        return 0
+
+    print()
+    print("  J.A.R.V.I.S.  Â·  instalacion")
+    print("  " + "-" * 40)
+    print()
+
+    if args.estado:
+        return estado()
+
+    comprobar_python()
+
+    if args.solo_claves:
+        preguntar_claves(forzar=True)
+        return 0
+
+    if args.reparar:
+        return reparar()
+
+    if not args.sin_claves:
+        print()
+        preguntar_claves()
+
+    return instalar(rapido=args.rapido, todo=args.todo, rehacer=args.rehacer)
 
 
 if __name__ == "__main__":

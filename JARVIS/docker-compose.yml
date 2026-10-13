@@ -1,31 +1,42 @@
 # =============================================================================
-#  JARVIS · servidor en Docker, para Synology / Xpenology
+#  JARVIS · proyecto para Container Manager (Synology / Xpenology)
 # =============================================================================
-#  Si vienes de Container Manager y el proyecto no levantaba, los motivos
-#  estaban en este fichero, y ya estan corregidos:
+#  Pensado para que NO haya que hacer nada a mano. En Container Manager:
+#     Proyecto > Crear > Usar un archivo docker-compose.yml existente
+#     Ruta del proyecto: la carpeta donde esta este archivo
+#     Nombre: jarvis
+#     Pulsa Crear. Ya esta.
 #
-#   · No hay red propia. Docker Compose 5.1.0, el que lleva DSM 7.1 y 7.2, rompe
-#     con "Container cannot be connected to network endpoints" en cualquier
-#     daemon con API menor de 1.44 cuando el servicio declara `networks:`.
-#     Sin declarar nada, el contenedor va a la red por defecto y se acabo.
-#   · No hay `user:`. El contenedor arranca como root y ya baja a PUID/PGID solo
-#     en el entrypoint, que ademas deja /app/brain/db escribible. Con `user:` el
-#     entrypoint corria sin permisos y no podia arreglar nada.
-#   · No hay `deploy.resources`. Fuera de Swarm lo ignora, y hay versiones de
+#  Que hace este fichero para que sea "solo ejecutar y ya":
+#
+#   · NO tiene `build:`. Container Manager no compila nada ni descarga modelos:
+#     tira de la imagen ya publicada. En un NAS el build va por SMB y se queda
+#     colgado minutos (o para siempre en un DS220+).
+#
+#   · NO usa bind mount. Los datos van a volumenes con nombre, que los crea
+#     Docker solo. Es la causa numero uno de "no funciona": Synology no crea la
+#     carpeta que le pongas al bind mount y el arranque falla con
+#     "Bind mount failed" sin decir nada mas.
+#
+#   · NO usa `env_file:`. El proyecto se crea igual sin .env. El fichero .env
+#     de esta carpeta se lee solo para sustituir los ${VAR:-defecto} de abajo,
+#     y si no existe se queda cada variable en su defecto. Puedes ponerlo o no.
+#
+#   · NO declara `networks:`. Docker Compose 5.1.0 (DSM 7.1/7.2) falla con
+#     "Container cannot be connected to network endpoints" en cualquier daemon
+#     con API menor de 1.44 si el servicio declara redes. Sin declarar nada, el
+#     contenedor va por la red por defecto y se acabo.
+#
+#   · NO usa `deploy.resources`. Fuera de Swarm lo ignora y hay versiones de
 #     Container Manager que se atascan al leerlo.
-#   · Los puntos de montage usan rutas absolutas y tienen que existir. Synology
-#     no las crea: si ./data no esta, falla con "Bind mount failed".
 #
-#  Si aun assim prefieres no usar compose, instalar-nas.sh hace lo mismo con un
-#  solo `docker run`.
+#  La clave de IA no se pone aqui: la pones una vez en http://IP:PUERTO/setup y
+#  se guarda en el volumen, de modo que sobrevive a las actualizaciones.
 # =============================================================================
 
 services:
   jarvis:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ghcr.io/lucillas0/jarvis:latest
+    image: ${JARVIS_IMAGEN:-ghcr.io/lucillas0/jarvis:latest}
     container_name: jarvis
     restart: unless-stopped
 
@@ -34,27 +45,28 @@ services:
       # a internet, pon algo delante.
       - "${JARVIS_PUERTO:-8000}:8000"
 
-    # Toda la configuracion se inyecta como variables de entorno. El .env tambien
-    # se lee dentro del contenedor, pero sin montarlo: config.py busca
-    # /app/brain/.env y el montaje de /app/.env no lo pillaba.
-    env_file:
-      - .env
+    # Cada variable tiene su defecto, asi que esto arranca sin .env. El .env de
+    # esta carpeta, si lo pones, sustituye a los defectos sin tocar este fichero.
     environment:
       TZ: "${TZ:-Europe/Madrid}"
       JARVIS_SERVER_MODE: "1"
       JARVIS_DATA_DIR: /data
       # El entrypoint baja a este usuario y le deja /data y /app/brain/db suyos.
+      # Son los ids de tu usuario del DSM; sin esto Docker deja los ficheros
+      # como root y luego no puedes borrarlos desde File Station.
       PUID: "${PUID:-1026}"
       PGID: "${PGID:-100}"
-      # En un NAS no hay pantalla: por defecto el análisis continuo se apagaba
-      # solo, pero solo si estaba en el .env. Aqui se pone a off.
+      # En un NAS no hay pantalla: el analisis continuo se apaga siempre.
       SCREEN_ANALYSIS_MODE: "${SCREEN_ANALYSIS_MODE:-off}"
+      BRAIN_HOST: "0.0.0.0"
+      BRAIN_PORT: "8000"
 
+    # Volumenes con nombre: Docker los crea solo, no hay carpeta que hacer.
     volumes:
-      # Datos: base de datos, memoria, registros. Sobrevive a las actualizaciones.
-      # ESTA CARPETA TIENE QUE EXISTIR ANTES de crear el proyecto.
-      - "${JARVIS_DATOS:-./data}:/data"
+      - jarvis_data:/data
+      - jarvis_assets:/app/assets
 
+    mem_limit: "${JARVIS_MEMORIA:-2g}"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -76,3 +88,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  jarvis_data:
+  jarvis_assets:
