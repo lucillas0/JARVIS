@@ -337,6 +337,20 @@ def analizar(path: str) -> dict:
         info["resumen"] = _codigo(texto, ext)
     else:
         info["resumen"] = _partes_interesantes(texto)
+        if not info["resumen"]:
+            # _partes_interesantes solo acepta trozos de entre 60 y 700
+            # caracteres, porque esta pensada para documentos largos. Un .txt
+            # corto (una nota, un config, un log de tres lineas) no califica
+            # en ninguno de los dos extremos y se quedaba sin resumen: el
+            # senor preguntaba por su nota y le decian "tiene 1 palabra".
+            # Cuando no hay nada mejor, se devuelve el principio tal cual.
+            cab = texto.strip()
+            if cab:
+                info["resumen"] = ([cab[:1500]] if len(cab) <= 1500
+                                   else [cab[:1500] + "…"])
+                info["nota"] = ("Es un archivo corto: le he leído entero."
+                                if len(cab) <= 1500 else
+                                "Es largo: le he leído el principio.")
     return info
 
 
