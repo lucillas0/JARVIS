@@ -21,7 +21,9 @@ uvloop>=0.15.1; sys_platform != "win32" and sys_platform != "cygwin"
 # Recarga al guardar. Solo se usa en modo desarrollo.
 watchfiles>=0.13
 
-# Transporte del WebSocket, que es por donde habla la interfaz con el cerebro.
-# También está en requirements.txt porque de él depende el arranque; aquí se
-# repite para que este fichero sirva por sí solo.
-websockets>=12.0
+# websockets NO aparece aqui a proposito: no es un acelerador, es necesario.
+# Uvicorn lo trae en el extra [standard], que se quito por el PyYAML, asi que
+# ahora esta en requirements.txt y en requirements-server.txt, que son los que
+# se instalan de verdad. Si lo dejas aqui "por si acaso" da la impresion de que
+# es opcional, y el sintoma (la interfaz cargando y no conectando nunca) no dice
+# nada de esta lista.

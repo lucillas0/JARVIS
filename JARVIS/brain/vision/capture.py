@@ -34,6 +34,26 @@ def _handler_ok(name: str) -> bool:
 def _handler_fail(name: str, cooldown: int = 60) -> None:
     _handler_cooldown[name] = time.time() + cooldown
 
+
+# Un aviso por capturador y por vida del proceso, no uno cada 60 s.
+#
+# El analisis de pantalla va por defecto en "continuous", asi que _grab_png_bytes()
+# se llama cada pocos segundos indefinidamente. Con mss ausente (que es lo normal
+# en el modo LITE y en un NAS) el aviso salia cada minuto eternamente: el
+# registro crecia sin parar con la misma linea y tapaba los avisos que si
+# importan. Ahora se dice una vez, y el segundo intento ya solo actualiza el
+# enfriamiento sin volver a quejarse.
+_avisados: set = set()
+
+
+def _avisa_una_vez(name: str, exc: Exception) -> None:
+    if name in _avisados:
+        return
+    _avisados.add(name)
+    log.warning("%s falló y no lo volveré a repetir aquí: %s", name, exc)
+    log.info("  · Es una función opcional. Parala captura de pantalla si molesta.")
+    log.info("  · Para activarla:  python instalar.py --reparar  (instala mss)")
+
 _JPEG_Q = 65
 _MAX_W = 1280
 
@@ -49,7 +69,7 @@ def _grab_png_bytes() -> Optional[bytes]:
             img = Image.frombytes("RGB", shot.size, shot.rgb)
             return _jpeg_bytes(img)
         except Exception as e:
-            log.warning("mss falló: %s", e)
+            _avisa_una_vez("mss", e)
             _handler_fail("mss")
     # 2) PIL.ImageGrab
     if "pil" in _capture_handlers and _handler_ok("pil"):
@@ -58,7 +78,7 @@ def _grab_png_bytes() -> Optional[bytes]:
             img = ImageGrab.grab(all_screens=False)
             return _jpeg_bytes(img)
         except Exception as e:
-            log.warning("PIL ImageGrab falló: %s", e)
+            _avisa_una_vez("pil ImageGrab", e)
             _handler_fail("pil")
     return None
 

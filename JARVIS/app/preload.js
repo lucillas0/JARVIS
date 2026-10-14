@@ -25,6 +25,28 @@ contextBridge.exposeInMainWorld('jarvisAPI', {
   onSetupProgress: (callback) => subscribe('setup:progress', callback),
 });
 
+// El token del cerebro, para que los renderers puedan abrir su WebSocket.
+// El brain ya no acepta una conexion sin el (ver brain/auth.py).
+//
+// Va aparte y en su propio objeto, y no dentro de jarvisAPI, por una razon:
+// jarvisAPI.getEnv() devuelve las claves de API y jarvisAPI.quit() cierra la
+// aplicacion, y el preload es el MISMO para las cinco ventanas. El overlay, que
+// abre <webview> con URLs que elige el modelo, venia heredando las dos cosas.
+// Separar el token deja claro que no es lo mismo que un permiso, y permite
+// darselo solo a quien lo necesita (ver main.js y el puente del notch).
+contextBridge.exposeInMainWorld('jarvisNet', {
+  token: () => ipcRenderer.invoke('jarvis:token'),
+  query: () => ipcRenderer.invoke('jarvis:token-query'),
+});
+
+// El notch abre su propio WebSocket (jarvis-coucou.js) y el puente de Coucou
+// tambien (core/bridge.js), asi que necesita el token por su cuenta. Se expone
+// aparte y con otro nombre para que quede claro que es lo mismo y no dos
+// permisos distintos.
+contextBridge.exposeInMainWorld('jarvisNotchNet', {
+  query: () => ipcRenderer.invoke('jarvis:token-query'),
+});
+
 contextBridge.exposeInMainWorld('jarvisSetupAPI', {
   retry: () => ipcRenderer.invoke('setup:retry'),
   quit: () => ipcRenderer.invoke('app:quit'),

@@ -59,11 +59,23 @@ function openNotchApp(identifier) {
     String(app.name || '').toLowerCase().includes(term)));
   if (match?.path) { void shell.openPath(String(match.path)); return true; }
   if (process.platform === 'win32') {
-    try { spawn('cmd', ['/c', 'start', '', terms[0]], { detached: true, windowsHide: true, stdio: 'ignore' }).unref(); return true; }
+    // cmd.exe sigue interpretando & | ^ % > < aunque el argumento venga en su
+    // propia posicion del array: spawn sin shell NO protege de eso, porque aqui
+    // si se invoca a cmd a proposito. Un id como "x & whoami" ejecutaba el
+    // segundo comando entero. Se filtra antes de tocar la consola.
+    const objetivo = String(terms[0] || '');
+    if (!objetivo || !ES_SEGURO_EN_CMD.test(objetivo)) {
+      console.warn('[JARVIS] Nombre de app con caracteres de consola, lo descarto:', objetivo);
+      return false;
+    }
+    try { spawn('cmd', ['/c', 'start', '', objetivo], { detached: true, windowsHide: true, stdio: 'ignore' }).unref(); return true; }
     catch { /* app is not installed */ }
   }
   return false;
 }
+// Lo que cmd.exe trata como algo mas que texto. Las comillas y el % se permitirian
+// en una ruta, pero aqui solo llegan nombres de app, que no los llevan nunca.
+const ES_SEGURO_EN_CMD = /^[A-Za-z0-9._+ -]{1,64}$/;
 function startNewNotchConversation() {
   try {
     // Keep JARVIS as the one source of truth; archive for Coucou's local session only.
@@ -89,7 +101,20 @@ function sendNotchMessage(message, context) {
     text += `\n[Archivo adjunto: ${String(context.name || 'documento').slice(0, 200)}]\n${content}${context.truncated || context.content.length > 24000 ? '\n[contenido truncado]' : ''}`;
   }
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket('ws://127.0.0.1:8000/ws');
+    // El token va en la URL: el brain ya no acepta el WebSocket sin el
+    // (brain/auth.py). Aqui se abre un socket por mensaje, y esperar al token
+    // no es opcion: sin el, cada pregunta desde el notch se rechazaria.
+    if (!brainTokenValue()) {
+      esperarToken(4000).then((t) => {
+        if (!t) { reject(new Error('El cerebro no está listo todavía.')); return; }
+        enviar(t);
+      }).catch(() => reject(new Error('El cerebro no está listo todavía.')));
+      return;
+    }
+    enviar(brainTokenValue());
+
+    function enviar(token) {
+      const socket = new WebSocket('ws://127.0.0.1:8000/ws?token=' + encodeURIComponent(token));
     let settled = false;
     const timer = setTimeout(() => finish(new Error('JARVIS tardó demasiado en responder. Comprueba el historial antes de reintentar.')), 180000);
     const finish = (error, result) => {
@@ -112,6 +137,7 @@ function sendNotchMessage(message, context) {
     });
     socket.addEventListener('error', () => finish(new Error('No se pudo conectar con el Brain de JARVIS.')), { once: true });
     socket.addEventListener('close', () => { if (!settled) finish(new Error('Se perdió la conexión con el Brain de JARVIS.')); }, { once: true });
+    }
   });
 }
 
@@ -386,6 +412,36 @@ function restartBrain() {
   stopBrain();
   setTimeout(() => startBrain(), 500);
 }
+
+// El token que el brain exige para abrir el WebSocket (ver brain/auth.py).
+// Vive en el mismo directorio de datos que la base de datos, que es lo unico
+// persistente, asi que sobrevive a reinstalar.
+//
+// Se lee del fichero que escribe el brain. Si aun no esta (que pasa la primera
+// vez, si la app arranca antes que el cerebro), se espera un poco y se reintenta:
+// antes de inventarlo aqui, que entonces el brain tendria otro y no cuadrarian.
+let brainToken = null;
+function tokenFile() { return path.join(brainDataDir(), 'jarvis.token'); }
+function brainTokenValue() {
+  if (brainToken) return brainToken;
+  try {
+    const t = fs.readFileSync(tokenFile(), 'utf8').trim();
+    if (t) { brainToken = t; return t; }
+  } catch { /* todavia no existe */ }
+  return '';
+}
+// Se llama justo antes de abrir cada WebSocket. Si el brain aun no ha escrito
+// el fichero, espera un poco y reintenta: el cerebro lo crea en su primer uso.
+async function esperarToken(ms = 6000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const t = brainTokenValue();
+    if (t) return t;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return brainTokenValue();
+}
+function invalidateToken() { brainToken = null; }
 
 // "Reparar instalacion" desde el menu: borra el sello de version y el testigo
 // de dependencias y vuelve a pasar por el instalador, que ya es idempotente.
@@ -745,7 +801,8 @@ function createHud() {
     icon: path.join(ASSETS_DIR, process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.generado.js'),
+      additionalArguments: [`--jarvis-role=hud`],
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -1015,7 +1072,8 @@ function createNotch(expandOnReady = false) {
       hasShadow: false,
       title: 'JARVIS Notch',
       webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
+        preload: path.join(__dirname, 'preload.generado.js'),
+      additionalArguments: [`--jarvis-role=notch`],
         contextIsolation: true,
         nodeIntegration: false,
       },
@@ -1123,7 +1181,8 @@ function createWizard() {
     icon: path.join(ASSETS_DIR, 'icon.png'),
     skipTaskbar: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.generado.js'),
+      additionalArguments: [`--jarvis-role=wizard`],
       contextIsolation: true,
       nodeIntegration: false,
       allowScriptsToClose: true,
@@ -1160,7 +1219,8 @@ function createSplash() {
     skipTaskbar: true,
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.generado.js'),
+      additionalArguments: [`--jarvis-role=splash`],
       contextIsolation: true,
       nodeIntegration: false,
       allowScriptsToClose: true,
@@ -1201,7 +1261,8 @@ function createOverlay() {
     icon: path.join(ASSETS_DIR, 'icon.png'),
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.generado.js'),
+      additionalArguments: [`--jarvis-role=overlay`],
       contextIsolation: true,
       nodeIntegration: false,
       webSecurity: false,
@@ -1684,6 +1745,15 @@ ipcMain.handle('window:toggleFullscreen', () => {
 
 ipcMain.handle('window:restore', () => restoreMain());
 
+// El token, para los renderers que abren su propio WebSocket (el HUD, el orbe
+// de la pizarra, el puente de Coucou). Se devuelve ya esperando a que exista,
+// que si no el primer arranque lo recibia vacio y el WebSocket se rechazaba.
+ipcMain.handle('jarvis:token', async () => (await esperarToken()) || '');
+ipcMain.handle('jarvis:token-query', async () => {
+  const t = await esperarToken();
+  return t ? `?token=${encodeURIComponent(t)}` : '';
+});
+
 ipcMain.handle('notch:set-expanded', (event, expanded, contentHeight) => {
   if (!isNotchSender(event) || !notchWindow.isVisible()) return false;
   notchExpanded = !!expanded;
@@ -1785,16 +1855,30 @@ ipcMain.handle('env:save', (_e, keys) => {
   return { ok: true, path: ENV_FILE, hasKeys: hasAnyApiKey() };
 });
 
+// env:get se ha ido. Devolvia las tres claves de API de tu cuenta a quien
+// llamara al canal, y no lo hacia NADIE: la unica ventana que lo tenia en el
+// puente era el overlay, que abre paginas web. Si algun dia hace falta para
+// teaching, que sea con algo que no devuelva el secreto entero.
 ipcMain.handle('env:get', () => {
   const env = readEnv();
   return {
-    GROQ_API_KEY: env.GROQ_API_KEY || '',
-    GEMINI_API_KEY: env.GEMINI_API_KEY || '',
-    OPENROUTER_API_KEY: env.OPENROUTER_API_KEY || '',
+    GROQ_API_KEY: env.GROQ_API_KEY ? 'puesta' : '',
+    GEMINI_API_KEY: env.GEMINI_API_KEY ? 'puesta' : '',
+    OPENROUTER_API_KEY: env.OPENROUTER_API_KEY ? 'puesta' : '',
   };
 });
 
-ipcMain.handle('app:quit', () => app.quit());
+// Solo la pantalla de carga puede cerrar la app, y solo desde el proceso
+// principal: el resto de ventanas no lo ven en su puente. Evitar que una
+// pagina cargada en el overlay pueda cerrar JARVIS.
+ipcMain.handle('app:quit', (event) => {
+  if (!splashWindow || event.sender !== splashWindow.webContents) {
+    console.warn('[JARVIS] app:quit desde una ventana que no es la de carga; ignorado.');
+    return false;
+  }
+  app.quit();
+  return true;
+});
 
 // ---- overlay ----
 ipcMain.handle('overlay:close', () => {

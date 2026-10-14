@@ -25,9 +25,14 @@ def vboxmanage() -> str:
             return p
     try:
         r = subprocess.run(["where.exe", "VBoxManage"], capture_output=True,
-                           text=True, timeout=5, creationflags=_NO_WINDOW)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip().splitlines()[0]
+                           text=True, timeout=5, encoding="utf-8", errors="replace",
+                           creationflags=_NO_WINDOW)
+        # where.exe escribe en la pagina de codigos de la consola, y la ruta que
+        # devuelve puede llevar acentos ("C:\Usuarios\Pe rez\..."). Sin errors=
+        # el hilo lector moria y stdout llegaba a None, y el .strip() de abajo
+        # era un AttributeError: VirtualBox dejas de verse instalado.
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return (r.stdout or "").strip().splitlines()[0]
     except Exception:
         pass
     raise RuntimeError("No encuentro VBoxManage: ¿está instalado VirtualBox?")

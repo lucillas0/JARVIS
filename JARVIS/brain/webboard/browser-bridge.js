@@ -1,3 +1,15 @@
+
+// --- Enlace con el cerebro -------------------------------------------------
+// El token lo inyecta el servidor al servir la pagina (ver _inyecta_token en
+// brain/main.py): window.JARVIS_TOKEN_URL = "?token=...". Sin el no hay WS.
+// Y la URL sale de location, no de 127.0.0.1: en un NAS se entra por la IP y
+// el 127.0.0.1 del navegador es el del PC del usuario, no el del servidor.
+function _jarvisWsUrl() {
+  const esquema = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const token = (typeof window !== 'undefined' && window.JARVIS_TOKEN_URL) || '';
+  return esquema + location.host + '/ws' + token;
+}
+
 /* Puente de la pizarra cuando se sirve en el navegador (modo LITE, servidor
  * o Docker). En el escritorio lo pone el preload de Electron como
  * `window.overlayAPI`; aquí se implementa la misma interfaz contra HTTP y el
@@ -112,7 +124,7 @@
   function conectar() {
     let ws;
     try {
-      ws = new WebSocket('ws://' + location.host + '/ws');
+      ws = new WebSocket(_jarvisWsUrl());
     } catch (e) {
       setTimeout(conectar, 3000);
       return;

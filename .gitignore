@@ -23,6 +23,21 @@ __pycache__/
 
 node_modules/
 
+# El numero de WhatsApp del propietario. Es un dato personal y no va al repo:
+# el puente lo lee de owner.json, que se crea la primera vez en el equipo.
+# Si alguna vez llego a subirse, eso ya no se puede borrar del historico.
+JARVIS/wa-bridge/owner.json
+
+# El token con el que se abre el WebSocket al cerebro (ver brain/auth.py).
+# NUNCA al repo: es la credencial que cierra el puerto a las demas paginas.
+**/jarvis.token
+
+# Bases de datos y cachés que crea el cerebro al arrancar. La de datos real
+# va fuera de la instalación, pero en desarrollo cae aquí y no debe subirse.
+**/db/*.json
+**/db/*.db
+**/db/qdrant/
+
 # Carpetas de trabajo local, no forman parte del proyecto
 _respaldo-ficheros-buenos/
 _herramientas/

@@ -14,12 +14,22 @@
 
   const memory = {};
 
+  // El token lo inyecta el brain al servir la pagina (ver _inyecta_token).
+  // Sin el, el WebSocket se rechaza y las rutas de claves devuelven 401.
+  const T = window.JARVIS_TOKEN || '';
+  const QS = window.JARVIS_TOKEN_URL || '';
+
+  function conToken(url) {
+    if (!T || !url || url.startsWith('http') || url.indexOf('token=') >= 0) return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(T);
+  }
+
   async function get(url, body) {
-    const r = await fetch(url, body ? {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    } : undefined);
+    const cabeceras = body ? { 'Content-Type': 'application/json' } : undefined;
+    if (T) cabeceras = Object.assign({}, cabeceras || {}, { 'X-Jarvis-Token': T });
+    const r = await fetch(conToken(url), body
+      ? { method: 'POST', headers: cabeceras, body: JSON.stringify(body) }
+      : { headers: cabeceras });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }
@@ -112,7 +122,7 @@
   function conectar() {
     let ws;
     try {
-      ws = new WebSocket('ws://' + location.host + '/ws');
+      ws = new WebSocket('ws://' + location.host + '/ws' + (QS || (T ? '?token=' + encodeURIComponent(T) : '')));
     } catch (e) {
       setTimeout(conectar, 3000);
       return;

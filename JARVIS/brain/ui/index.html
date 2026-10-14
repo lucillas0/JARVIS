@@ -338,7 +338,15 @@ import * as THREE from 'three';
    GET        /health            estado del cerebro
    GET        /api/tools         catalogo de herramientas                */
 const BASE = location.origin;
-const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+// El token lo inyecta el cerebro al servir la pagina (ver _inyecta_token en
+// brain/main.py): window.JARVIS_TOKEN_URL = "?token=...". Va aqui porque el
+// brain ya no acepta un WebSocket sin token: sin esto la pagina se queda
+// reintentando cada 2,5 s con un 403 en silencio y dice "Sin conexion" para
+// siempre, que es como seBehavior exactamente un servidor caido pero sin estar
+// caido. En Electron esto lo pone el preload (jarvisNet); en el navegador,
+// Docker o un NAS, esta variable.
+const _TOKEN_URL = (typeof window !== 'undefined' && window.JARVIS_TOKEN_URL) || '';
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + _TOKEN_URL;
 
 const CONFIG = {
   lang: 'es-ES',
@@ -707,6 +715,12 @@ function abreWS() {
     $('#host').textContent = 'Sin conexión · reintentando';
     $('#jarvisText').textContent = 'Se ha perdido la conexión con el servidor.';
     log('Conexión cerrada', 'w');
+    if (!_TOKEN_URL) {
+      // Sin token no hay nada que reintentar: otro intento dara el mismo 403.
+      $('#host').textContent = 'Sin token del cerebro';
+      log('Falta el token del servidor. Recarga la pagina.', 'e');
+      return;
+    }
     reintento = setTimeout(abreWS, CONFIG.reconectarEn);
   };
 

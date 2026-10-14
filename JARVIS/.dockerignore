@@ -11,6 +11,10 @@
 !brain/.env.example
 !configuracion.env.example
 **/keys.env
+# El token con el que se abre el WebSocket al cerebro (brain/auth.py). Aunque
+# hoy vive en brain/db/, que ya esta excluido, se pone aqui para que el dia que
+# alguien lo mueva no acabe horneado en una imagen publicada.
+**/jarvis.token
 
 # Python
 **/venv/

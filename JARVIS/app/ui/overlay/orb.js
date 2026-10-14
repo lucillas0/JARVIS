@@ -20,9 +20,24 @@ window.__jarvisOrb = orb;
 let ws = null;
 let reconnectTimer = null;
 
-function connect() {
+// El brain exige token en el WebSocket (brain/auth.py). En Electron llega por
+// el preload; en el navegador por la variable que inyecta el brain al servir la
+// pagina. Sin los dos, no hay conexion.
+let _q = (typeof window !== 'undefined' && window.JARVIS_TOKEN_URL) || '';
+function conectar() {
   clearTimeout(reconnectTimer);
-  try { ws = new WebSocket('ws://127.0.0.1:8000/ws'); } catch { reconnectTimer = setTimeout(connect, 5000); return; }
+  if (!_q && window.jarvisNet) {
+    window.jarvisNet.query().then((q) => {
+      _q = q || '';
+      abrir();
+    }).catch(() => { reconnectTimer = setTimeout(conectar, 5000); });
+    return;
+  }
+  abrir();
+}
+function abrir() {
+  clearTimeout(reconnectTimer);
+  try { ws = new WebSocket('ws://127.0.0.1:8000/ws' + _q); } catch { reconnectTimer = setTimeout(conectar, 5000); return; }
   ws.onmessage = (e) => {
     let d;
     try { d = JSON.parse(e.data); } catch { return; }
@@ -37,7 +52,7 @@ function connect() {
       orb.setLevel(d.level || 0);
     }
   };
-  ws.onclose = () => { reconnectTimer = setTimeout(connect, 5000); };
+  ws.onclose = () => { reconnectTimer = setTimeout(conectar, 5000); };
   ws.onerror = () => {};
 }
-connect();
+conectar();

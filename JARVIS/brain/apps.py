@@ -54,8 +54,11 @@ def _procesos_vivos() -> set:
             salida = subprocess.run(
                 ["tasklist", "/fo", "csv", "/nh"],
                 capture_output=True, text=True, timeout=20,
+                encoding="utf-8", errors="replace",
             ).stdout
-            for fila in csv.reader(io.StringIO(salida)):
+            # stdout puede llegar a None si el hilo lector de subprocess fallo;
+            # sin esto el io.StringIO de abajo reventaba con TypeError.
+            for fila in csv.reader(io.StringIO(salida or "")):
                 if fila:
                     nombres.add(fila[0].lower())
         except Exception as exc2:  # noqa: BLE001

@@ -20,9 +20,21 @@ window.__jarvisOrb = orb;
 let ws = null;
 let reconnectTimer = null;
 
+
+// --- Enlace con el cerebro -------------------------------------------------
+// El token lo inyecta el servidor al servir la pagina (ver _inyecta_token en
+// brain/main.py): window.JARVIS_TOKEN_URL = "?token=...". Sin el no hay WS.
+// Y la URL sale de location, no de 127.0.0.1: en un NAS se entra por la IP y
+// el 127.0.0.1 del navegador es el del PC del usuario, no el del servidor.
+function _jarvisWsUrl() {
+  const esquema = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const token = (typeof window !== 'undefined' && window.JARVIS_TOKEN_URL) || '';
+  return esquema + location.host + '/ws' + token;
+}
+
 function connect() {
   clearTimeout(reconnectTimer);
-  try { ws = new WebSocket('ws://127.0.0.1:8000/ws'); } catch { reconnectTimer = setTimeout(connect, 5000); return; }
+  try { ws = new WebSocket(_jarvisWsUrl()); } catch { reconnectTimer = setTimeout(connect, 5000); return; }
   ws.onmessage = (e) => {
     let d;
     try { d = JSON.parse(e.data); } catch { return; }

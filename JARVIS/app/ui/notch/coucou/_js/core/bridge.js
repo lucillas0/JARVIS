@@ -37,6 +37,7 @@ async function callOrThrow(cmd, args) {
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 let socket = null;
 let reconnectTimer = null;
+let tokenQuery = null;
 const pendientes = new Map();
 const previewsPendientes = new Map();
 let contador = 0;
@@ -45,8 +46,20 @@ function conecta() {
     if (typeof WebSocket === "undefined") return;
     if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
     clearTimeout(reconnectTimer);
+    // El cerebro exige token en el WebSocket (brain/auth.py). El proceso
+    // principal lo pasa por el preload; hasta que llegue, se espera aqui en vez
+    // de abrir una conexion que el servidor iba a cerrar con 4401.
+    if (tokenQuery === null) {
+        const api = globalThis.jarvisNotchNet;
+        if (api && typeof api.query === "function") {
+            api.query().then((q) => { tokenQuery = q || ""; conecta(); })
+                .catch(() => { tokenQuery = ""; conecta(); });
+            return;
+        }
+        tokenQuery = "";
+    }
     let current;
-    try { current = new WebSocket(CEREBRO); }
+    try { current = new WebSocket(CEREBRO + tokenQuery); }
     catch { reconnectTimer = setTimeout(conecta, 1500); return; }
     socket = current;
     current.onopen = () => { if (socket === current) emiteEvento("jarvis-abierto"); };

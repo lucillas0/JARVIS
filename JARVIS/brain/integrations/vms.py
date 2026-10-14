@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Las máquinas virtuales, sin本公司 de por medio.
 
 El señor no escribe «userver 26»: habla, y el micrófono devuelve «su punto

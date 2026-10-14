@@ -18,9 +18,21 @@ from pathlib import Path
 
 log = logging.getLogger("tools.system")
 
-# Evitar llamadas a ctypes para cosas que no sean estrictamente necesarias.
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+# ctypes.windll SOLO existe en Windows. En Linux (Docker, NAS) este import
+# reventaba con AttributeError al cargar el modulo, y como ToolManager registra
+# estas herramientas al arrancar, el contenedor entero se caia con codigo 3.
+#
+# user32 y kernel32 quedan a None fuera de Windows. Lo que los use, ya preguntar
+# por _ES_WINDOWS antes: en un NAS no hay ventanas que manejar, y las
+# herramientas se announced igual, solo que devuelven que no pueden.
+_ES_WINDOWS = os.name == "nt"
+
+if _ES_WINDOWS:
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+else:
+    user32 = None
+    kernel32 = None
 APPCMDS = {"shell:appsFolder"}
 
 
@@ -442,12 +454,19 @@ def _is_url(s: str) -> bool:
 def _command_path(cmd: str) -> str | None:
     """Devuelve la ruta completa del ejecutable vía where.exe, o None."""
     try:
+        # where.exe escribe en la página de códigos de la consola, y las rutas que
+        # devuelve llevan acentos con facilidad ("C:\Users\...\Program Files" en un
+        # Windows en español, perfiles con ñ o tildes...). Sin errors= el hilo
+        # lector de subprocess moría con UnicodeDecodeError, stdout llegaba a
+        # None y el .strip() de abajo era un AttributeError: open_app dejaba de
+        # encontrar cualquier programa instalado en una ruta con tildes.
         r = subprocess.run(
             ["where.exe", cmd], capture_output=True, text=True, timeout=3,
+            encoding="utf-8", errors="replace",
             creationflags=_NO_WINDOW,
         )
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip().splitlines()[0]
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return (r.stdout or "").strip().splitlines()[0]
     except Exception:
         pass
     return None
@@ -628,6 +647,13 @@ def web_search_handler(params: dict) -> dict:
 # ----------------------------------------------------------------------------- #
 def _find_window(title_fragment: str):
     """Devuelve handle de la primera ventana visible cuyo título contenga el fragmento."""
+    # En Linux (Docker, NAS) user32 es None: no hay gestion de ventanas de
+    # Windows. Se dice con un mensaje claro en vez de reventar con
+    # "NoneType has no attribute", que es lo que pasaba al llamar a estas
+    # herramientas desde un contenedor.
+    if not _ES_WINDOWS or user32 is None:
+        raise RuntimeError(
+            "La gestion de ventanas solo funciona en Windows; aqui no hay ventanas que minimizar ni enfocar.")
     enum = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -771,15 +797,23 @@ def volume_set_handler(params: dict) -> dict:
 
 def _spotify_running() -> bool:
     try:
+        # encoding+errors no son Aqui: tasklist escribe en la pagina de codigos
+        # de la consola (cp850 en un Windows en espanol), no en UTF-8. Sin esto
+        # el hilo lector de subprocess moria con UnicodeDecodeError, stdout
+        # llegaba a None, y el TypeError de abajo lo comia el except: esta
+        # funcion devolvia False SIEMPRE y nadie se enteraba.
         r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Spotify.exe"],
                            capture_output=True, text=True, timeout=10,
+                           encoding="utf-8", errors="replace",
                            creationflags=_NO_WINDOW)
-        return "Spotify.exe" in r.stdout
+        return "Spotify.exe" in (r.stdout or "")
     except Exception:
         return False
 
 
 def _send_media_key(vk: int) -> None:
+    if not _ES_WINDOWS or user32 is None:
+        raise RuntimeError("Las teclas multimedia solo funcionan en Windows.")
     ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
     ctypes.windll.user32.keybd_event(vk, 0, 2, 0)  # KEYEVENTF_KEYUP
 
@@ -968,19 +1002,27 @@ def press_keys_handler(params: dict) -> dict:
 _CF_UNICODETEXT = 13
 
 _VOID_P = ctypes.c_void_p
-kernel32.GlobalAlloc.restype = _VOID_P
-kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-kernel32.GlobalLock.restype = _VOID_P
-kernel32.GlobalLock.argtypes = [_VOID_P]
-kernel32.GlobalUnlock.argtypes = [_VOID_P]
-kernel32.GlobalSize.restype = ctypes.c_size_t
-kernel32.GlobalSize.argtypes = [_VOID_P]
-kernel32.GlobalFree.argtypes = [_VOID_P]
-user32.OpenClipboard.argtypes = [_VOID_P]
-user32.GetClipboardData.restype = _VOID_P
-user32.GetClipboardData.argtypes = [ctypes.c_uint]
-user32.SetClipboardData.restype = _VOID_P
-user32.SetClipboardData.argtypes = [ctypes.c_uint, _VOID_P]
+
+# Todo esto se ejecuta AL IMPORTAR el modulo. Sin el if, en Linux revienta con
+#     'NoneType' object has no attribute 'GlobalAlloc'
+# porque kernel32 y user32 son None ahi. Y como ToolManager registra las
+# herramientas dentro de un unico try, el fallo se lleva por delante TODAS:
+# el contenedor arrancaba "bien" pero con cero herramientas, sin decir nada.
+# Solo se declara el portapapeles donde de verdad existe: en Windows.
+if _ES_WINDOWS and user32 is not None and kernel32 is not None:
+    kernel32.GlobalAlloc.restype = _VOID_P
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalLock.restype = _VOID_P
+    kernel32.GlobalLock.argtypes = [_VOID_P]
+    kernel32.GlobalUnlock.argtypes = [_VOID_P]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+    kernel32.GlobalSize.argtypes = [_VOID_P]
+    kernel32.GlobalFree.argtypes = [_VOID_P]
+    user32.OpenClipboard.argtypes = [_VOID_P]
+    user32.GetClipboardData.restype = _VOID_P
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    user32.SetClipboardData.restype = _VOID_P
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, _VOID_P]
 
 
 def _clipboard_get() -> str | None:

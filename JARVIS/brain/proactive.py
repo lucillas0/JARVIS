@@ -4,8 +4,8 @@ Detección de contexto por proceso/ventana activa + análisis de pantalla
 (continuo). Puede actuar con libertad (silenciar notificaciones en reunión,
 pausar música en gaming), pero lo "sensible" siempre pasa por el doble canal.
 """
-import ctypes
 import logging
+import os
 import threading
 import time
 from typing import Callable, Optional
@@ -14,7 +14,22 @@ from config import Config
 
 log = logging.getLogger("proactive")
 
-user32 = ctypes.windll.user32
+# ctypes.windll SOLO existe en Windows. En Linux (Docker, NAS, Linux de
+# escritorio) el import de este modulo reventaba con
+#     AttributeError: module 'ctypes' has no attribute 'windll'
+# y como _init_services() importa proactive en el arranque, el contenedor entero
+# se caia con codigo 3 y no llegaba ni a servir /health.
+#
+# user32 queda a None fuera de Windows y todas las ventanas se preguntan por
+# el antes de usarlo. Un NAS no tiene gestion de ventanas: no hay nada que
+# mirar, y el motor simplemente no detecta contexto, que es lo correcto.
+_ES_WINDOWS = os.name == "nt"
+
+if _ES_WINDOWS:
+    import ctypes
+    user32 = ctypes.windll.user32
+else:
+    user32 = None
 
 CONTEXTS = {"coding", "gaming", "meeting", "writing", "browsing", "media", "idle"}
 
@@ -143,8 +158,9 @@ class ProactiveEngine:
                 import subprocess
                 r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Spotify.exe"],
                                    capture_output=True, text=True, timeout=10,
+                                   encoding="utf-8", errors="replace",
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                if "Spotify.exe" in r.stdout and (now - self._last_notify > 90):
+                if "Spotify.exe" in (r.stdout or "") and (now - self._last_notify > 90):
                     self._last_notify = now
                     self.emit({"type": "proactive_notice", "context": ctx,
                                "message": "Detecto gaming: pauso la música."})

@@ -232,17 +232,23 @@ def _h_reparar(params: dict) -> dict:
         subprocess.run([PS, "-NoProfile", "-NonInteractive", "-Command",
                         "Stop-Service -Name FrameServer -Force"],
                        capture_output=True, text=True, timeout=60,
+                       encoding="utf-8", errors="replace",
                        creationflags=_NO_WINDOW)
+        # pnputil y PowerShell escriben en la pagina de codigos de la consola.
+        # Sin errors= el hilo lector de subprocess moria y stdout llegaba a None.
         for c in fantasmas:
             subprocess.run(["pnputil", "/remove-device", c["instancia"]],
                            capture_output=True, text=True, timeout=90,
+                           encoding="utf-8", errors="replace",
                            creationflags=_NO_WINDOW)
         for c in vivas:
             subprocess.run(["pnputil", "/restart-device", c["instancia"]],
                            capture_output=True, text=True, timeout=90,
+                           encoding="utf-8", errors="replace",
                            creationflags=_NO_WINDOW)
         subprocess.run(["pnputil", "/scan-devices"], capture_output=True,
-                       text=True, timeout=90, creationflags=_NO_WINDOW)
+                       text=True, timeout=90, encoding="utf-8", errors="replace",
+                       creationflags=_NO_WINDOW)
 
     time.sleep(3)
     despues = _h_estado(params)

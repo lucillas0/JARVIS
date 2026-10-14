@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 
 from config import Config, BRAIN_DIR, DATA_DIR
@@ -3986,6 +3986,72 @@ def _speak_both(text: str) -> None:
     brain.emit({"type": "assistant_reply", "text": text})
 
 
+# --------------------------------------------------------------------------- #
+# Quién puede hablar con este cerebro
+# --------------------------------------------------------------------------- #
+# El token vive en el directorio de datos y se inyecta en el HTML que sirve el
+# propio JARVIS, de modo que las paginas de siempre no tienen que hacer nada
+# raro. Lo que se cierra con esto es el ataque de "tengo una pestana abierta".
+def _ws_autorizado(ws: WebSocket) -> bool:
+    """Token + origen. Ambos, y en ese orden: el origen solo se mira si el
+    cliente lo manda, y un cliente que no lo manda puede ser Electron."""
+    import auth as _auth
+    origen = ws.headers.get("origin") if ws.headers else None
+    if not _auth.origen_permitido(origen):
+        return False
+    candidato = ws.query_params.get("token") or _auth.token_por_cabecera(ws.headers)
+    return _auth.coincide(candidato)
+
+
+def _exige_token(req) -> bool:
+    """True si la peticion viene con el token bueno.
+
+    El request se pasa como parametro y no se coge de un global: en FastAPI
+    solo existe si el endpoint lo declara, asi que leerlo de fuera es un
+    NameError esperando a ocurrir.
+    """
+    import auth as _auth
+    if req is None:
+        return False
+    return _auth.coincide(_auth.token_por_cabecera(req.headers))
+
+
+def _inyecta_token(html: str) -> str:
+    """Mete el token en la pagina para que sus fetch y sus WebSocket lo lleven.
+
+    Va en una variable de window y no en el HTML visible, y solo se sirve a
+    quien ya puede ver la pagina.
+    """
+    import auth as _auth
+    try:
+        t = _auth.token()
+    except Exception:
+        return html
+    frag = '<script>window.JARVIS_TOKEN=%s;window.JARVIS_TOKEN_URL=%s;</script>' % (
+        json.dumps(t),
+        json.dumps("?token=" + t),
+    )
+    # Justo despues de <head>, para que este disponible antes que el resto.
+    for ancla in ("</head>", "<body"):
+        i = html.find(ancla)
+        if i >= 0:
+            return html[:i] + frag + html[i:]
+    return frag + html
+
+
+def _token_en_url(url: str) -> str:
+    """Anade el token a una URL de WebSocket que venga del renderer."""
+    import auth as _auth
+    try:
+        u = str(url or "")
+        if not u or "token=" in u:
+            return u
+        sep = "&" if "?" in u else "?"
+        return u + sep + "token=" + _auth.token()
+    except Exception:
+        return url
+
+
 def _speak_text(text: str, text_fallback: bool = True) -> None:
     """Habla text con el VoiceManager (o sin él, solo envía reply).
 
@@ -4042,6 +4108,18 @@ async def startup():
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     _wst = time.time()
+    # Comprobacion ANTES de aceptar. Un WebSocket no esta sujeto a la
+    # Same-Origin Policy, asi que cualquier pagina que visitara el usuario
+    # podia hablar con este cerebro: mandarle preguntas, pedirle ficheros o
+    # responder por el a una peticion de confirmacion del Risk Engine. Se exige
+    # el token y un origen de los nuestros.
+    if not _ws_autorizado(ws):
+        try:
+            await ws.close(code=4401, reason="token o origen no valido")
+        except Exception:
+            pass
+        log.warning("WS rechazado: token u origen no valido")
+        return
     await ws.accept()
     brain.clients.add(ws)
     v = brain.voice
@@ -4323,6 +4401,8 @@ def _ui_dir() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
 
+
+
 @app.get("/")
 async def raiz():
     """La raiz manda a la interfaz.
@@ -4362,6 +4442,8 @@ async def ui_page():
     # three.js vive junto a la pagina. Al abrir '/ui' sin barra final, el
     # importmap pediria "three" y no lo resolveria: se apunta al suyo.
     html = html.replace('"three": "./three.module.js"', '"three": "/ui/three.module.js"')
+    # El token va dentro: el WebSocket ya no se acepta sin el.
+    html = _inyecta_token(html)
     return HTMLResponse(html)
 
 
@@ -4828,13 +4910,22 @@ async def api_config_importar(payload: dict):
 
 
 @app.post("/api/config/exportar-claves")
-async def api_config_exportar():
+async def api_config_exportar(request: Request):
     """Devuelve las claves en formato keys.env para llevarlas a otro equipo.
 
     A POST y no a GET a propósito: así no se puede '--' filtrar por un enlace
-    ni por una precarga, y solo se pide de forma explicita. Aun asi, el
-    fichero va en claro: es lo mismo que hay ya en disco.
+    ni por una precarga, y solo se pide de forma explicita.
+
+    Y ahora con el token, que antes no lo llevaba. Esta ruta devolvia TODAS las
+    claves de API en claro a cualquiera que llegara al puerto 8000: bastaba un
+    POST. El token lo manda la pagina de configuracion, que es la unica que
+    deberia llamarla.
     """
+    if not _exige_token(request):
+        return JSONResponse(
+            content={"ok": False, "reason": "Falta el token. Recarga la pagina "
+                                           "de configuracion."},
+            status_code=401)
     import os as _os
     lineas = []
     for k in _API_KEYS:
@@ -4848,24 +4939,24 @@ async def api_config_exportar():
 
 
 @app.get("/api/camara/estado")
-async def api_camara_estado():
+async def api_camara_estado(request: Request):
     try:
         from vision.webcam import obtener as _wc
         estado = _wc().estado()
         return JSONResponse(content={"ok": True, "estado": estado}, headers={
-            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Origin": _origen_camara(request),
         })
     except Exception as e:
         return JSONResponse(content={"ok": False, "reason": str(e)[:200]}, headers={
-            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Origin": _origen_camara(request),
         })
 
 
 @app.options("/api/camara/estado")
 @app.options("/api/camara/mjpeg")
-async def api_camara_cors_preflight():
+async def api_camara_cors_preflight(request: Request):
     return Response(status_code=204, headers={
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": _origen_camara(request),
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "*",
         "Access-Control-Allow-Private-Network": "true",
@@ -4874,7 +4965,7 @@ async def api_camara_cors_preflight():
 
 
 @app.post("/api/camara/cerrar")
-async def api_camara_cerrar():
+async def api_camara_cerrar(request: Request):
     """Suelta la cámara del cerebro.
 
     El tracker la deja cogida 10 s tras el último uso, y mientras la tenga nadie
@@ -4892,7 +4983,7 @@ async def api_camara_cerrar():
 
 
 @app.get("/api/camara/foto.jpg")
-async def api_camara_foto(calidad: int = 60):
+async def api_camara_foto(calidad: int = 60, request: Request = None):
     """Foto de la cámara capturada por el cerebro (OpenCV), no por el navegador.
 
     Es la vía que funciona en equipos donde Chromium no abre la cámara, porque
@@ -4905,7 +4996,7 @@ async def api_camara_foto(calidad: int = 60):
     except Exception as e:
         return JSONResponse(status_code=503,
                             content={"ok": False, "reason": str(e)[:200]},
-                            headers={"Access-Control-Allow-Origin": "*"})
+                            headers={"Access-Control-Allow-Origin": _origen_camara(request)})
     # OJO: aquí NO se cierra la cámara. Se llegó a cerrar tras cada foto para no
     # secuestrársela al navegador, pero abrir y cerrarla sin parar deja el
     # dispositivo delivering un fotograma y luego ceros, que es peor: mataba
@@ -4913,9 +5004,9 @@ async def api_camara_foto(calidad: int = 60):
     if not jpg:
         return JSONResponse(status_code=503,
                             content={"ok": False, "reason": "la cámara no entrega imagen"},
-                            headers={"Access-Control-Allow-Origin": "*"})
+                            headers={"Access-Control-Allow-Origin": _origen_camara(request)})
     return Response(content=jpg, media_type="image/jpeg", headers={
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": _origen_camara(request),
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache",
     })
@@ -4930,7 +5021,7 @@ async def api_camara_foto(calidad: int = 60):
 # limita a mirar este vídeo. Además va a 15 fps de verdad, frente a las 3-5 fps
 # que daba antes pedir fotos una a una por HTTP (y por eso no cogía las manos).
 @app.get("/api/camara/mjpeg")
-async def api_camara_mjpeg():
+async def api_camara_mjpeg(request: Request):
     from fastapi.responses import StreamingResponse
 
     async def generar():
@@ -4964,7 +5055,7 @@ async def api_camara_mjpeg():
                 pass
 
     return StreamingResponse(generar(), media_type="multipart/x-mixed-replace; boundary=marcojarvis",
-                             headers={"Access-Control-Allow-Origin": "*",
+                             headers={"Access-Control-Allow-Origin": _origen_camara(request),
                                       "Access-Control-Allow-Methods": "GET, OPTIONS",
                                       "Access-Control-Allow-Headers": "*",
                                       "Access-Control-Allow-Private-Network": "true",
@@ -5546,6 +5637,7 @@ async def board_page():
                 .replace('src="app.js"', 'src="/board/app.js"')
                 .replace('src="orb.js"', 'src="/board/orb.js"')
                 .replace('href="overlay.css"', 'href="/board/overlay.css"'))
+    html = _inyecta_token(html)
     return HTMLResponse(html)
 
 
@@ -5834,3 +5926,16 @@ $('#ir').onclick=async()=>{
 };
 </script></body></html>"""
 
+
+def _origen_camara(request) -> str:
+    """El origen que hay que devolverle a la camara: el suyo si es de los
+    nuestros, y cadena vacia si no.
+
+    Antes esto era "*" en los siete sitios, con lo que cualquier pagina de
+    internet podia pedir una foto. Ahora solo contesta el propio JARVIS.
+    """
+    import auth as _auth
+    o = request.headers.get("origin") if request is not None else None
+    if o and _auth.origen_permitido(o):
+        return str(o)
+    return ""
