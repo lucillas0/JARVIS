@@ -51,6 +51,22 @@ _ollama_cache = {"t": 0.0, "v": False}
 _OLLAMA_TTL = 8.0
 
 
+def _tiene_clave(nombre: str) -> bool:
+    """Si hay clave puesta para este proveedor.
+
+    "groq-light" es el mismo Groq con otro modelo, asi que cuenta la misma
+    clave. Se lee de Config en cada llamada y no de una variable cacheada:
+    /setup actualiza Config al instante y quiero que se note sin reiniciar.
+    """
+    if nombre.startswith("groq"):
+        return bool(Config.GROQ_API_KEY)
+    if nombre == "gemini":
+        return bool(Config.GEMINI_API_KEY)
+    if nombre == "openrouter":
+        return bool(Config.OPENROUTER_API_KEY)
+    return False
+
+
 class ModelRouter:
     def __init__(self):
         self._groq_client = None
@@ -241,30 +257,59 @@ class ModelRouter:
         # El plazo se propaga a cada llamada: si una se queda colgada, el
         # cliente aborta al llegar el plazo en vez de esperar su propio timeout.
         _DEADLINE = (_t0 + limite) if limite else 0.0
-        providers = []
-        if _has_internet():
-            if heavy:
-                providers = [
-                    ("gemini", lambda: self._chat_gemini(messages, vision)),
-                    ("groq", lambda: self._chat_groq(messages, vision)),
-                    ("openrouter", lambda: self._chat_openrouter(messages, vision)),
-                ]
-            elif light and not vision:
-                providers = [
-                    ("groq-light", lambda: self._chat_groq(messages, vision, Config.GROQ_MODEL_LIGHT)),
-                    ("groq", lambda: self._chat_groq(messages, vision)),
-                    ("gemini", lambda: self._chat_gemini(messages, vision)),
-                    ("openrouter", lambda: self._chat_openrouter(messages, vision)),
-                ]
-            else:
-                providers = [
-                    ("groq", lambda: self._chat_groq(messages, vision)),
-                    ("gemini", lambda: self._chat_gemini(messages, vision)),
-                    ("openrouter", lambda: self._chat_openrouter(messages, vision)),
-                ]
-        else:
-            log.warning("Sin internet → modo limitado local (Ollama).")
 
+        # ---- Que proveedores se prueban --------------------------------
+        # Antes esta lista se metia dentro de "if _has_internet()", y ese
+        # sondeo consultaba UN SOLO host, api.groq.com. Si ese host no
+        # contestaba, la lista se quedaba VACIA y se caia directamente en
+        # "Sin modelos disponibles" sin haber probado ni uno. Da igual que
+        # las tres claves fueran validas.
+        #
+        # En un NAS eso pasa por tres cosas a la vez: el DNS del router que
+        # resuelve otra cosa, el router bloqueando el dominio, o un corte de
+        # dos segundos. Por eso salia "de repente", sin que hubiera cambiado
+        # nada de la configuracion. Y si solo usas Gemini, que api.groq.com
+        # no te llegue no deberia importarte: no lo hace.
+        #
+        # Ahora lo que decide es QUE CLAVES HAY, que es lo unico que importa.
+        # Cada proveedor ya tiene su propio timeout y su propio manejo de
+        # error, asi que no hace falta un sondeo previo para decidir nada.
+        if heavy:
+            orden = [
+                ("gemini", lambda: self._chat_gemini(messages, vision)),
+                ("groq", lambda: self._chat_groq(messages, vision)),
+                ("openrouter", lambda: self._chat_openrouter(messages, vision)),
+            ]
+        elif light and not vision:
+            orden = [
+                ("groq-light", lambda: self._chat_groq(messages, vision, Config.GROQ_MODEL_LIGHT)),
+                ("groq", lambda: self._chat_groq(messages, vision)),
+                ("gemini", lambda: self._chat_gemini(messages, vision)),
+                ("openrouter", lambda: self._chat_openrouter(messages, vision)),
+            ]
+        else:
+            orden = [
+                ("groq", lambda: self._chat_groq(messages, vision)),
+                ("gemini", lambda: self._chat_gemini(messages, vision)),
+                ("openrouter", lambda: self._chat_openrouter(messages, vision)),
+            ]
+        # Un proveedor sin clave no se prueba: se pierde hasta su timeout
+        # golpeando una API a la que no tiene acceso.
+        providers = [(n, f) for n, f in orden if _tiene_clave(n)]
+
+        if not providers:
+            log.error("No hay ninguna clave de modelo configurada.")
+            return {"reply": "Señor, no hay ninguna clave de modelo puesta. "
+                             "Metela en /setup y vuelvo a intentarlo.",
+                    "provider": "none", "fallback": True, "sin_claves": True}
+
+        # El sondeo se sigue haciendo, pero ya NO decide nada: solo se deja
+        # anotado en el log para saber si el fallo es de red o de las claves.
+        # Y va despues de montar la lista, no antes, para no retrasarla.
+
+        # Se apunta quien fallo y por que, para que el mensaje de abajo diga
+        # algo util en vez del mismo "no hay modelos" siempre.
+        fallos: list[str] = []
         for name, fn in providers:
             # Con reloj: si ya no queda tiempo, se deja de probar. Antes se
             # acumulaban cuatro intentos y el señor se comia treinta
@@ -277,8 +322,14 @@ class ModelRouter:
                 if reply:
                     self._provider = name
                     return {"reply": reply, "provider": name, "fallback": False}
+                fallos.append(name)
             except Exception as e:
+                fallos.append(f"{name}: {str(e)[:70]}")
                 log.warning("Proveedor %s lanzó excepción: %s", name, e)
+
+        # Un proveedor sin clave no es un fallo suyo: no se le culpa en el
+        # mensaje, solo los que de verdad se esperaban a contestar.
+        probados = [n for n, _ in providers]
 
         if limite and time.time() - _t0 > limite:
             # Se acabó el reloj. No se prueba ni el modelo local: aquí es donde
@@ -295,27 +346,63 @@ class ModelRouter:
         if limite and time.time() - _t0 > limite:
             return {"reply": "", "provider": "timeout", "fallback": True,
                     "agotado": True}
-        log.error("Todos los proveedores fallaron, internet=%s", _has_internet())
-        return {"reply": "Mis disculpas, señor. Sin modelos disponibles no puedo procesar eso.",
-                "provider": "none", "fallback": True}
+        # El sondeo va aqui, y solo para el log: si dice que no hay red pero
+        # los proveedores tenian clave, lo raro es la red; si los proveedores
+        # fallaron con 401 o 429, lo raro son las claves. Sin esto el log
+        # decía siempre lo mismo y no habia por donde tirar.
+        red = _has_internet()
+        log.error("Todos los proveedores fallaron. Probados=%s red=%s",
+                  ", ".join(probados), "si" if red else "no")
+        for f in fallos:
+            log.error("   %s", f)
+
+        # El mensaje dice que FALLO, no que no hay modelos. Antes decia "sin
+        # modelos disponibles" tambien cuando las claves estaban bien y lo
+        # que faltaba era un host que no contestaba, que es lo que confundia.
+        return {"reply": "Mis disculpas, señor. He intentado con "
+                        + ", ".join(probados)
+                        + " y los tres han fallado; esto no es que no tenga "
+                          "modelos, es que no he podido hablar con ellos. "
+                          "Mire el registro del servidor y ya lo veré.",
+                "provider": "none", "fallback": True,
+                "fallos": fallos, "red": red}
 
 
 _internet_cache = {"t": 0.0, "v": False}
 _INTERNET_TTL = 10.0
 
+# Cualquier respuesta HTTP vale como "hay internet", included el error. Lo que
+# dice que no hay red es que no se pueda ni resolver el nombre ni conectar.
+#
+# El host que se consulta NO es api.groq.com. Son dos cosas distintas: que no
+# llegues a Groq no significa que no tengas internet, y en un NAS que el router
+# bloquee ese dominio era justo lo que hacia que JARVIS se rindiera entero.
+# generate_204 es el "ping" de verdad de internet, lo sirve cualquier CDN y no
+# pertenece a ningun proveedor de modelos.
+_SONDA_INTERNET = "https://www.gstatic.com/generate_204"
+
 
 def _has_internet() -> bool:
+    """Solo diagnostico. Ya NO decide que proveedores se prueban.
+
+    Se deja por dos cosas: el aviso "(Modo limitado, sin conexión.)" que se
+    pone delante de la respuesta, y el log cuando fallan todos. Para lo
+    demas es un estorbo: son 2 s de espera maxima por lo que no se
+    puede seguir adelante.
+    """
     now = time.time()
     if now - _internet_cache["t"] <= _INTERNET_TTL:
         return _internet_cache["v"]
     ok = False
     try:
-        with urllib.request.urlopen("https://api.groq.com", timeout=3) as resp:
+        req = urllib.request.Request(_SONDA_INTERNET, method="HEAD")
+        with urllib.request.urlopen(req, timeout=2) as resp:
             ok = True
     except urllib.error.HTTPError:
-        # api.groq.com devuelve 403/404 al root: respuesta HTTP == hay internet.
+        # Un 403 o un 404 tambien es respuesta: hay internet.
         ok = True
     except Exception:
+        # DNS, certificado, timeout o sin salida: eso si es que no hay red.
         ok = False
     _internet_cache["t"] = now
     _internet_cache["v"] = ok

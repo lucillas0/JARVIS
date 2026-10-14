@@ -5,6 +5,7 @@ el orchestrator valida contra el Risk Engine, y solo entonces se ejecuta.
 """
 import asyncio
 import logging
+import os
 from typing import Any, Awaitable, Callable
 
 from risk_engine import RiskEngine
@@ -29,12 +30,68 @@ class ToolManager:
     def __init__(self, risk_engine: RiskEngine):
         self.risk = risk_engine
         self._registry: dict[str, dict] = {}
+        self._no_disponibles: list[dict] = []
         self._register_defaults()
 
     def register(self, tool: dict) -> None:
         """tool = {"name","risk_level","requires_confirmation","parameters",
-                  "confirm_text","handler"}"""
+                  "confirm_text","handler"}
+
+        Las que no pueden funcionar en este sistema se registran igualmente,
+        para que /api/tools no cambie de forma entre el escritorio y un NAS,
+        pero se marcan. El modelo las ve en el catalogo y no las prueba.
+        """
         self._registry[tool["name"]] = tool
+
+    # Herramientas que en Linux no tienen sentido: dependen de la API de
+    # Windows, de VirtualBox o de un escritorio. NO son peso muerto en el
+    # escritorio, asi que no se quitan: se declaran para que el router sepa
+    # que estan ahi pero que no puede pasar el rato llamando a algo que
+    # siempre va a fallar.
+    #
+    # Verificado dentro del contenedor, no de memoria: son 14 de 109. Las
+    # otras 95 contestan con elegancia ("Campus sin credenciales", "no hay
+    # telefonopaired") y no molestan.
+    _SOLO_WINDOWS = {
+        # Gestion de ventanas: la hace la API de Windows, no hay equivalente.
+        "minimize_window", "maximize_window", "switch_window",
+        # Teclas multimedia: nircamds de Windows.
+        "spotify_play", "spotify_next", "spotify_prev",
+        # Defender y auditorias que lanzan PowerShell.
+        "defender_scan", "defender_threats", "defender_quarantine",
+        "win_updates", "perf_advisor", "sec_audit",
+        # VirtualBox entero.
+        "vbox_list", "vbox_info", "vbox_ip", "vbox_net", "vbox_start",
+        "vbox_stop", "vbox_create", "vbox_exec", "vbox_read_file",
+        "vbox_write_file", "vbox_unlock", "vbox_console", "vbox_type",
+    }
+    # Estas no son de Windows pero tampoco pueden funcionar en un contenedor
+    # sin webcam: abren PowerShell para enumerar dispositivos DirectShow.
+    _SIN_CAMARA = {"camara_estado", "camara_reparar"}
+
+    def disponibles(self) -> list[dict]:
+        """Lo que el modelo puede usar de verdad en esta máquina."""
+        return [t for n, t in self._registry.items()
+                if n not in self._solo_windows()]
+
+    def no_disponibles(self) -> list[dict]:
+        return [dict(t, motivo=motivo)
+                for n, t in self._registry.items()
+                for motivo in [self._motivo(n)] if motivo]
+
+    def _solo_windows(self) -> set[str]:
+        # En Windows no se filtra nada: todo lo de la lista funciona. Solo en
+        # Linux (NAS, servidor) se retiran del catalogo las que no pueden.
+        if os.name == "nt":
+            return set()
+        return self._SOLO_WINDOWS | self._SIN_CAMARA
+
+    def _motivo(self, nombre: str) -> str:
+        if nombre in self._SOLO_WINDOWS:
+            return "Solo funciona en Windows."
+        if nombre in self._SIN_CAMARA:
+            return "Necesita una cámara y un escritorio; en un servidor no hay."
+        return ""
 
     def _register_defaults(self) -> None:
         try:
@@ -102,6 +159,13 @@ class ToolManager:
         base = {"open_app", "open_file", "web_search", "web_fetch", "say",
                 "analizar_archivo", "campus_courses", "campus_notas",
                 "system_diagnose", "vbox_list", "memory_search"}
+        # En un servidor, el trabajo de verdad es sobre ficheros, asi que
+        # list_dir entra siempre en el catalogo. Y open_app / vbox_list salen:
+        # abren cosas de Windows y no tienen sentido aqui, y lo que pasaba es
+        # que el modelo las elegia en vez de mirar el NAS, y contestaba con
+        # "Sin carpetas de apuntes, senor" cuando le preguntaban por /mnt/nas.
+        if self._solo_windows():
+            base = (base | {"list_dir"}) - {"open_app", "open_file", "vbox_list"}
         got = set()
         for t in self._registry.values():
             d = ((t.get("description") or "") + " " + t.get("name", "")).lower()
@@ -121,7 +185,7 @@ class ToolManager:
         Ahora van siempre los nombres (baratos) y la descripción completa
         solo de las que de verdad encajan con lo que acaba de decir.
         """
-        registro = list(self._registry.values())
+        registro = list(self.disponibles()) or list(self._registry.values())
         if not registro:
             return "sin herramientas"
         q = _norm_tokens(consulta)

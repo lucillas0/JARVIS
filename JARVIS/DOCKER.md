@@ -157,6 +157,55 @@ Listar carpetas no tiene lista blanca: con el token se recorre el share entero.
 eso cualquiera con el token se bajaría el `.env` con todas las claves de API.
 Por eso `/app/brain/.env` devuelve 403 aunque tenga el token.
 
+### Jarvis en un servidor: lo que cambia
+
+Un NAS no es un escritorio, y el código se dio cuenta:
+
+- **El prompt es otro.** El de escritorio iba entero (912 palabras) con reglas
+  de Spotify, ventanas, teclas globales, ver la pantalla, VirtualBox, campus y
+  el puente de Discord. En un servidor no se pueden hacer, y no eran ruido
+  inofensivo: el modelo las leía, veía que preguntabas por un fichero y
+  contestaba con lo que esperaba de un escritorio en vez de usar la
+  herramienta. El de servidor son 608 palabras, con un bloque que sí explica
+  dónde está y qué puede hacer.
+- **27 herramientas no se ofrecen al modelo** en Linux: las de ventanas,
+  teclas multimedia, Defender, VirtualBox y las que abren PowerShell para
+  enumerar cámaras. Se siguen viendo en `/api/tools` con `disponible: false`
+  y el motivo, para que se pueda comprobar. Las otras 82 funcionan.
+- **`list_dir` entra siempre** en el catálogo del servidor, y `open_app`,
+  `open_file` y `vbox_list` salen: no tienen sentido ahí y el modelo elegía
+  antes ellas que mirar el NAS.
+- **El resultado de las herramientas de datos llega al modelo.** Las que
+  devuelven datos (leer un fichero, listar, un diagnóstico) pasan por una ronda
+  de razonamiento. Si una se queda fuera de esa lista, la herramienta se
+  ejecuta, se traga el resultado y el modelo contesta sin verlo. Pasó con
+  `analizar_archivo`, y el síntoma era que pedías leer un fichero y te decía
+  que no tenía permisos, siendo verdad que el fichero se leía bien.
+
+Se comprueba desde fuera sin necesidad de credenciales:
+
+```sh
+curl -s http://IP:PUERTO/health | python -m json.tool
+# -> "herramientas": {"total": 109, "disponibles": 82, "no_disponibles": 27}
+# -> "providers": "Gemini, OpenRouter"
+```
+
+### Si dice «sin modelos disponibles»
+
+No le pasa al modelo. Pasa cuando el sondeo de internet que se hacía **antes**
+de elegir proveedor no contestaba: se consultaba un único host y, si ese host
+no llegaba, la lista de proveedores se quedaba vacía sin probar ninguno, aunque las
+tres claves fueran válidas. En un NAS basta con que el DNS del router resuelva
+otra cosa.
+
+Ahora lo que decide es **qué claves hay**, no si un host contesta, y el sondeo
+se ha movido a un host neutro. Si aun así falla, el registro dice qué se
+intentó y por qué:
+
+```sh
+docker logs jarvis 2>&1 | grep -A3 "Todos los proveedores fallaron"
+```
+
 ---
 
 ## Ficheros

@@ -139,6 +139,125 @@ def _profile_block() -> str:
 # --------------------------------------------------------------------------- #
 # Inicialización (startup)
 # --------------------------------------------------------------------------- #
+def _reglas_de_acciones(tools_desc: str, virtualbox: bool = True) -> str:
+    """El formato JSON con el que se piden herramientas.
+
+    Va aparte porque es igual en todos los casos: no depende de si hay un
+    escritorio detrás, solo de qué herramientas hay disponibles.
+    """
+    return (
+        "REGLAS DE ACCIONES (CRÍTICO):\n"
+        "Cuando la petición requiera REALIZAR una acción o consultar un dato\n"
+        "real del sistema, responde ÚNICAMENTE con JSON en este formato:\n"
+        '{"reply": "frase para el usuario", "tool": "nombre_herramienta", "parameters": {...}}\n'
+        "Ese JSON va en TEXTO PLANO dentro de tu mensaje. PROHIBIDO usar\n"
+        "llamadas a función nativas o bloques especiales de herramientas.\n"
+        + ("Credenciales del invitado VirtualBox YA configuradas en el servidor:\n"
+           "usa vbox_exec/read/write directamente sin pedir usuario ni contraseña.\n"
+           if virtualbox else "") +
+        "Jamás inventes salidas de comandos, IPs, estados o datos del sistema:\n"
+        "si necesitas un dato real, usa la herramienta; si no puedes obtenerlo,\n"
+        "dilo en vez de rellenar.\n"
+        "Cuando uses una herramienta, CUENTA lo que te ha devuelto, con sus\n"
+        "datos exactos. Si te ha dado el contenido de un fichero, reproduce ese\n"
+        "contenido: el señor te lo ha pedido para eso. No respondas «no puedo\n"
+        "verlo» ni «no tengo acceso» sobre algo que la herramienta ya te ha\n"
+        "dado, porque es mentira y el señor lo comprueba.\n"
+        "Si es solo conversación o información, responde texto normal (sin JSON).\n"
+        "Elige entre estas herramientas (si la acción no encaja, no uses tool y pide "
+        "más datos o explica que no puedes):\n"
+        f"{tools_desc}\n"
+        "No ejecutes acciones 'sensibles' tú mismo: siempre se confirma contigo/voz.\n"
+    )
+
+
+def _sin_escritorio() -> bool:
+    """¿Detrás hay un escritorio de verdad, o esto es un servidor?
+
+    OJO con el nombre: ya existe otro _es_servidor() más abajo, que usa
+    /api/mode para decidir LITE o FULL y mira /.dockerenv. Este es otro
+    asunto: no pregunta por el modo de la pizarra, sino por si las reglas de
+    escritorio del prompt son ciertas. Con el mismo nombre, el segundo
+    definition se comía al primero y /api/mode empezaba a decidir con el
+    criterio equivocado.
+
+    No mira solo JARVIS_SERVER_MODE porque en un LITE dentro de Windows las
+    reglas de escritorio tampoco valen. Lo que decide es si hay una sesión de
+    escritorio detrás, que es lo único que las hace ciertas.
+    """
+    if os.environ.get("JARVIS_SERVER_MODE", "").strip().lower() in (
+            "1", "true", "si", "sí", "yes"):
+        return True
+    if os.name != "nt":
+        return True
+    if os.environ.get("SESSIONNAME", "").upper() in ("", "NONE", "SERVICES"):
+        return True
+    return False
+
+
+def _prompt_de_servidor(tools_desc: str) -> str:
+    """El mismo JARVIS, pero en un NAS o en modo servidor.
+
+    No es solo "la misma versión sin unas líneas": el prompt entero estaba
+    escrito para un escritorio. Aquí sobraban todas: Spotify, ventanas, teclas
+    globales, ver la pantalla, VirtualBox, campus y el puente de Discord. En un
+    servidor no se pueden hacer, y esas reglas no eran ruido inofensivo: el
+    modelo las leía, veía que el señor preguntaba por un fichero del NAS y
+    contestaba con lo que esperaba de un escritorio en vez de llamar a la
+    herramienta. De ahí las respuestas inventadas del tipo "No pude leer la
+    portada de as".
+
+    Se mantiene todo lo que es el personaje y la memoria, y se sustituye el
+    bloque de capacidades por lo que aquí sí es cierto.
+    """
+    return (
+        "Eres JARVIS, el mayordomo digital del señor: preciso, formal y eficiente,\n"
+        "con ironía británica seca. Respondes SIEMPRE en español.\n\n"
+        "CÓMO HABLAS (OBLIGATORIO, sin excepciones):\n"
+        "- Trato: «señor». Jamás «jefe», «colega», «amigo» ni diminutivos.\n"
+        "- Frases cortas y sobrias, sin florituras, sin emojis y sin\n"
+        "  exclamaciones innecesarias.\n"
+        "- Anuncias y confirmas: «De inmediato, señor.» / «Enseguida.» /\n"
+        "  «Hecho.» / «Completado.» / «Como ordene.»\n"
+        "- Ironía británica calibrada por el medidor de humor del señor:\n"
+        + _humor_line() +
+        "- Ofreces continuidad solo si aporta: «¿Algo más, señor?»\n"
+        "- Jamás rompes el personaje ni hablas de modelos, prompts o sistema.\n\n"
+        "EL SEÑOR (memoria personal: úsala de forma VISIBLE, no genérica):\n"
+        "  Llama al señor por su nombre en saludos y cierres importantes\n"
+        "  (combínalo con «señor»: «Dígame, Lucas…», «A su servicio, Lucas»).\n"
+        "  Cuando un dato suyo encaje, apóyate en él en vez de abstracto.\n"
+        + _profile_block() +
+        "\nDÓNDE ESTÁS (OBLIGATORIO, no lo olvides):\n"
+        "- Corres en un SERVIDOR, dentro de un contenedor. No hay escritorio,\n"
+        "  ni pantalla, ni ventanas, ni ratón, ni teclado que pulsar.\n"
+        "- Tu trabajo es PENSAR: leer ficheros, buscar, investigar, decidir y\n"
+        "  explicar. La parte gráfica la pone el señor, en su navegador.\n"
+        "- Los ficheros del NAS están montados en SOLO LECTURA. Puedes leerlos,\n"
+        "  analizarlos y responder por su contenido, pero NO escribirlos.\n"
+        "- Si te piden algo que necesita un escritorio, dilo con naturalidad\n"
+        "  en vez de fingir que lo has hecho.\n\n"
+        "CAPACIDADES:\n"
+        "- Leer y analizar ficheros del NAS y del servidor: PDF, Word, Excel,\n"
+        "  código, texto, imágenes. Con analizar_archivo y list_dir. Ante\n"
+        "  cualquier duda sobre un fichero, USA la herramienta: nunca inventes\n"
+        "  su contenido ni contestes de memoria lo que hay dentro.\n"
+        "- Buscar en web/noticias y consultar el clima.\n"
+        "  Al INVESTIGAR: busca con web_search_results, lee 2-3 enlaces con\n"
+        "  web_fetch, contrasta y responde con lo hallado citando la fuente.\n"
+        "  Si un enlace falla, prueba el siguiente sin rendirte al primero.\n"
+        "  MODO INVESTIGACIÓN (si lo piden): OBLIGATORIO usar herramientas,\n"
+        "  prohibido responder de memoria en temas de actualidad o datos.\n"
+        "- Tu puesto de mando: http://127.0.0.1:8000/config\n"
+        "- Recordar conversaciones largas y consultar lo indexado.\n\n"
+        "SIGUE EL HILO (OBLIGATORIO):\n"
+        "- Si el señor pregunta por algo de lo que acabáis hablando, sigue con\n"
+        "  ese tema. No cambies de tema ni preguntes de qué habla: ya lo dijo.\n"
+        "- Si dudas de qué se refiere, contesta por lo más reciente.\n\n"
+        + _reglas_de_acciones(tools_desc, virtualbox=False)
+    )
+
+
 def _build_system_prompt(consulta: str = "") -> str:
     # Solo se describen enteras las herramientas que pueden encajar con lo que
     # acaba de decir. Con las 108 siempre, el prompt no cabia en el limite de
@@ -150,6 +269,17 @@ def _build_system_prompt(consulta: str = "") -> str:
             tools_desc = brain.tools.describe_for_prompt()
     else:
         tools_desc = "sin herramientas"
+    # En un NAS, un contenedor o el modo LITE, el prompt entero de escritorio
+    # no solo sobraba: actively estorbaba, porque el modelo leía reglas de
+    # Spotify, ventanas y VirtualBox y contestaba en vez de usar una
+    # herramienta. Ver _prompt_de_servidor.
+    if _sin_escritorio():
+        return _prompt_de_servidor(tools_desc)
+    return _prompt_de_escritorio_real(tools_desc)
+
+
+def _prompt_de_escritorio_real(tools_desc: str) -> str:
+    """El prompt de siempre, para cuando hay un escritorio detrás."""
     return (
         "Eres JARVIS, el mayordomo digital del señor: preciso, formal y eficiente,\n"
         "con ironía británica seca. Respondes SIEMPRE en español.\n\n"
@@ -227,22 +357,7 @@ def _build_system_prompt(consulta: str = "") -> str:
         "ven, conecta, llámame, métete…—, responde EXACTAMENTE [[VOICE_JOIN]]\n"
         "sin más texto. Si pide SALIR o colgar de la voz, responde EXACTAMENTE\n"
         "[[VOICE_LEAVE]] sin más texto. En otros canales ignora esta regla.\n\n"
-        "REGLAS DE ACCIONES (CRÍTICO):\n"
-        "Cuando la petición requiera REALIZAR una acción sobre el sistema, responde "
-        "ÚNICAMENTE con JSON en este formato:\n"
-        '{"reply": "frase para el usuario", "tool": "nombre_herramienta", "parameters": {...}}\n'
-        "Ese JSON va en TEXTO PLANO dentro de tu mensaje. PROHIBIDO usar\n"
-        "llamadas a función nativas o bloques especiales de herramientas.\n"
-        "Credenciales del invitado VirtualBox YA configuradas en el servidor:\n"
-        "usa vbox_exec/read/write directamente sin pedir usuario ni contraseña.\n"
-        "Jamás inventes salidas de comandos, IPs, estados o datos del sistema:\n"
-        "si necesitas un dato real, usa la herramienta; si no puedes obtenerlo,\n"
-        "dilo en vez de rellenar.\n"
-        "Si es solo conversación o información, responde texto normal (sin JSON).\n"
-        "Elige entre estas herramientas (si la acción no encaja, no uses tool y pide "
-        "más datos o explica que no puedes):\n"
-        f"{tools_desc}\n"
-        "No ejecutes acciones 'sensiples' tú mismo: siempre se confirma contigo/voz.\n"
+        + _reglas_de_acciones(tools_desc, virtualbox=True)
     )
 
 
@@ -3664,6 +3779,10 @@ def _handle(text: str, input_mode: str) -> str:
         if final is not None:
             return final
 
+    # Si no hubo plan de herramienta pero la respuesta venía en formato JSON
+    # ("tool" vacio), al señor le llega el JSON entero. Se desenvuelve aquí.
+    reply = _texto_del_plan(reply) or reply
+
     if result.get("fallback") and result.get("provider") != "none":
         # Solo decimos "sin conexión" si de verdad no hay red; si el modelo
         # local respondió con internet presente, no es una desconexión.
@@ -3715,9 +3834,30 @@ def _parse_tool_plan(reply: str):
 
 
 # Tools que devuelven DATOS (el modelo razona sobre ellos y puede encadenar).
+#
+# Aquí NO se puede dejar ninguna fuera por descuido. Una tool que no está en
+# esta lista se ejecuta, se traga el resultado y vuelve con una frase genérica
+# sin enseñarle nada al modelo: el modelo contesta sin ver el dato y se lo
+# inventa. Pasó con analizar_archivo y list_dir, que son justo las dos que
+# hacen falta en un NAS: el señor pedía leer un fichero del share, JARVIS lo
+# leía bien, y contestaba «No tengo permisos para acceder a ese archivo» porque
+# el texto nunca llegó al modelo. La herramienta funcionaba; lo que no funcionaba
+# era enseñarle el resultado.
 _DATA_TOOLS = {"vbox_exec", "vbox_read_file", "vbox_info", "vbox_list",
                "web_fetch", "web_search_results", "web_frontpage",
-               "write_script", "run_script"}
+               "write_script", "run_script",
+               # Ficheros: el contenido, el listado y el análisis son el dato.
+               "analizar_archivo", "list_dir", "download_file", "move_file",
+               # Estado real del sistema: si el modelo no lo ve, lo inventa.
+               "system_diagnose", "health_overview", "git_status",
+               "git_log", "git_diff", "gpu_status", "camara_estado",
+               "perf_advisor", "sec_audit", "cleanup_disk", "list_tasks",
+               # Integraciones que devuelven datos del-campus y del móvil.
+               "campus_courses", "campus_grades", "campus_search",
+               "campus_notas", "campus_deadlines",
+               "mobile_dispositivos", "mobile_apps",
+               # Análisis de seguridad de ficheros.
+               "vt_scan_file", "vt_scan_url"}
 
 
 def _compact_result(tool_name: str, result: dict, limit: int = 1500) -> str:
@@ -3727,9 +3867,44 @@ def _compact_result(tool_name: str, result: dict, limit: int = 1500) -> str:
             return str(res.get("output", "") or res.get("error", ""))[:limit]
         if tool_name == "vbox_read_file":
             return str(res.get("content", ""))[:limit]
+        # Un analisis de fichero trae su "resumen" (los trozos que de verdad
+        # importan) mas un monton de estadisticas. Al modelo le sirve el
+        # resumen; las estadisticas solo le hacen gastar contexto.
+        if tool_name == "analizar_archivo":
+            resumen = res.get("resumen")
+            if resumen:
+                partes = [f"{res.get('nombre')} ({res.get('tipo')}, {res.get('tamano')})"]
+                for r in (resumen if isinstance(resumen, list) else [resumen]):
+                    partes.append(f"- {r}")
+                if res.get("aviso"):
+                    partes.append(f"(aviso: {res['aviso']})")
+                return "\n".join(partes)[:limit]
         return json.dumps(res, ensure_ascii=False, default=str)[:limit]
     except Exception:
         return ""
+
+
+def _texto_del_plan(reply: str) -> str:
+    """Saca la frase de una respuesta que viene en formato de plan de tool.
+
+    El modelo contesta con {"reply": ..., "tool": ..., "parameters": ...}
+    incluso cuando ya no quiere usar ninguna herramienta: pone "tool": "" y
+    sigue. _parse_tool_plan lo descarta (no hay tool) y entonces el JSON
+    entero se iba al chat del señor, llaves incluidas.
+
+    Aquí se desenvuelve: si hay un "reply" dentro, se devuelve solo eso. Si no
+    es JSON, se devuelve tal cual.
+    """
+    try:
+        s = (reply or "").strip()
+        if not s.startswith("{"):
+            return s
+        datos = json.loads(s)
+        if isinstance(datos, dict):
+            return str(datos.get("reply") or "").strip()
+    except Exception:
+        pass
+    return (reply or "").strip()
 
 
 def _run_tool_loop(messages: list, first_plan: dict, is_heavy: bool = False,
@@ -3778,8 +3953,14 @@ def _run_tool_loop(messages: list, first_plan: dict, is_heavy: bool = False,
         except Exception as e:
             log.debug("tool loop: %s", e)
         if not nxt_plan:
-            return (nxt.get("reply", "") or "").strip() or _tool_result_to_frase(
-                tool_name, tool_result)
+            # El modelo contesta con el formato JSON pero sin herramienta, que
+            # es como dice "ya no necesito mas datos, esto es la respuesta".
+            # _parse_tool_plan lo rechaza porque "tool" va vacio, y antes se
+            # devolvia el JSON entero al señor, que leia en el chat:
+            #   {"reply": "El archivo contiene...", "tool": "", ...}
+            # Ahora se desenvuelve y solo sale la frase.
+            return _texto_del_plan(nxt.get("reply", "")) or \
+                _tool_result_to_frase(tool_name, tool_result)
         # La siguiente tool requiere confirmación: se para y se pregunta.
         try:
             tool_def = (brain.tools.list_tools() if brain.tools else [])
@@ -4551,12 +4732,22 @@ async def health():
             _discord["call"] = {"error": str(e)[:150]}
     except Exception as e:
         _discord = {"started": False, "connected": False, "error": str(e)[:200]}
+    # Que parte de las herramientas sirve aqui. En un NAS es util verlo de un
+    # vistazo: si "disponibles" cae, es que algo no se ha montado o falta una
+    # clave, y no que JARVIS este roto.
+    try:
+        _disp = len(brain.tools.disponibles())
+        _total = len(brain.tools._registry or {})
+    except Exception:
+        _disp = _total = 0
     return {"status": "ok",
             "voice": bool(v) and v.engine.is_active,
             "voice_input": bool(v) and v.engine.has_input,
             "voice_output": bool(v) and v.engine.has_output,
             "providers": _providers_str(),
             "screen_mode": Config.SCREEN_ANALYSIS_MODE,
+            "herramientas": {"total": _total, "disponibles": _disp,
+                             "no_disponibles": _total - _disp},
             "discord": _discord,
             "me": _me}
 
@@ -5089,13 +5280,34 @@ async def api_camara_mjpeg(request: Request):
 
 @app.get("/api/tools")
 async def api_tools():
+    """Todas las herramientas, incluidas las que no pueden funcionar aqui.
+
+    Se listan todas para que la forma de la respuesta sea la misma en el
+    escritorio y en un NAS, pero cada una lleva "disponible" y, si no lo es,
+    el motivo. Asi se puede comprobar de un vistazo que funciona el 95% y que
+    lo que falta es por plataforma, no por instalacion.
+    """
     try:
+        motivos = {}
+        try:
+            for t in brain.tools.no_disponibles():
+                motivos[t["name"]] = t.get("motivo", "")
+        except Exception:
+            pass
         names = []
         for t in (brain.tools._registry or {}).values():
-            names.append({"name": t.get("name"), "description": t.get("description", ""),
-                          "parameters": t.get("parameters", {})})
+            n = t.get("name")
+            fila = {"name": n, "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {}),
+                    "disponible": n not in motivos}
+            if n in motivos:
+                fila["motivo"] = motivos[n]
+            names.append(fila)
         names.sort(key=lambda x: x["name"] or "")
-        return {"ok": True, "tools": names}
+        return {"ok": True, "tools": names,
+                "total": len(names),
+                "disponibles": sum(1 for x in names if x["disponible"]),
+                "no_disponibles": sorted(motivos.keys())}
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}
 
