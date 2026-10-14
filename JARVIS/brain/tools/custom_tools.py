@@ -597,3 +597,443 @@ CUSTOM_TOOLS.append({
     "label": "Leyendo el registro del NAS",
     "handler": _nas_logs_handler,
 })
+
+
+# -*- coding: utf-8 -*-
+"""Plugin: domotica con Home Assistant.
+
+Por quÃ© Home Assistant y no el NAS: una Synology no habla con bombillas. Lo
+que habla es Home Assistant, que corre en el mismo NAS por Container Manager y
+expone REST. Es un puente estÃ¡ndar, y por eso este plugin no depende de nada
+concreto: sirve para cualquier marca (Philips Hue, Shelly, Sonoff, Zigbee,
+Matter...), porque todo eso acaba siendo una entidad de Home Assistant.
+
+CÃ³mo se conecta:
+  1. En Home Assistant, perfil (abajo a la izquierda) -> "Tokens de acceso de
+     larga duraciÃ³n" -> Crear token. Se copia UNA vez, Home Assistant no lo
+     vuelve a mostrar.
+  2. Se pone en el .env del proyecto:
+        HA_URL=http://192.168.1.10:8123
+        HA_TOKEN=el-token-que-acabas-de-copiar
+
+El token da control de toda la casa: trÃ¡talo como una contraseÃ±a y no lo
+subas a ningÃºn sitio. Por eso se lee del entorno y no estÃ¡ en este fichero.
+"""
+import json
+import logging
+import os
+import ssl
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+log = logging.getLogger("tools.custom.ha")
+
+_TIMEOUT = 8
+# Igual que con el NAS: si Home Assistant estÃ¡ dormido, se paga UN timeout y
+# las siguientes llamadas responden al momento. Sin esto, cada capa reintentaba
+# y se acumulaban cuatro esperas de 8 s.
+_CORTADO: dict = {"hasta": 0.0, "motivo": ""}
+_COOLDOWN = 60.0
+_CACHE: dict = {"estados": None, "hasta": 0.0}
+
+# Dominios que tocan algo fÃ­sico que se puede romper: una cerradura, una
+# puerta de garaje. Se piden confirmaciÃ³n aunque el resto no la pida.
+_DELICADOS = {"lock", "cover", "valve", "garage"}
+
+
+def _conf() -> dict:
+    url = (os.environ.get("HA_URL") or "").strip().rstrip("/")
+    tok = (os.environ.get("HA_TOKEN") or "").strip()
+    inseguro = (os.environ.get("HA_INSEGURO", "0").strip()
+                not in ("0", "false", "no"))
+    return {"url": url, "token": tok, "inseguro": inseguro}
+
+
+def _contexto() -> ssl.SSLContext | None:
+    c = _conf()
+    if not c["inseguro"]:
+        return None
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _api(ruta: str, datos: dict | None = None) -> dict:
+    """Llamada a la API de Home Assistant."""
+    c = _conf()
+    if not c["url"] or not c["token"]:
+        return {"ok": False, "error": "Home Assistant no estÃ¡ configurado. "
+                "Pon HA_URL y HA_TOKEN en el .env."}
+    if time.time() < _CORTADO["hasta"]:
+        return {"ok": False, "error": f"Home Assistant no responde ahora mismo "
+                f"({_CORTADO['motivo']}). Vuelvo a intentarlo en un minuto."}
+    url = f"{c['url']}/api{ruta}"
+    cuerpo = None
+    cabeceras = {"Authorization": f"Bearer {c['token']}"}
+    if datos is not None:
+        cuerpo = json.dumps(datos).encode("utf-8")
+        cabeceras["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=cuerpo, headers=cabeceras,
+                                 method="POST" if cuerpo else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT,
+                                    context=_contexto()) as r:
+            crudo = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {"ok": False, "error": "el token no vale o ha caducado. "
+                    "Genera otro en el perfil de Home Assistant."}
+        return {"ok": False, "error": f"Home Assistant respondiÃ³ {e.code}"}
+    except Exception as e:
+        _CORTADO["hasta"] = time.time() + _COOLDOWN
+        _CORTADO["motivo"] = str(e)[:60]
+        return {"ok": False, "error": f"no se pudo contactar con Home Assistant: "
+                f"{e}"[:130]}
+    _CORTADO["hasta"] = 0.0
+    try:
+        return {"ok": True, "data": json.loads(crudo)}
+    except Exception:
+        return {"ok": True, "data": crudo}
+
+
+def _estados(forzar: bool = False) -> list:
+    """Todas las entidades, cacheadas 10 s.
+
+    El cache no es una optimizaciÃ³n prematura: leer /api/states en una casa
+    con 300 entidades son 300 KB, y el modelo va a preguntar tres veces seguidas
+    (Â«Â¿estÃ¡ encendida la luz?Â»). Sin cache son tres descargas.
+
+    El error de la API se devuelve, no se convierte en lista vacÃ­a. Antes
+    _estados se tragaba el fallo y devolvÃ­a [], y el modelo veÃ­a "no encuentro
+    eso en casa" cuando lo que pasaba era que el token estaba caducado o
+    Home Assistant estaba parado. Dos cosas distintas con dos arreglo
+    distintos, y se contestaba a la equivocada.
+    """
+    if not forzar and _CACHE["estados"] and time.time() < _CACHE["hasta"]:
+        return _CACHE["estados"]
+    r = _api("/states")
+    if not r["ok"]:
+        _CACHE["estados"] = None
+        _CACHE["hasta"] = 0.0
+        return []
+    _CACHE["estados"] = r["data"] or []
+    _CACHE["hasta"] = time.time() + 10
+    return _CACHE["estados"]
+
+
+def _error_de_la_casa() -> str:
+    """Por quÃ© no hay estados, si no es que no haya casa."""
+    r = _api("/states")
+    return "" if r["ok"] else str(r.get("error") or "")
+
+
+def _bonito(e: dict) -> str:
+    """El nombre que la persona usaria, no light.salon_lamp."""
+    a = e.get("attributes") or {}
+    n = a.get("friendly_name") or e.get("entity_id", "?")
+    est = e.get("state", "?")
+    extra = ""
+    for k in ("current_temperature", "temperature", "brightness", "battery_level"):
+        if k in a:
+            v = a[k]
+            extra = f" ({round(v, 1) if isinstance(v, float) else v})"
+            break
+    if e.get("state") in ("unavailable", "unknown"):
+        est = f"no disponible ({est})"
+    return f"{n}: {est}{extra}"
+
+
+def _sin_acentos(s: str) -> str:
+    return "".join(c for c in s.lower()
+                   if c not in "Ã¡Ã Ã¤Ã¢Ã©Ã¨Ã«ÃªÃ­Ã¬Ã¯Ã®Ã³Ã²Ã¶Ã´ÃºÃ¹Ã¼Ã»Ã±Ã§")
+
+
+# Palabras que dice una persona y el dominio al que se parecen. NO son un
+# filtro: son un empujÃ³n. "Calentador" puede ser un enchufe (switch) o el
+# termostato (climate), segÃºn cÃ³mo lo montÃ³ cada uno, y si se filtra a ciegas
+# el aparato desaparece de la lista y JARVIS contesta que no existe.
+#
+# Sirven para desempatar: "la luz del salÃ³n" es una lÃ¡mpara, no la persiana ni
+# el termostato de al lado. Pero si con el empujÃ³n no sale nada, se busca sin
+# empujÃ³n, que es mejor que decir que no existe.
+PALABRA_A_DOMINIO = {
+    "luz": "light", "lampara": "light", "bombilla": "light",
+    "enchufe": "switch", "interruptor": "switch", "boton": "switch",
+    "persiana": "cover", "cortina": "cover", "toldo": "cover", "porton": "cover",
+    "termostato": "climate", "clima": "climate", "calefaccion": "climate",
+    "aire": "climate", "radiador": "climate", "calentador": "climate",
+    "cerradura": "lock", "candado": "lock", "puerta": "lock",
+    "altavoz": "media_player", "radio": "media_player", "television": "media_player",
+}
+
+
+def _dominio_de(consulta: str) -> str:
+    """El tipo que insinÃºa la palabra, o "" si no dice ninguno."""
+    q = _sin_acentos(consulta or "")
+    for palabra, dom in PALABRA_A_DOMINIO.items():
+        if palabra in q:
+            return dom
+    return ""
+
+
+def _buscar(consulta: str, dominio: str = "", limite: int = 12,
+            _ya_sin_sugerencia: bool = False) -> list:
+    """Encuentra entidades por nombre, sin exigir el entity_id exacto.
+
+    El modelo dice Â«la luz del salÃ³nÂ», no Â«light.salon_lampÂ». Si se le exigiera
+    el identificador exacto no usarÃ­a nunca la herramienta, porque no lo sabe:
+    los identificadores dependen de cÃ³mo se llamÃ³ cada cosa al instalarla.
+    """
+    q = (consulta or "").strip().lower()
+    est = _estados()
+    if not est:
+        return []
+    # Si el seÃ±or no dice de quÃ© tipo pero la palabra lo insinÃºa ("luz",
+    # "persiana"), ese dominio pesa mÃ¡s. NO es un filtro: si con ese peso no
+    # sale nada, se busca sin Ã©l. Filtrar a ciegas hacÃ­a desaparecer
+    # aparatos que sÃ­ estaban, segÃºn cÃ³mo los llamase cada uno al montarlos.
+    #
+    # _ya_sin_sugerencia evita la recursiÃ³n infinita: el respaldo llama a
+    # _buscar con la misma consulta, que volatile a sugerir lo mismo otra vez
+    # y se llamaba a sÃ­ misma hasta reventar la pila. Pasaba con Â«calentadorÂ»,
+    # que sugiere climate, y el calentador de la casa es un switch.
+    sugerido = ("" if (dominio or _ya_sin_sugerencia)
+                else _dominio_de(consulta))
+    if not q and not dominio and not sugerido:
+        return est[:limite]
+
+    def puntua(e: dict) -> int:
+        eid = e.get("entity_id", "").lower()
+        dom = eid.split(".")[0]
+        nombre = ((e.get("attributes") or {}).get("friendly_name")
+                  or "").lower()
+        base = -1
+        if dominio:
+            if dom != dominio.lower():
+                return -1
+            base = 1
+        elif sugerido and dom == sugerido:
+            base = 0          # el tipo que insinÃºa la palabra: delante
+        if not q:
+            return base * 10
+        if nombre == q or eid == q:
+            return 100 + base                 # coincidencia exacta
+        if q in nombre:
+            return 60 - len(nombre) / 100 + base   # cuanto mÃ¡s corto, mejor
+        if q in eid:
+            return 40 + base
+        # A veces el modelo da la palabra suelta ("salÃ³n" por "salon").
+        for parte in _sin_acentos(q).split():
+            if len(parte) > 2 and (parte in _sin_acentos(nombre)
+                                   or parte in _sin_acentos(eid)):
+                return 20 + base
+        return -1
+
+    conp = [(puntua(e), e) for e in est]
+    conp = [(p, e) for p, e in conp if p >= 0]
+    conp.sort(key=lambda x: -x[0])
+    # "Priorizar" no basta con subir la puntuacion: la persiana del salon
+    # seguia saliendo al lado de las luces, solo que por debajo. Si la palabra
+    # insinua un tipo y hay algo de ese tipo, se queda solo con ese tipo. Si no
+    # hay nada de ese tipo, se busca sin el empujon, que es mejor que decir
+    # que no existe.
+    # Si la frase ENTRERA aparece tal cual en el nombre de algo, eso es lo que
+    # se ha pedido. Las coincidencias flojas (compartir una palabra suelta)
+    # sobran: "luz de lectura" es la lÃ¡mpara de lectura, y no la luz del salÃ³n
+    # solo porque las dos tienen "luz". Antes salÃ­an las dos y JARVIS tenÃ­a
+    # que preguntar cuÃ¡l de dos para algo que estaba clarÃ­simo.
+    def descartar_flojas(pares):
+        fuertes = [e for p, e in pares if p >= 40]
+        return (fuertes or [e for _, e in pares])[:limite]
+
+    if not dominio and sugerido:
+        del_sugerido = [(p, e) for p, e in conp
+                        if e.get("entity_id", "").startswith(sugerido + ".")]
+        if del_sugerido:
+            return descartar_flojas(del_sugerido)
+        return _buscar(consulta, "", limite, _ya_sin_sugerencia=True)
+    return descartar_flojas(conp)
+
+
+# ======================================================================
+# Herramientas
+# ======================================================================
+def _domotica_ver_handler(params: dict) -> dict:
+    """CÃ³mo estÃ¡ algo."""
+    ent = _buscar(params.get("que", "") or params.get("nombre", ""),
+                  params.get("dominio", "") or "")
+    if not ent:
+        # Igual que en domotica_accion: primero se mira si el problema es que
+        # no hay casa configurada, y si no, que no existe ese aparato.
+        fallo = _error_de_la_casa()
+        if fallo:
+            return {"ok": False, "error": fallo}
+        return {"ok": False, "error":
+                "No encuentro eso en casa. Diga el nombre tal como lo ve en "
+                "la app, o el tipo (luz, enchufe, sensor...)."}
+    return {"ok": True, "encontrado": [_bonito(e) for e in ent],
+            "total": len(ent), "ids": [e["entity_id"] for e in ent[:6]]}
+
+
+def _domotica_lista_handler(params: dict) -> dict:
+    """QuÃ© hay en casa, por tipo."""
+    dom = (params.get("dominio", "") or "").strip().lower()
+    est = _estados()
+    if not est:
+        return {"ok": False, "error": "Home Assistant no contesta. Â¿EstÃ¡ "
+                "arrancado y el token es vÃ¡lido?"}
+    if not dom:
+        dominios: dict = {}
+        for e in est:
+            d = e.get("entity_id", "").split(".")[0] or "?"
+            dominios[d] = dominios.get(d, 0) + 1
+        return {"ok": True, "total": len(est),
+                "dominios": sorted(dominios.items(), key=lambda x: -x[1])[:18]}
+    sel = [e for e in est if e.get("entity_id", "").startswith(dom + ".")
+           and e.get("state") not in ("unavailable",)]
+    return {"ok": True, "dominio": dom, "total": len(sel),
+            "entidades": [_bonito(e) for e in sel[:30]]}
+
+
+def _domotica_accion_handler(params: dict) -> dict:
+    """Enciende, apaga, ajusta. Lo que se puede tocar en una casa."""
+    que = (params.get("que") or params.get("nombre") or "").strip()
+    accion = _sin_acentos(params.get("accion") or "").strip()
+    if not que or not accion:
+        return {"ok": False, "error": "Falta quÃ© o quÃ© acciÃ³n."}
+
+    cands = _buscar(que, params.get("dominio", "") or "")
+    if not cands:
+        # Antes de decir "no encuentro eso", se comprueba si el problema es
+        # que no hay casa configurada. Sin esto, un token caducado se
+        # contestaba como si la casa no tuviera esa lÃ¡mpara.
+        fallo = _error_de_la_casa()
+        if fallo:
+            return {"ok": False, "error": fallo}
+        return {"ok": False, "error":
+                "No encuentro eso en casa. Diga el nombre tal como lo ve en "
+                "la app, o el tipo (luz, enchufe, persiana, termostato...)."}
+    if len(cands) > 1 and not params.get("entity_id"):
+        return {"ok": False, "error":
+                f"Eso son {len(cands)} cosas: "
+                + ", ".join(_bonito(e) for e in cands[:6])
+                + ". Diga cuÃ¡l.", "candidatos": [e["entity_id"] for e in cands[:6]]}
+    ent = cands[0]
+    eid = ent["entity_id"]
+    dom = eid.split(".")[0]
+
+    # Una cerradura o una puerta de garaje se pide antes. Encender una luz no.
+    if dom in _DELICADOS and _sin_acentos(accion) in (
+            "abrir", "abre", "abrirlo", "cerrar", "cierra", "lock",
+            "bloquea", "unlock", "desbloquea", "desbloquear") \
+            and not params.get("confirmado"):
+        return {"ok": False, "confirmacion_requerida": True,
+                "error": f"{_bonito(ent)} necesita su confirmaciÃ³n, seÃ±or. "
+                         f"Â¿La abro?",
+                "entity_id": eid, "accion": accion}
+
+    # Atajos a los servicios de cada dominio. El modelo dice "enciende" y no
+    # "turn_on"; se traduce aquÃ­ en vez de obligarle a saber la API.
+    #
+    # Se comparan en minÃºsculas y SIN tildes, porque el modelo escribe
+    # "abrir" unas veces y "abre" otras, y con acentos otros. Antes la lista
+    # tenÃ­a "abre" y no "abrir", asÃ­ que "abrir" pasaba de largo y se
+    # mandaba tal cual a Home Assistant: POST /api/services/lock/abrir, que
+    # no existe, y un 404 sin explicaciÃ³n.
+    ENCIENDE = ("enciende", "on", "prende", "arranca", "abre", "abrir",
+                "abrelo", "activar", "activa")
+    APAGA = ("apaga", "off", "para", "cierra", "cerrar", "desactiva",
+             "desactiva", "apagalo", "baja")
+    ALIERNA = ("alterna", "toggle", "invierte")
+    if accion in ENCIENDE:
+        servicio = {"light": "turn_on", "switch": "turn_on",
+                    "fan": "turn_on", "humidifier": "turn_on",
+                    "media_player": "turn_on", "input_boolean": "turn_on",
+                    "cover": "open_cover", "lock": "unlock",
+                    "vacuum": "start"}.get(dom, "turn_on")
+    elif accion in APAGA:
+        servicio = {"light": "turn_off", "switch": "turn_off",
+                    "fan": "turn_off", "humidifier": "turn_off",
+                    "media_player": "turn_off", "input_boolean": "turn_off",
+                    "cover": "close_cover", "lock": "lock",
+                    "vacuum": "return_to_base"}.get(dom, "turn_off")
+    elif accion in ALIERNA:
+        servicio = "toggle"
+    elif accion in ("bloquea", "block", "lock"):
+        servicio = "lock"
+    elif accion in ("desbloquea", "desbloquear", "unlock"):
+        servicio = "unlock"
+    else:
+        servicio = accion
+
+    datos: dict = {"entity_id": eid}
+    # ParÃ¡metros opcionales: brillo, temperatura, posiciÃ³n.
+    for k in ("brightness_pct", "brightness", "temperature", "position",
+              "hvac_mode", "percentage", "volume_level"):
+        v = params.get(k)
+        if v is None or v == "":
+            continue
+        try:
+            datos[k] = int(v) if k in ("brightness", "position",
+                                       "percentage") else (
+                float(v) if k == "temperature" else v)
+        except (TypeError, ValueError):
+            continue
+
+    r = _api(f"/services/{dom}/{servicio}", datos)
+    if not r["ok"]:
+        return {"ok": False, "error": r["error"]}
+    _estados(forzar=True)          # la cache ya no vale
+    return {"ok": True, "hecho": f"{_bonito(ent)} -> {accion}",
+            "entity_id": eid, "servicio": f"{dom}.{servicio}"}
+
+
+CUSTOM_TOOLS.append({
+    "name": "domotica_estado",
+    "risk_level": "low",
+    "requires_confirmation": False,
+    "parameters": {"que": "str, el nombre tal como lo dices (ej: 'luz del salÃ³n')",
+                   "dominio": "str opcional: light, switch, sensor, climate, cover..."},
+    "description": "CÃ³mo estÃ¡ algo en casa (luz, enchufe, sensor, clima, "
+                   "persiana). Ãšsala SIEMPRE que pregunten si algo estÃ¡ "
+                   "encendido, apagado, abierto o a quÃ© temperatura. No lo "
+                   "adivines: di el nombre como lo dirÃ­a el seÃ±or.",
+    "label": "Mirando la domÃ³tica",
+    "handler": _domotica_ver_handler,
+})
+
+CUSTOM_TOOLS.append({
+    "name": "domotica_lista",
+    "risk_level": "low",
+    "requires_confirmation": False,
+    "parameters": {"dominio": "str opcional: light, switch, sensor, climate, "
+                             "cover, lock. Sin Ã©l, quÃ© hay en casa"},
+    "description": "QuÃ© dispositivos hay en casa. Sin dominio dice cuÃ¡ntos hay "
+                   "de cada tipo; con dominio (light, switch, sensor...) lista "
+                   "los de ese tipo. Ãšsala si no sabes cÃ³mo se llama algo.",
+    "label": "Listando la domÃ³tica",
+    "handler": _domotica_lista_handler,
+})
+
+CUSTOM_TOOLS.append({
+    "name": "domotica_accion",
+    "risk_level": "medium",
+    "requires_confirmation": False,
+    "parameters": {"que": "str, el nombre de la cosa",
+                   "accion": "str: enciende, apaga, alterna, o el servicio "
+                             "exacto (turn_on, set_temperature, open_cover)",
+                   "brightness_pct": "int opcional, 0-100 para luces",
+                   "temperature": "num opcional, para el clima",
+                   "confirmado": "bool, solo si el seÃ±or ya ha dicho que sÃ­"},
+    "description": "Enciende, apaga o ajusta algo en casa. Nombres: enciende, "
+                   "apaga, alterna. Con brightness_pct se regula la luz y con "
+                   "temperature el termostato. Las cerraduras y las persianas "
+                   "piden confirmaciÃ³n: si la pide, pregunta al seÃ±or y vuelve "
+                   "a llamarla con confirmado=true.",
+    "label": "Actuando sobre la domÃ³tica",
+    "handler": _domotica_accion_handler,
+})
+

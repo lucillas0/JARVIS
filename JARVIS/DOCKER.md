@@ -208,6 +208,57 @@ docker logs jarvis 2>&1 | grep -A3 "Todos los proveedores fallaron"
 
 ---
 
+## Domotica: Home Assistant en el mismo NAS
+
+Una Synology no habla con bombillas. Lo que habla es **Home Assistant**, que
+corre en el mismo NAS por Container Manager y expone una API REST estándar.
+Por eso este plugin no depende de ninguna marca: sirve para Philips Hue,
+Shelly, Sonoff, Zigbee o Matter, porque todo eso acaba siendo una entidad de
+Home Assistant.
+
+| Herramienta | Qué hace |
+|---|---|
+| `domotica_estado` | Cómo está algo: encendida, apagada, a qué temperatura, abierta. |
+| `domotica_lista` | Qué hay en casa. Sin dominio, cuenta por tipo. |
+| `domotica_accion` | Enciende, apaga, regula el brillo o la temperatura. |
+
+### Montarlo
+
+1. En Home Assistant, perfil (abajo a la izquierda) → **Tokens de acceso de
+   larga duración** → Crear token. Se copia una vez; Home Assistant no lo
+   vuelve a mostrar.
+2. En el `.env` del proyecto:
+
+```ini
+HA_URL=http://192.168.1.10:8123
+HA_TOKEN=el-token-que-acabas-de-copiar
+HA_INSEGURO=0        # ponlo a 1 solo si usas un certificado autofirmado
+```
+
+### Dos decisiones que no son óbvias
+
+**Habla como una persona, no como la API.** El modelo dice «enciende la luz del
+salón», y el `entity_id` puede ser `light.salon_luz_principal` o como lo
+llamara cada uno al instalarlo. El plugin busca por el nombre que sale en la
+app, entiende que «luz» es un tipo y no la persiana de al lado, y traduce
+«enciende» a `light.turn_on» y «abre» a `cover.open_cover`.
+
+**Las cerraduras y las persianas piden confirmación.** Encender una bombilla no.
+Una puerta de garaje, sí: el plugin devuelve `confirmacion_requerida` y JARVIS
+pregunta. Si el señor dice que sí, se vuelve a llamar con `confirmado: true`.
+
+### Lo que dice si algo falla
+
+No contesta «no encuentro eso» cuando lo que pasa es que el token caducó o que
+Home Assistant está parado. Son dos cosas distintas y cada una tiene su
+arreglo, así que se distinguen: primero se pregunta si la casa contesta, y solo
+después se busca el aparato.
+
+Cuando Home Assistant no responde se paga **un** timeout de 8 s y las
+siguientes llamadas responden en 0 ms durante un minuto, igual que con el NAS.
+
+---
+
 ## Ficheros
 
 | Fichero | Para qué |
@@ -260,6 +311,8 @@ Los que vienen de serie:
   revisarlo, señor» y nada más.
 - **El NAS.** Las cuatro de arriba, sin dependencias: la API de DSM es HTTP y
   JSON, y meter una librería por eso añadiría seis paquetes a la imagen.
+- **Domotica.** `domotica_estado`, `domotica_lista` y `domotica_accion`, contra
+  la API de Home Assistant. Sin dependencias también.
 
 El sistema **se amplía en caliente**: `custom_tools.py` se carga solo al
 arrancar, y el reparador lo vuelve a leer sin reiniciar.

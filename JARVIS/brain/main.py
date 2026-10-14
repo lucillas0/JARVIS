@@ -3862,7 +3862,11 @@ _DATA_TOOLS = {"vbox_exec", "vbox_read_file", "vbox_info", "vbox_list",
                # traga el resultado y el modelo contesta sin verlo, que es
                # justo el fallo que se corrigio arriba para analisar_archivo.
                "agenda_de_hoy", "correo_sin_leer",
-               "nas_espacio", "nas_salud", "nas_contenedores", "nas_registro"}
+               "nas_espacio", "nas_salud", "nas_contenedores", "nas_registro",
+               # Domotica: leer el estado de un aparato es el dato; accionarlo
+               # tambien, porque si no el modelo contesta "hecho" sin saber si
+               # se ha encendido o no.
+               "domotica_estado", "domotica_lista", "domotica_accion"}
 
 
 def _compact_result(tool_name: str, result: dict, limit: int = 1500) -> str:
