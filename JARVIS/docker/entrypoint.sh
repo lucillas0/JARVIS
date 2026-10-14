@@ -62,7 +62,15 @@ if [ "$PUID" != "0" ] || [ "$PGID" != "0" ]; then
   chown -R "$PUID:$PGID" /app/brain/db 2>/dev/null || \
     aviso "no se ha podido hacer chown de /app/brain/db; se queda 0777."
   if [ -d /data ]; then
-    chown "$PUID:$PGID" /data 2>/dev/null || true
+    # chown -R y NO chown a secas. /data es un volumen: Docker lo crea como
+    # root, y si el contenedor arranco alguna vez sin PUID (por ejemplo en una
+    # prueba, o si alguien lo levanto a mano antes de ajustar el .env) el
+    # jarvis.db de dentro se queda de root. Con chown simple, el usuario nuevo
+    # abre su propia base y se topa con
+    #     sqlite3.OperationalError: attempt to write a readonly database
+    # al arrancar, y el contenedor se muere con codigo 3 sin dar mas pistas.
+    chown -R "$PUID:$PGID" /data 2>/dev/null || \
+      aviso "no he podido dar /data al usuario $PUID; revisa los permisos del volumen."
   fi
 
   exec python -c '

@@ -624,10 +624,24 @@ def auto_detect() -> list:
         found.append(report("health:config", e, "leyendo Config"))
     try:
         import socket as _sk
-        s = _sk.create_connection(("127.0.0.1", 8000), timeout=2)
+        # El puerto se saca de Config y no se escribe a fuego. Con el 8000
+        # puesto aqui, quien arrancase en otro puerto (un test, un NAS con
+        # JARVIS_PUERTO=9000, dos instancias) se comia un "Puerto 8000 sin
+        # escucha" cada vez que pasaba el revisor, y como el sintoma se repite
+        # el aviso se queda en la cola para siempre.
+        #
+        # Ojo: BRAIN_PORT vive dentro de la clase Config, no como nombre suelto
+        # en el modulo. Importarlo directo era un ImportError.
+        puerto = 8000
+        try:
+            from config import Config as _Cfg
+            puerto = int(getattr(_Cfg, "BRAIN_PORT", 8000) or 8000)
+        except Exception:
+            pass
+        s = _sk.create_connection(("127.0.0.1", puerto), timeout=2)
         s.close()
     except Exception as e:
-        found.append(report("health:brain-port", f"Puerto 8000 sin escucha: {e}",
+        found.append(report("health:brain-port", f"Puerto {puerto} sin escucha: {e}",
                             "brain caído o arrancando"))
     return found
 

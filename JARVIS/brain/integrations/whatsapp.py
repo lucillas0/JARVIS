@@ -17,10 +17,15 @@ def app_running() -> bool:
     # La app moderna corre como WhatsApp.Root.exe (antes WhatsApp.exe).
     for img in ("WhatsApp.Root.exe", "WhatsApp.exe"):
         try:
+            # tasklist escribe en la pagina de codigos de la consola, no en
+            # UTF-8: sin errors= el hilo lector moria y stdout llegaba a None,
+            # con lo que esta funcion daba False siempre y el puente de
+            # WhatsApp no arrancaba nunca.
             r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {img}"],
                                capture_output=True, text=True, timeout=10,
+                               encoding="utf-8", errors="replace",
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if img in r.stdout:
+            if img in (r.stdout or ""):
                 return True
         except Exception:
             continue

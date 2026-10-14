@@ -1759,10 +1759,23 @@
     } catch { /* noop */ }
   }
 
+  // El brain exige token en el WebSocket (brain/auth.py). En Electron lo pasa
+  // el proceso principal por el preload; en el navegador viene en la variable
+  // que el brain inyecta al servir /board.
+  let _wsQuery = (typeof window !== 'undefined' && window.JARVIS_TOKEN_URL) || '';
   function connect() {
     clearTimeout(reconnectTimer);
+    if (!_wsQuery && window.jarvisNet) {
+      window.jarvisNet.query().then((q) => { _wsQuery = q || ''; abrirWS(); })
+        .catch(() => { reconnectTimer = setTimeout(connect, 3000); });
+      return;
+    }
+    abrirWS();
+  }
+  function abrirWS() {
+    clearTimeout(reconnectTimer);
     try {
-      ws = new WebSocket('ws://127.0.0.1:8000/ws');
+      ws = new WebSocket('ws://127.0.0.1:8000/ws' + _wsQuery);
     } catch {
       reconnectTimer = setTimeout(connect, 3000);
       return;

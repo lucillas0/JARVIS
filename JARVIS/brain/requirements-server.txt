@@ -14,6 +14,12 @@ fastapi>=0.115
 # 3.12 y PyYAML sí tiene rueda, pero el mismo fichero se lee desde un portátil
 # con Python 3.15 y ahí no. Los aceleradores van en requirements-extras.txt.
 uvicorn>=0.30
+# websockets NO es opcional y va aqui a proposito. Uvicorn solo lo trae con el
+# extra [standard], que es justo lo que se quito por el PyYAML; sin esto FastAPI
+# no tiene con que hablar por WebSocket y /ws devuelve 404. La interfaz carga
+# pero no se conecta nunca, y en un NAS no hay manera de saber por que.
+# Aviso de uvicorn sin esto: "No supported WebSocket library detected".
+websockets>=13
 python-dotenv>=1.0
 requests>=2.32
 httpx>=0.27

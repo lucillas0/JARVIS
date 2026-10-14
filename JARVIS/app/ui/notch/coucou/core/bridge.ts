@@ -40,6 +40,7 @@ async function callOrThrow<T>(cmd: string, args?: Record<string, unknown>): Prom
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let tokenQuery: string | null = null;
 type Pending = { resolve: (v: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 type PreviewPending = { resolve: (v: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; name: string };
 const pendientes = new Map<string, Pending>();
@@ -51,8 +52,20 @@ function conecta(): void {
   if (typeof WebSocket === "undefined") return;
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  // El cerebro exige token en el WebSocket (brain/auth.py). El proceso
+  // principal lo pasa por el preload; hasta que llegue se espera aqui, en vez de
+  // abrir una conexion que el servidor iba a cerrar con 4401.
+  if (tokenQuery === null) {
+    const api = (globalThis as any).jarvisNotchNet;
+    if (api && typeof api.query === "function") {
+      api.query().then((q: string) => { tokenQuery = q || ""; conecta(); })
+        .catch(() => { tokenQuery = ""; conecta(); });
+      return;
+    }
+    tokenQuery = "";
+  }
   let current: WebSocket;
-  try { current = new WebSocket(CEREBRO); } catch { reconnectTimer = setTimeout(conecta, 1500); return; }
+  try { current = new WebSocket(CEREBRO + tokenQuery); } catch { reconnectTimer = setTimeout(conecta, 1500); return; }
   socket = current;
   current.onopen = () => { if (socket === current) emiteEvento("jarvis-abierto"); };
   current.onclose = () => {

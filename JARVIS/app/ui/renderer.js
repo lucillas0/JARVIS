@@ -1,4 +1,4 @@
-/* Renderer: orbe Ultron (con post-processing) + línea de voz + WS con el brain. */
+﻿/* Renderer: orbe Ultron (con post-processing) + línea de voz + WS con el brain. */
 import { createOrbScene } from './ultron-orb.js';
 
 const root = document.getElementById('orbRoot');
@@ -429,12 +429,45 @@ function setOrbMode(m) {
   if (orb) orb.setMode(m);
 }
 
-function connect() {
-  clearTimeout(rt);
+// El brain ya no acepta un WebSocket sin token (brain/auth.py). El proceso
+// principal lo lee del fichero de datos y lo pasa por el preload; se pide de
+// forma asincrona y se abre la conexion cuando llega, con un tope de espera
+// para que un brain lento no deje el HUD colgado sin conexion.
+let _netToken = '';
+let _netListo = false;
+
+// En Electron el token lo pasa el proceso principal por el preload. En el
+// navegador NO hay preload, asi que el brain lo inyecta en el HTML de /ui como
+// window.JARVIS_TOKEN_URL (ver _inyecta_token en brain/main.py).
+//
+// Este fichero era el UNO de los seis clientes que solo miraba el preload. Por
+// eso en un navegador (Docker, NAS, modo LITE) abria el WebSocket sin token,
+// el servidor lo rechazaba con 403 y la interfaz se quedaba con "SIN CONEXION
+// CON EL CEREBRO" para siempre: reintentaba cada 3 s y nunca pasaba, porque el
+// token no aparecia por ningun lado. Los otros tres si tienen este respaldo.
+function tokenDesdeLaPagina() {
+  return (typeof window !== 'undefined' && window.JARVIS_TOKEN_URL) || '';
+}
+
+async function conectar() {
+  _netToken = tokenDesdeLaPagina();
+  if (!_netToken && window.jarvisNet) {
+    try { _netToken = (await window.jarvisNet.query()) || ''; }
+    catch { _netToken = ''; }
+  }
+  _netListo = true;
+  abrirSocket();
+}
+function abrirSocket() {
   try {
-    ws = new WebSocket('ws://127.0.0.1:8000/ws');
+    if (!_netToken) {
+      // Sin token no hay nada que reintentar: volver a intentarlo en 3 s daria
+      // el mismo 403. Se dice una vez y se deja.
+      console.error('[JARVIS] Sin token del cerebro: revisa que /ui lo inyecte.');
+    }
+    ws = new WebSocket('ws://127.0.0.1:8000/ws' + _netToken);
   } catch {
-    rt = setTimeout(connect, 3000);
+    rt = setTimeout(_netListo ? abrirSocket : conectar, 3000);
     return;
   }
   ws.onmessage = (e) => {
@@ -529,7 +562,7 @@ function connect() {
   ws.onclose = () => {
     ttClear(false);
     ttSet('SIN CONEXIÓN CON EL CEREBRO', 'busy');
-    rt = setTimeout(connect, 3000);
+    rt = setTimeout(_netListo ? abrirSocket : conectar, 3000);
   };
   ws.onopen = () => {
     // Al reconectar se limpia el aviso. Antes no había onopen y el
@@ -539,4 +572,4 @@ function connect() {
   };
   ws.onerror = () => { /* el onclose ya reintenta */ };
 }
-connect();
+conectar();

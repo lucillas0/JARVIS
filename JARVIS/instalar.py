@@ -375,7 +375,7 @@ _NUCLEO_TEST = (
 
 
 def entorno_completo(venv: Path) -> tuple[bool, list[str]]:
-    """Â¿El entorno tiene lo que el cerebro necesita para arrancar?
+    """¿El entorno tiene lo que el cerebro necesita para arrancar?
 
     Antes no se miraba, y era un agujero gordo: un venv con el Python vivo pero
     sin ni el fastapi pasaba por sano. --reparar decia "ya esta al dia", no
@@ -422,7 +422,7 @@ def estado() -> int:
         return 1
     if estado_venv == "incompleto":
         aviso(f"El entorno esta vivo pero incompleto: {motivo}.")
-        detalle("Por eso el cerebro no arranca aunque el Python sÃ­. Arreglalo con:")
+        detalle("Por eso el cerebro no arranca aunque el Python sí. Arreglalo con:")
         detalle("    python instalar.py --reparar")
         return 1
 
@@ -462,11 +462,11 @@ def reparar() -> int:
     """--reparar: deja la instalacion al dia, y no toca nada si ya lo esta.
 
     Cuatro cosas se miran, y solo se rehace lo que hace falta:
-      Â· que el interprete del entorno arranque (puede haber muerto con una
+      · que el interprete del entorno arranque (puede haber muerto con una
         actualizacion de Python y dejar el venv con buena pinta pero inservible);
-      Â· que esten los paquetes del nucleo, no solo un Python vivo;
-      Â· la version, comparada con JARVIS/VERSION;
-      Â· la huella de las dependencias, por si se anadio algo nuevo.
+      · que esten los paquetes del nucleo, no solo un Python vivo;
+      · la version, comparada con JARVIS/VERSION;
+      · la huella de las dependencias, por si se anadio algo nuevo.
     """
     print()
     paso("Miro que hay puesto...")
@@ -500,6 +500,16 @@ def reparar() -> int:
         return 0
 
     c = compara(puesta, ahora)
+    extras = _extras_del_sello(s)
+    # Los extras se comprueban SIEMPRE, aunque la version y la huella cuadren:
+    # son la unica comprobacion que detecta que se desinstalo algo a mano o que
+    # el testigo se escribio mal.
+    extras_perdidos = extras_faltantes(v, extras)
+    if extras_perdidos:
+        aviso(f"Faltan grupos opcionales: {', '.join(extras_perdidos)}.")
+        detalle("El testigo los da por instalados, pero no lo estan. Los instalo.")
+        return _instalar_extras(False, extras)
+
     if c == 0 and s.get("dependencias") == huella_ahora:
         ok(f"Ya esta al dia (version {ahora}). No toco nada.")
         return 0
@@ -512,8 +522,67 @@ def reparar() -> int:
 
 
 def _extras_del_sello(s: dict) -> list[str]:
-    """Que grupos se instalaron la ultima vez, para no perderlos."""
-    return list(s.get("extras") or [])
+    """Que grupos se instalaron la ultima vez, para no perderlos.
+
+    Si no hay testigo (instalacion anterior a esto), se asumen los que una
+    instalacion normal pondria: en Windows el de escritorio. Antes se devolvia
+    una lista vacia y --reparar se comia el nucleo y nada mas, con lo que la
+    vision se quejaba de que le faltaba mss cada minuto y el escritorio se
+    quedaba sin automatizacion de ventanas.
+    """
+    extras = list(s.get("extras") or [])
+    if not extras and ES_WINDOWS:  # sin testigo: se asume lo de escritorio
+        extras = ["escritorio"]
+    return extras
+
+
+# Un modulo representativo de cada grupo opcional, para poder comprobar si esta
+# de verdad instalado en vez de fiarse solo del testigo.
+MODULOS_EXTRA = {
+    "escritorio": ("win32api", "pywinauto", "comtypes", "mss"),
+    "voz": ("sounddevice",),
+}
+
+_TEST_IMPORTS = (
+    "import importlib.util\n"
+    "faltan = []\n"
+    "for m in {nombres!r}:\n"
+    "    try:\n"
+    "        if importlib.util.find_spec(m) is None:\n"
+    "            faltan.append(m)\n"
+    "    except Exception:\n"
+    "        faltan.append(m)\n"
+    "print(','.join(faltan))\n"
+)
+
+
+def extras_faltantes(venv: Path, extras: list[str]) -> list[str]:
+    """Que grupos opcionales NO estan instalados de verdad.
+
+    El testigo dice lo que se quiso instalar, no lo que esta. Y --reparar se
+    limitaba a version y huella, con lo que daba "ya esta al dia" con el grupo
+    de escritorio entero sin instalar: la vision se quejaba de que no encontraba
+    mss cada minuto y la automatizacion de ventanas no existia. Ahora se
+    comprueba el entorno de verdad.
+    """
+    faltan: list[str] = []
+    try:
+        py = python_del_venv(venv)
+    except RuntimeError:
+        return list(extras)
+    for grupo in extras:
+        nombres = MODULOS_EXTRA.get(grupo)
+        if not nombres:
+            continue
+        codigo, salida = ejecutar(
+            [str(py), "-c", _TEST_IMPORTS.format(nombres=list(nombres))], timeout=120)
+        if codigo != 0:
+            faltan.append(grupo)
+            continue
+        ausentes = [x for x in (salida.strip().splitlines() or [""])[-1].split(",") if x]
+        if ausentes:
+            faltan.append(grupo)
+    return faltan
 
 
 # --- Pasos -------------------------------------------------------------------
@@ -701,7 +770,7 @@ def preguntar_claves(forzar: bool = False) -> None:
     for nombre, etiqueta, pista in CLAVES:
         actual = actuales.get(nombre, "")
         if actual:
-            print(f"  {VERDE}Â·{FIN} {nombre:<22} ya puesta")
+            print(f"  {VERDE}·{FIN} {nombre:<22} ya puesta")
             continue
         if pista:
             detalle(pista)
@@ -866,7 +935,7 @@ def main() -> int:
         return 0
 
     print()
-    print("  J.A.R.V.I.S.  Â·  instalacion")
+    print("  J.A.R.V.I.S.  ·  instalacion")
     print("  " + "-" * 40)
     print()
 

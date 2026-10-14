@@ -12,6 +12,8 @@
   "scripts": {
     "start": "electron .",
     "iconos": "node scripts/generar-iconos.mjs ..",
+    "preload": "node ../tools/generar-preload.cjs",
+    "preex electron": "npm run preload",
 
     "dist": "npm run dist:win",
     "dist:win": "npm run iconos && electron-builder --win nsis --x64",
@@ -42,6 +44,7 @@
       "jarvis-history.js",
       "notch-geometry.js",
       "preload.js",
+      "preload.generado.js",
       "overlay-backend.js",
       "ui/**/*",
       "splash/**/*",

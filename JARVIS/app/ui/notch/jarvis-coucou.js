@@ -11,6 +11,9 @@ import { Bridge, emiteEvento } from "./coucou/_js/core/bridge.js";
 import { State } from "./coucou/_js/core/state.js";
 import { montaMascotas, muestra, sincroniza, montaAvatares, activa, fijaFoco, sustituyeMochiDelSoltar } from "./jarvis-mascotas.js";
 
+// El brain exige token en el WebSocket (brain/auth.py). En el notch lo pide
+// el proceso principal por el preload; el "?" se resuelve solo cuando llega.
+let _qs = "?";
 const CEREBRO = "ws://127.0.0.1:8000/ws";
 const MAIN = "jarvis";
 
@@ -61,7 +64,12 @@ function normaliza(s) {
 
 function conecta() {
   let ws;
-  try { ws = new WebSocket(CEREBRO); } catch (e) { return; }
+  if (_qs === "?" && window.jarvisNotchNet) {
+    window.jarvisNotchNet.query().then((q) => { _qs = q || ''; conecta(); })
+      .catch(() => { _qs = ''; conecta(); });
+    return;
+  }
+  try { ws = new WebSocket(CEREBRO + _qs); } catch (e) { return; }
 
   ws.onclose = () => setTimeout(conecta, 4000);
   ws.onerror = () => { /* onclose reintenta */ };

@@ -62,4 +62,11 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5).status==200 else sys.exit(1)"
 
 ENTRYPOINT ["jarvis-entrypoint"]
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --app-dir /app/brain NO es un detalle: es lo que hace que uvicorn encuentre
+# main.py. El WORKDIR es /app y el modulo esta en /app/brain, asi que sin esto
+# el contenedor responde
+#     "Error loading ASGI app. Could not import module \"main\""
+# y se va con codigo 3. En un NAS eso es un proyecto que se queda reiniciando
+# sin decir por que, y por eso hace falta --app-dir y no solo cambiar el
+# WORKDIR (que dejaria en /app/brain rutas que el entrypoint usa absolutas).
+CMD ["python", "-m", "uvicorn", "main:app", "--app-dir", "/app/brain", "--host", "0.0.0.0", "--port", "8000"]

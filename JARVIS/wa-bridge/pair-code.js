@@ -6,7 +6,20 @@ import process from 'node:process';
 
 const SESSION = process.env.WA_SESSION_DIR ||
   path.join(process.env.APPDATA || '', 'JARVIS', 'brain-data', 'wa-session');
-const NUMBER = (process.env.WA_NUMBER || '34643351642').replace(/\D/g, '');
+// Sin numero por defecto. Antes ponia el del dueño hardcodeado, y asi su
+// telefono de verdad quedaba escrito en el repositorio para todo el que lo
+// mirara. Ahora se lee de owner.json (que ya no se versiona) o del entorno, y
+// si no esta se dice en vez de inventarse uno.
+const NUMBER = (process.env.WA_NUMBER || '').replace(/\D/g, '');
+if (!NUMBER) {
+  console.error(
+    'Falta el numero del propietario.\n' +
+    '  Ponlo en uno de estos sitios:\n' +
+    '    · WA_NUMBER=34643351642 en el entorno, o\n' +
+    '    · owner.json junto a este archivo:  { "owner": "34643351642" }\n' +
+    'El numero va con prefijo y solo digitos (pais sin +).');
+  process.exit(1);
+}
 
 const { state, saveCreds } = await useMultiFileAuthState(SESSION);
 let version;
