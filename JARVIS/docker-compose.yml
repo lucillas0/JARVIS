@@ -61,10 +61,31 @@ services:
       BRAIN_HOST: "0.0.0.0"
       BRAIN_PORT: "8000"
 
+      # Desde donde se puede LEER y servir un fichero por el navegador.
+      # El listado de carpetas no se restringe (el token ya protege), pero
+      # mandar el contenido de un fichero por HTTP sin filtro se lleva el
+      # .env con todas las claves. Esta es la lista blanca.
+      JARVIS_RAICES: "${JARVIS_RAICES:-/mnt/nas,/data}"
+
     # Volumenes con nombre: Docker los crea solo, no hay carpeta que hacer.
     volumes:
       - jarvis_data:/data
       - jarvis_assets:/app/assets
+
+      # ---- El NAS entero, en SOLO LECTURA -------------------------------
+      # En Synology los shares cuelgan de /volume1, /volume2... y dentro del
+      # contenedor no existen salvo que se monten. Sin esto el explorador de
+      # la pizarra solo ve el disco del contenedor y no hay manera de llegar a
+      # tus archivos.
+      #
+      # El ":ro" no es cosmetico. Sin el, un "borra esto" mal entendido del
+      # asistente borra un share entero, y con el ni se puede. Si necesitas
+      # que JARVIS escriba, cambia ":ro" por ":rw" aqui; se reinicia el
+      # contenedor y ya esta.
+      #
+      # Si tienes mas de un volumen (un /volume2 de datos, por ejemplo),
+      # anade otra linea igual apuntando a el, y metelo en JARVIS_RAICES.
+      - "${JARVIS_NAS:-/volume1}:/mnt/nas:ro"
 
     mem_limit: "${JARVIS_MEMORIA:-2g}"
     security_opt:

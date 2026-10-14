@@ -50,6 +50,20 @@ if [ -z "${GROQ_API_KEY}${GEMINI_API_KEY}${OPENROUTER_API_KEY}" ]; then
   fi
 fi
 
+# ── 3bis. Una HOME escribible ────────────────────────────────────────────────
+# Sin esto, el proceso baja a PUID pero se queda con HOME=/root, que es 0700 y
+# de root: cualquier os.path.expanduser("~") da Permission denied. Por ahi
+# empiezan las exploraciones de ficheros de la pizarra, que reventan antes de
+# devolver nada en vez de devolver una lista vacia.
+#
+# Se hace antes de bajar privilegios porque crear el directorio como root es
+# lo unico que funciona: el usuario final no puede crear /home/jarvis.
+if [ "$PUID" != "0" ]; then
+  mkdir -p /home/jarvis 2>/dev/null || true
+  chown "$PUID:$PGID" /home/jarvis 2>/dev/null || true
+  export HOME=/home/jarvis
+fi
+
 # ── 4. Bajar privilegios, si se piden ────────────────────────────────────────
 # Por defecto se queda como root, que en un contenedor sin capacidades ni
 # --privileged es lo mas simple y lo que menos falla. Si pones PUID/PGID en el

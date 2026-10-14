@@ -119,6 +119,46 @@ sh instalar-nas.sh --actualizar                 # actualizar
 
 ---
 
+## Tus archivos: el share del NAS
+
+El contenedor trae el share montado en **solo lectura**. Por defecto apunta a
+`/volume1` de Synology, así que desde el explorador de la pizarra (`/board`)
+puedes recorrer tus carpetas, buscarlas y abrir los ficheros en el navegador.
+
+No tienes que configurar nada: está en el `docker-compose.yml` con su valor por
+defecto. Si tu NAS tiene los datos en otro volumen, o quieres poner un
+`.env` al lado del proyecto:
+
+```ini
+JARVIS_NAS=/volume2          # el share que se monta
+JARVIS_RAICES=/mnt/nas,/data # desde donde se puede leer
+```
+
+### Por qué solo lectura
+
+El `:ro` no es cosmetico. JARVIS ya puede borrar ficheros por voz, y con el
+share entero montado en lectura y escritura un «borra las descargas» mal
+interpretado se lleva un share por delante. Si la tienes clara y quieres que
+escriba, cambia `:ro` por `:rw` en la línea del `docker-compose.yml` y
+reinicia el contenedor.
+
+### Dónde se ven
+
+En `/board`, el panel de ficheros. La raíz te enseña los puntos de montaje que
+hay de verdad, leídos de `/proc/mounts`, y no una lista fija. En un contenedor no
+hay escritorio, así que pinchar un fichero no abre una ventana como en Windows:
+lo que hace es mandarlo al navegador, donde las imágenes, los PDF, el texto, el
+audio y el vídeo se ven directamente y el resto se descarga.
+
+### Qué puede leer JARVIS
+
+Listar carpetas no tiene lista blanca: con el token se recorre el share entero.
+**Servir el contenido de un fichero sí la tiene** (`JARVIS_RAICES`), porque sin
+eso cualquiera con el token se bajaría el `.env` con todas las claves de API.
+Por eso `/app/brain/.env` devuelve 403 aunque tenga el token.
+
+---
+
 ## Ficheros
 
 | Fichero | Para qué |
@@ -129,6 +169,13 @@ sh instalar-nas.sh --actualizar                 # actualizar
 | `Dockerfile` | Imagen mínima: Python + el cerebro. Multi-arch (amd64 y arm64). |
 | `docker/entrypoint.sh` | Lo que va antes de uvicorn: comprueba permisos, avisa de lo que falta y baja a PUID/PGID. |
 | `configuracion.env.example` | Todas las opciones, comentadas y con los valores por defecto reales. Se copia a `.env` si lo quieres. |
+
+### Variables del share
+
+| Variable | Por defecto | Qué hace |
+|---|---|---|
+| `JARVIS_NAS` | `/volume1` | El share del NAS que se monta en `/mnt/nas`, en solo lectura. |
+| `JARVIS_RAICES` | `/mnt/nas,/data` | Desde dónde se puede servir un fichero. Fuera de aquí, 403. |
 
 ---
 

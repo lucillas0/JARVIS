@@ -1333,6 +1333,13 @@
     const folders = listing.folders || [];
     const homes = listing.homes || [];
     const drives = listing.drives || [];
+    // Los puntos de montaje de verdad, leidos de /proc/mounts. Sin esto, en
+    // un NAS la raiz solo ofrecia "/" y no habia forma de llegar al share:
+    // /mnt/nas no esta colgado de ningun sitio dentro del contenedor, asi que
+    // no aparece por buscarlo en el arbol.
+    const mounts = (listing.mounts || []).map((m) => ({
+      name: m.label || m.path, path: m.path, type: 'folder',
+    }));
     const model = [];
     const go = (f) => () => { currentDir = f.path; loadFiles(); };
     const pick = (f) => () => {
@@ -1345,13 +1352,24 @@
       if (folders.length && entries.length) model.push({ kind: 'sep', label: 'ARCHIVOS' });
       for (const f of entries) model.push({ kind: 'item', f, onPick: pick(f) });
     } else {
-      for (const f of homes) model.push({ kind: 'item', f, onPick: go(f) });
-      if (drives.length) {
-        model.push({ kind: 'sep', label: 'UNIDADES' });
-        for (const f of drives) model.push({ kind: 'item', f, onPick: go(f) });
+      if (mounts.length) {
+        model.push({ kind: 'sep', label: 'SHARES DEL NAS' });
+        for (const f of mounts) model.push({ kind: 'item', f, onPick: go(f) });
       }
-      if (homes.length && entries.length) model.push({ kind: 'sep', label: 'RECIENTES' });
-      for (const f of entries) model.push({ kind: 'item', f, onPick: pick(f) });
+      for (const f of homes) model.push({ kind: 'item', f, onPick: go(f) });
+      // "/" solo tiene sentido si aporta algo: en un NAS, con los shares ya
+      // de arriba, "/" es el interior del contenedor y lo unico que hay ahi es
+      // usr, var, proc... Se esconde para no llenar la raiz de ruido.
+      const raiz = drives.filter((d) => !mounts.some((m) => d.startsWith(m.path)));
+      const sobrante = raiz.filter((d) => !mounts.length || d !== '/');
+      if (sobrante.length) {
+        model.push({ kind: 'sep', label: 'UNIDADES' });
+        for (const f of sobrante) model.push({ kind: 'item', f, onPick: go(f) });
+      }
+      if (entries.length) {
+        if (homes.length) model.push({ kind: 'sep', label: 'RECIENTES' });
+        for (const f of entries) model.push({ kind: 'item', f, onPick: pick(f) });
+      }
     }
     filesModel = model;
     renderFiles();
