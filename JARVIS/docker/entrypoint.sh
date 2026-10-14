@@ -87,13 +87,50 @@ if [ "$PUID" != "0" ] || [ "$PGID" != "0" ]; then
       aviso "no he podido dar /data al usuario $PUID; revisa los permisos del volumen."
   fi
 
-  exec python -c '
+  # Bajar privilegios SIEMPRE, pero si no se puede, avisar y seguir como root.
+  #
+  # Antes esto fallaba y el contenedor se moria con codigo 1, y Docker lo
+  # reiniciaba, y otra vez: un bucle infinito con un traceback de tres lineas
+  # en el log y ninguna pista de cual era el problema. El motivo real era
+  # "cap_drop: ALL" en el compose, que se lleva CAP_SETUID y CAP_SETGID, pero
+  # el sintoma no decia nada de capacidades.
+  #
+  # Bajar privilegios es una mejora (los ficheros de /volume1 salen del usuario
+  # del DSM y se pueden borrar desde File Station), NO un requisito para que
+  # el servidor arranque. Un contenedor de JARVIS corriendo como root, con las
+  # capacidades recortadas, es peor en permisos pero infinitamente mejor que un
+  # contenedor que no arranca. Asi que si esto falla, se dice claro y se sigue.
+  #
+  # PRIMERO SE PRUEBA, y solo despues se ejecuta de verdad. La prueba es un
+  # hijo desechable que hace la misma bajada y se muere. Es lo que permite
+  # mantener el exec del camino bueno: si la prueba falla, no se llega a
+  # exec, y sin exec el shell se quedaria como PID 1 sin reenviar SIGTERM, y
+  # "docker stop" pasaria de 2 segundos a los 10 del plazo de gracia.
+  if python -c '
+import os, sys
+try:
+    os.setgid(int(sys.argv[1]))
+    os.setgroups([])
+    os.setuid(int(sys.argv[2]))
+except (OSError, ValueError):
+    sys.exit(1)
+' "$PGID" "$PUID" 2>/dev/null; then
+    # exec y nada mas: PID 1 es uvicorn y las senales le llegan a el.
+    exec python -c '
 import os, sys
 os.setgid(int(sys.argv[1]))
 os.setgroups([])
 os.setuid(int(sys.argv[2]))
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$PGID" "$PUID" "$@"
+  fi
+
+  aviso "NO he podido bajar a $PUID:$PGID; sigo como root (uid $(id -u))."
+  aviso "Revisa el compose: con cap_drop ALL hacen falta cap_add SETUID y SETGID,"
+  aviso "y no hay que poner 'user:' (eso se lleva las capacidades)."
+  aviso "El servidor arranca igual; solo los ficheros de /data quedaran como root"
+  aviso "y habra que borrarlos desde una consola de DSM, no desde File Station."
+  exec "$@"
 fi
 
 exec "$@"

@@ -1,6 +1,16 @@
 # =============================================================================
 #  JARVIS · proyecto para Container Manager (Synology / Xpenology)
 # =============================================================================
+#  Son cuatro servicios: jarvis, mem0 y postgres (con pgvector dentro).
+#
+#  jarvis     el cerebro de siempre, con su share montado en solo lectura
+#  mem0       la memoria persistente, autoalojada, de Mem0 OSS
+#  postgres   donde mem0 guarda los recuerdos, con pgvector para buscar
+#
+#  Los tres viven en la red de este proyecto y se hablan por nombre. Ni mem0
+#  ni postgres publican puertos: no se ven desde fuera de la LAN. Si algum dia
+#  hacen falta, se descomenta el "ports" de mas abajo.
+# =============================================================================
 #  Pensado para que NO haya que hacer nada a mano. En Container Manager:
 #     Proyecto > Crear > Usar un archivo docker-compose.yml existente
 #     Ruta del proyecto: la carpeta donde esta este archivo
@@ -91,6 +101,18 @@ services:
       HA_TOKEN: "${HA_TOKEN:-}"
       HA_INSEGURO: "${HA_INSEGURO:-0}"
 
+      # ---- Memoria persistente (Mem0 OSS) ---------------------------------
+      # Todo lo de Mem0: donde esta, si esta activada, y cuanta memoria se
+      # le mete al modelo en cada respuesta. Sin MEM0_URL no se hace nada y
+      # JARVIS sigue con su memoria de siempre.
+      MEMORY_ENABLED: "${MEMORY_ENABLED:-1}"
+      MEM0_URL: "${MEM0_URL:-http://mem0:8888}"
+      # La clave del servicio. Con MEM0_AUTH_DISABLED=1 no hace falta; en
+      # cuanto se encienda la autenticacion, se genera en el panel de mem0.
+      MEM0_API_KEY: "${MEM0_API_KEY:-}"
+      MEMORY_USER_ID: "${MEMORY_USER_ID:-default}"
+      MEMORY_MAX_RESULTS: "${MEMORY_MAX_RESULTS:-5}"
+
     # Volumenes con nombre: Docker los crea solo, no hay carpeta que hacer.
     volumes:
       - jarvis_data:/data
@@ -111,11 +133,47 @@ services:
       # anade otra linea igual apuntando a el, y metelo en JARVIS_RAICES.
       - "${JARVIS_NAS:-/volume1}:/mnt/nas:ro"
 
+    # ---- Memoria persistente ---------------------------------------------
+    # Memoria persistente con Mem0 OSS. Si MEM0 no levanta, JARVIS sigue
+    # contestando: por eso es depends_on y no "lo necesita para funcionar".
+    depends_on:
+      mem0:
+        condition: service_started
+
     mem_limit: "${JARVIS_MEMORIA:-2g}"
+
+    # OJO CON ESTAS DIRECTIVAS JUNTAS.
+    #
+    # El entrypoint baja privilegios con setgid()/setuid(), para que los
+    # ficheros que crea en /volume1 sean del usuario del DSM y se puedan
+    # borrar desde File Station. Eso necesita CAP_SETGID y CAP_SETUID.
+    #
+    # Con "cap_drop: ALL" a secas, esas dos capacidades desaparecian y el
+    # entrypoint fallaba con:
+    #     PermissionError: [Errno 1] Operation not permitted
+    # Como la bajada va con exec, ese error era el codigo de salida del
+    # contenedor: salia con 1, Docker lo reiniciaba, y otra vez. Un bucle de
+    # reinicios sin nada mas que un traceback de tres lineas. Medido: con
+    # cap_drop ALL, CapEff era 0000000000000000 y la bajada fallaba siempre;
+    # con estas cuatro, CapEff es 00000000000000c9 y funciona.
+    #
+    # Son cuatro, y las cuatro son justo las de identidad y propiedad de
+    # ficheros. El resto sigue fuera. Y no es.setuid la puerta de entrada:
+    # en cuanto el proceso baja a 1026 pierde todas las capacidades igual,
+    # asi que uvicorn corre sin ninguna.
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # setgid()/setuid(): para bajar del root al PUID/PGID del usuario.
+      - SETGID
+      - SETUID
+      # chown de /data y de brain/db, que es el motivo de PUID/PGID.
+      - CHOWN
+      # saltarse el bit de ejecucion al vaciar un fichero nuestro (caches,
+      # logs, sockets). Sin esto "rm" falla con EPERM dentro del contenedor.
+      - FOWNER
 
     healthcheck:
       test:
@@ -134,6 +192,174 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ======================================================================
+  #  mem0 · la memoria persistente
+  # ======================================================================
+  #  Mem0 de codigo abierto, autoalojado. La API de la plataforma de pago es
+  #  OTRO producto: esta no usa el prefijo /v1 y no sale de tu red.
+  #
+  #  AUTH_DISABLED se pone a 1 porque todo esto vive en la red de casa y
+  #  Mem0 no se publica. Si algun dia lo expones (no hace falta), ponlo a 0 y
+  #  genera un API key en /api-keys. Con la autenticacion puesta, JARVIS
+  #  necesita MEM0_API_KEY en su .env.
+  # OJO con el nombre: en Docker Hub la organización es "mem0", no "mem0ai"
+  # (que es la de GitHub). Y aunque el nombre fuera el bueno, esa imagen solo
+  # existe para linux/arm64 y su último push es de septiembre de 2025, así
+  # que en un Synology x86 el pull falla con "no matching manifest for
+  # linux/amd64".
+  #
+  # Por eso se compila aquí, desde el código oficial, en docker/mem0/.
+  # La primera vez tarda (es un pip install grande); después la imagen se
+  # queda en el disco y esto no se vuelve a compilar.
+  #
+  # Si tu NAS es ARM, puedes saltarte la compilación y poner en su lugar:
+  #     image: mem0/mem0-api-server:latest
+  mem0:
+    build:
+      context: ./docker/mem0
+      dockerfile: Dockerfile
+    image: jarvis-mem0:local
+    container_name: jarvis-mem0
+    restart: unless-stopped
+
+    environment:
+      # ---------------------------------------------------------------
+      # ESTAS VARIABLES SON LAS DE VERDAD. Las que pone la documentacion de
+      # Mem0 en muchos sitios (MEM0_LLM_PROVIDER, MEM0_EMBEDDER_PROVIDER) NO
+      # EXISTEN: el servidor no las lee. Comprobado en server/main.py, que
+      # solo mira POSTGRES_*, OPENAI_API_KEY, MEM0_DEFAULT_LLM_MODEL y
+      # MEM0_DEFAULT_EMBEDDER_MODEL. Las unicas que eligen proveedor son
+      # "openai" (fijo) o lo que haya en la tabla settings de postgres.
+      # Por eso hay un configurar-mem0.py en la imagen: es el que escribe esa
+      # fila, porque el servidor la lee al importarse y sin ella peta con
+      # "Missing credentials" de OpenAI antes de abrir ningun puerto.
+      # ---------------------------------------------------------------
+
+      # Mem0 usa esta LLM para decidir que merece recordarse. Con la clave de
+      # Gemini que ya tiene JARVIS, y sin pagar nada.
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      # El embedder de Google NO lee GEMINI_API_KEY, lee GOOGLE_API_KEY. Con
+      # solo la de arriba, guardar funciona y buscar falla con un error de
+      # autenticacion que no menciona ninguna de las dos. Por eso van las dos.
+      GOOGLE_API_KEY: "${GEMINI_API_KEY:-}"
+      # Por si alguien prefiere la otra. Si se dejan las tres vacias, mem0 se
+      # queda con su proveedor por defecto (openai) y NO arranca.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+
+      # El servidor guarda la configuracion y los usuarios en APP_DB_NAME, que
+      # por defecto es "mem0_app": una base DISTINTA de la de pgvector, y hay
+      # que crearla a mano. Con esto las dos son la misma, que es
+      # lo que hace el arranque oficial cuando no hay init-db.sh, y asi la
+      # tabla settings existe sin pasos extra.
+      APP_DB_NAME: "${POSTGRES_DB:-mem0}"
+
+      # Modelos de Gemini. Cambiables sin tocar el compose.
+      MEM0_GEMINI_LLM: "${MEM0_GEMINI_LLM:-gemini-flash-lite-latest}"
+      MEM0_GEMINI_EMBEDDER: "${MEM0_GEMINI_EMBEDDER:-models/gemini-embedding-001}"
+      # SIN DEFECTO, a proposito. Vacio = "preguntale a postgres de quantas
+      # dimensiones tiene la columna vector", que es lo que hace
+      # configurar-mem0.py al arrancar.
+      #
+      # Ponerle un numero fijo aqui era peor: la columna la crea alembic con
+      # la dimension que espera el proveedor POR DEFECTO (1536, la de OpenAI),
+      # Gemini devuelve 3072, y mem0 pide lo que pone la config. Con tres
+      # numeros distintos el error es
+      #     expected 1536 dimensions, not 768
+      # que le llega al usuario como un 502 sin decir nada de dimensiones. Si
+      # se cambia de embedder y hay que forzar, pon aqui el numero y solo el.
+      MEM0_GEMINI_DIM: "${MEM0_GEMINI_DIM:-}"
+
+      AUTH_DISABLED: "${MEM0_AUTH_DISABLED:-1}"
+      ADMIN_API_KEY: "${MEM0_ADMIN_API_KEY:-}"
+
+      # Mem0 manda telemetria anonima a PostHog por defecto. Esto es un
+      # asistente en tu NAS, no un servicio publico: no tiene sentido que cada
+      # arranque salga a internet. Ademas el aviso se repite en cada log, que
+      # es ruido. Con esto a false no sale nada.
+      MEM0_TELEMETRY: "false"
+
+      # Postgres va dentro de este proyecto, por nombre de servicio.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "${POSTGRES_DB:-mem0}"
+      POSTGRES_USER: "${POSTGRES_USER:-mem0}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      POSTGRES_COLLECTION_NAME: "${POSTGRES_COLLECTION_NAME:-memories}"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # Sin "ports": mem0 no se ve desde la LAN. JARVIS lo alcanza por
+    # http://mem0:8888 dentro de la red del proyecto. Si quieres abrir el
+    # panel de mem0 para mirar los recuerdos a mano, descomenta esto Y ponle
+    # una ip de la que solo llegues tu:
+    # ports:
+    #   - "${MEM0_PUERTO:-8888}:8888"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8888/',timeout=5).status in (200,401,403) else sys.exit(1)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # La primera vez tarda: alembic crea las tablas y Mem0 prueba a hablar
+      # con el proveedor. Sin este margen el contenedor se marca unhealthy en
+      # el primer arranque y da la impresion de que fallo.
+      start_period: 180s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ======================================================================
+  #  postgres · donde mem0 guarda los recuerdos
+  # ======================================================================
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: jarvis-memoria-db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-mem0}"
+      POSTGRES_USER: "${POSTGRES_USER:-mem0}"
+      # Sin esto el contenedor NO arranca. Se pone uno en el .env; si se
+      # deja vacio, compose genera una palabra al azar y hay que guardarla.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+
+    # Volumen con nombre: es lo que hace que los recuerdos sobrevivan a
+    # docker compose down, a recrear los contenedores y a actualizar la
+    # imagen. Sin este volumen, cada "down -v" se lleva la memoria entera.
+    volumes:
+      - mem0_postgres:/var/lib/postgresql/data
+
+    # Sin "ports" a proposito: la base de datos no se expone. Vive en la red
+    # del proyecto y solo mem0 la ve.
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U ${POSTGRES_USER:-mem0} -d ${POSTGRES_DB:-mem0}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+    mem_limit: "${MEM0_DB_MEMORIA:-512m}"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   jarvis_data:
   jarvis_assets:
+  # Los recuerdos de JARVIS. ESTE es el volumen que hay que respaldar.
+  mem0_postgres:

@@ -2217,6 +2217,22 @@ def handle_user_message(text: str, input_mode: str = "text", ws: Optional[WebSoc
             semantic_memory.add("assistant", reply)
         except Exception as e:
             log.debug("semantic index: %s", e)
+        # Memoria persistente. Va en el MISMO hilo y DESPUES de lo de arriba:
+        # el_embedding de Qdrant tarda, y si la memoria persistente fuera
+        # delante, el señor esperaria mas por algo que no ve.
+        #
+        # Solo se guarda el mensaje del senor, no la respuesta de JARVIS:
+        # guardar los dos mete en la memoria las frases del propio asistente,
+        # y luego el modelo se recuerda a si mismo. decidir() es el manager y
+        # es restrictivo a proposito; remember() nunca lanza.
+        if Config.MEMORY_ENABLED:
+            try:
+                from memory.manager import recordar
+                r = recordar(text, reply)
+                if r.get("guardado"):
+                    log.info("[MEMORY] Recuerdo anadido tras la conversacion")
+            except Exception as e:
+                log.debug("memoria guardar: %s", e)
 
     threading.Thread(target=_index, daemon=True, name="sem-index").start()
 
@@ -3729,6 +3745,23 @@ def _handle(text: str, input_mode: str) -> str:
                  "content": _build_system_prompt(prompt_for_model)}]
     for m in recalled:
         messages.append({"role": m.get("role", "user"), "content": f"[recuerdos]: {m['content']}"})
+    # Memoria persistente (Mem0 OSS). Va DESPUES del prompt de sistema y antes
+    # del historial, y va entre <relevant_memory>: el modelo tiene que poder
+    # distinguir "esto lo acaba de decir el senor" de "esto sabemos de el".
+    #
+    # Sin esas etiquetas, un recuerdo que dijera "ignora lo anterior" se leia
+    # como una instruccion, y eso es una inyeccion de prompt escrita por el
+    # propio sistema. para_el_prompt() devuelve "" si la memoria esta apagada
+    # o caida, y nunca lanza.
+    _mem_block = ""
+    if Config.MEMORY_ENABLED:
+        try:
+            from memory.manager import para_el_prompt
+            _mem_block = para_el_prompt(cleaned)
+        except Exception as e:                       # pragma: no cover
+            log.debug("memoria en el prompt: %s", e)
+    if _mem_block:
+        messages.append({"role": "user", "content": _mem_block})
     for h in doc_hits:
         messages.append({"role": "user",
                          "content": f"[documento: {h['name']}]: {h['text']}"})
@@ -4335,6 +4368,32 @@ async def startup():
     threading.Thread(target=_campus_bg, name="campus-boot",
                      daemon=True).start()
 
+    # Memoria persistente: se toca una vez para saber si Mem0 esta, y para que
+    # la PRIMERA pregunta no pague el timeout de conexion. Con el servicio
+    # parado, este probe marca el cliente como caido y las siguientes llamadas
+    # responden al momento, en vez de esperar cada vez.
+    def _memoria_bg():
+        try:
+            from memory.manager import manager
+            m = manager()
+            if not m.activo():
+                log.info("[MEMORY] Memoria persistente desactivada "
+                         "(MEMORY_ENABLED=0). JARVIS sigue con la local.")
+                return
+            r = m.health()
+            if r.get("alcanzable"):
+                log.info("[MEMORY] Servicio disponible en %s",
+                         m.estado().get("url"))
+            else:
+                log.warning("[MEMORY] Mem0 no responde (%s). JARVIS contesta "
+                            "igual; no habrá recuerdos nuevos hasta que vuelva.",
+                            r.get("motivo", "sin respuesta")[:100])
+        except Exception as e:
+            log.debug("memoria boot: %s", e)
+
+    threading.Thread(target=_memoria_bg, name="memory-boot",
+                     daemon=True).start()
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -4767,6 +4826,15 @@ async def health():
         _total = len(brain.tools._registry or {})
     except Exception:
         _disp = _total = 0
+    # Memoria persistente: si Mem0 esta caido, JARVIS sigue contestando igual,
+    # asi que /health lo dice pero no se pone a "malo". Un healthcheck que
+    # fallara por la memoria declararia inservible un cerebro que funciona.
+    try:
+        _mm = _mem_manager()
+        _mem = _mm.estado()
+        _mem["alcanzable"] = _mm.health().get("alcanzable", True)
+    except Exception as e:
+        _mem = {"activado": False, "error": str(e)[:80]}
     return {"status": "ok",
             "voice": bool(v) and v.engine.is_active,
             "voice_input": bool(v) and v.engine.has_input,
@@ -4775,6 +4843,7 @@ async def health():
             "screen_mode": Config.SCREEN_ANALYSIS_MODE,
             "herramientas": {"total": _total, "disponibles": _disp,
                              "no_disponibles": _total - _disp},
+            "memoria": _mem,
             "discord": _discord,
             "me": _me}
 
@@ -5524,6 +5593,7 @@ button.danger{background:rgba(255,107,107,.10);color:#ffb3b3;border:1px solid rg
   <button class="tab" role="tab" data-tab="movimiento">Movimiento</button>
   <button class="tab" role="tab" data-tab="automatizaciones">Automatizaciones</button>
   <button class="tab" role="tab" data-tab="claves">Claves</button>
+  <button class="tab" role="tab" data-tab="memoria">Memoria</button>
   <button class="tab" role="tab" data-tab="sistema">Sistema</button>
 </nav>
 
@@ -5631,6 +5701,24 @@ button.danger{background:rgba(255,107,107,.10);color:#ffb3b3;border:1px solid rg
   </div>
 </section>
 
+<section class="panel" id="p-memoria">
+  <div class="block">
+    <h2>Memoria persistente</h2>
+    <p class="d">Lo que JARVIS recuerda entre conversaciones. Vive en Mem0, en su
+    propio servicio. Si el servicio está caído, JARVIS sigue contestando: la
+    memoria es una ayuda, no un requisito.</p>
+    <div id="memEstado" class="d" style="margin:0 0 14px;min-height:20px">Consultando…</div>
+    <div class="row"><label>Buscar en la memoria</label><input type="text" id="memQ" class="grow" placeholder="p. ej. NAS, español, proyecto" oninput="memBuscar()"></div>
+    <div id="memMsg" class="d" style="margin:6px 0 12px;min-height:18px"></div>
+    <div class="row" style="border:0;padding:0 0 12px"><label style="flex:0 0 210px">Añadir un recuerdo</label><input type="text" id="memNuevo" class="grow" placeholder="Lo que debe recordar"><button class="ghost" onclick="memAnadir()">Guardar</button></div>
+    <div id="memLista" style="max-height:380px;overflow:auto"></div>
+    <div class="actions" style="margin-top:14px">
+      <button class="ghost" onclick="memRecargar()">Recargar</button>
+      <button class="ghost" onclick="memVaciar()" style="border-color:#7a3040;color:#ffb4bf">Vaciar toda la memoria</button>
+    </div>
+  </div>
+</section>
+
 <section class="panel" id="p-sistema">
   <div class="block">
     <h2>Memoria y pantalla</h2>
@@ -5653,7 +5741,13 @@ let CFG=null;
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{
  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===b));
  document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('on',p.id==='p-'+b.dataset.tab));
+  // La memoria se pide al abrir su pestana, no al cargar la pagina: son
+  // peticiones a otro servicio y no tiene sentido pagarlas si nadie la mira.
+  if(b.dataset.tab==='memoria'&&typeof memRecargar==='function')memRecargar();
  window.scrollTo({top:0,behavior:'smooth'});}));
+// El token lo inyecta el servidor en el HTML (ver _inyecta_token). Los
+// endpoints de memoria lo exigen, igual que el resto de la API.
+if(typeof window.JARVIS_TOKEN!=='undefined')MEM_TOKEN=window.JARVIS_TOKEN;
 function toast(t,bad){const e=$('toast');e.textContent=t;e.className='on'+(bad?' bad':'');clearTimeout(e._t);e._t=setTimeout(()=>e.className='',2400);}
 async function post(p){const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const j=await r.json();toast(j.ok?'Guardado, señor.':'Fallo: '+(j.reason||''),!j.ok);}
 function paint(){
@@ -5735,6 +5829,89 @@ function saveOrb(){post({orb:{enabled:$('o_en').checked,size:+$('o_size').value,
 function saveAnims(){post({anims:{enabled:$('a_en').checked,intensity:+$('a_int').value,msg_anim:$('a_msg').value,orb_anim:$('a_orb').value}});}
 function savePerf(){post({perf:{context_window:+$('p_ctx').value,recall:$('p_recall').checked,screen_mode:$('p_screen').value,screen_interval:+$('p_sint').value}});}
 function saveApis(){const o={};API_NAMES.forEach(k=>{const v=$('a_'+k).value.trim();if(v)o[k]=v;});post({apis:o});setTimeout(load,600);}
+
+// ---------- Memoria persistente (Mem0) ------------------------------------
+// Todos los fetch llevan el token. Los endpoints lo exigen igual que el resto
+// de la API: quien entre aqui puede leer y borrar todo lo que JARVIS sabe
+// del señor, así que no puede ser una página abierta sin más.
+// Se reutiliza el mismo patrón que el resto de la página en vez de traer una
+// segunda forma de hablar con el servidor.
+let MEM_TOKEN='';
+function memMsg(t,bad){const e=document.getElementById('memMsg');if(!e)return;e.textContent=t;e.style.color=bad?'#ffb3b3':'';}
+function _memFetch(url,opts){
+  opts=opts||{};opts.headers=Object.assign({'Content-Type':'application/json'},opts.headers||{});
+  if(MEM_TOKEN)opts.headers['X-Jarvis-Token']=MEM_TOKEN;
+  return fetch(url,opts);
+}
+function memEstado(txt){const e=document.getElementById('memEstado');if(e)e.textContent=txt;}
+function _memFila(r){
+  const d=document.createElement('div');
+  d.className='row';d.style.border='0';d.style.padding='8px 0';
+  const iz=document.createElement('div');iz.style.flex='1 1 auto';iz.style.minWidth='0';
+  const t=document.createElement('div');t.textContent=r.texto||'';
+  t.style.fontSize='13px';t.style.wordBreak='break-word';
+  const meta=[];
+  if(r.categoria)meta.push(r.categoria);
+  if(r.created_at)meta.push(String(r.created_at).slice(0,10));
+  if(r.source)meta.push(r.source);
+  const m=document.createElement('div');m.className='hint';
+  m.textContent=meta.join(' · ');
+  iz.appendChild(t);iz.appendChild(m);
+  const b=document.createElement('button');b.className='ghost';b.textContent='Borrar';
+  b.onclick=async()=>{
+    if(!confirm('¿Borrar este recuerdo? No hay vuelta atrás.'))return;
+    const r2=await _memFetch('/api/memory/'+encodeURIComponent(r.id),{method:'DELETE'});
+    const j=await r2.json().catch(()=>({}));
+    memMsg(j.ok?'Recuerdo borrado.':(j.error||'No se pudo borrar'),!j.ok);
+    memRecargar();
+  };
+  d.appendChild(iz);d.appendChild(b);
+  return d;
+}
+async function memRecargar(){
+  const q=($('memQ')||{}).value||'';
+  const url=q?('/api/memory/search?q='+encodeURIComponent(q)):'/api/memory';
+  let cuerpo=null, method='GET';
+  if(q){method='POST';cuerpo=JSON.stringify({consulta:q,limite:50});}
+  const r=await _memFetch(url,{method:method,body:cuerpo||undefined});
+  if(r.status===401){memEstado('Sin token: recargue la página.');return;}
+  const j=await r.json().catch(()=>({}));
+  const est=j.estado||{};
+  if(!est.activado){
+    memEstado('La memoria persistente está desactivada (MEMORY_ENABLED=0). '
+             +'JARVIS sigue funcionando con la memoria local.');
+  }else if(est.motivo){
+    memEstado('El servicio de memoria no está disponible ahora mismo: '+est.motivo
+             +'. JARVIS contesta igual.');
+  }else{
+    memEstado('Servicio en '+est.url+' · usuario '+est.user_id
+             +' · '+(j.total||0)+' recuerdos.');
+  }
+  const l=document.getElementById('memLista');if(!l)return;
+  l.innerHTML='';
+  if(!j.recuerdos||!j.recuerdos.length){
+    const p=document.createElement('p');p.className='d';
+    p.textContent='No hay recuerdos todavía.';
+    l.appendChild(p);return;
+  }
+  j.recuerdos.forEach(x=>l.appendChild(_memFila(x)));
+}
+function memBuscar(){clearTimeout(window._memT);window._memT=setTimeout(memRecargar,320);}
+async function memAnadir(){
+  const v=(($('memNuevo')||{}).value||'').trim();
+  if(!v)return memMsg('Escriba algo primero.',true);
+  const r=await _memFetch('/api/memory',{method:'POST',body:JSON.stringify({texto:v})});
+  const j=await r.json().catch(()=>({}));
+  memMsg(j.ok?'Guardado.':(j.error||'No se pudo guardar'),!j.ok);
+  if(j.ok){$('memNuevo').value='';memRecargar();}
+}
+async function memVaciar(){
+  if(!confirm('Esto borra TODA la memoria de JARVIS, sin vuelta atrás. ¿Seguro?'))return;
+  const r=await _memFetch('/api/memory/clear',{method:'POST'});
+  const j=await r.json().catch(()=>({}));
+  memMsg(j.ok?'Memoria vaciada.':(j.error||'No se pudo vaciar'),!j.ok);
+  memRecargar();
+}
 function _importMsg(t,bad){const e=document.getElementById('importMsg');if(!e)return;e.textContent=t;e.style.color=bad?'#ffb3b3':'';}
 async function importKeys(ev){
   const f=(ev.target.files||[])[0];
@@ -6106,6 +6283,91 @@ async def board_fichero(request: Request, path: str = ""):
         cabeceras["Content-Range"] = f"bytes {desde}-{hasta}/{tam}"
     return StreamingResponse(cuerpo(), status_code=206 if parcial else 200,
                              headers=cabeceras)
+
+
+# ------------------------------------------------------------------ #
+# Memoria persistente (Mem0 OSS)
+#
+# Estos endpoints NO pisan ninguno existente: /api/memory no estaba. Todos
+# exigen el token de brain/auth.py, el mismo que protege /api/config y el
+# WebSocket, porque quien entre aqui puede leer y borrar todo lo que JARVIS
+# sabe del señor.
+#
+# La UI de administracion vive en la pestaña MEMORY de /config, no aquí: no
+# hay una segunda pagina que mantener.
+# ------------------------------------------------------------------ #
+def _mem_manager():
+    from memory.manager import manager
+    return manager()
+
+
+@app.get("/api/memory")
+async def api_memory_list(request: Request, q: str = "", limite: int = 200):
+    """Todo lo que JARVIS recuerda, o lo que case con q."""
+    if not _exige_token(request):
+        return JSONResponse({"ok": False, "error": "sin token"}, status_code=401)
+    m = _mem_manager()
+    try:
+        if q:
+            recs = m.search(q, limit=max(1, min(int(limite), 50)))
+        else:
+            recs = m.get_all(limit=max(1, min(int(limite), 500)))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:160]}, status_code=500)
+    return {"ok": True, "total": len(recs), "recuerdos": recs,
+            "estado": m.estado()}
+
+
+@app.post("/api/memory")
+async def api_memory_add(request: Request, payload: dict):
+    if not _exige_token(request):
+        return JSONResponse({"ok": False, "error": "sin token"}, status_code=401)
+    m = _mem_manager()
+    texto = (payload or {}).get("texto", "")
+    r = m.add(texto, categoria=(payload or {}).get("categoria", ""))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/memory/search")
+async def api_memory_search(request: Request, payload: dict):
+    if not _exige_token(request):
+        return JSONResponse({"ok": False, "error": "sin token"}, status_code=401)
+    m = _mem_manager()
+    q = (payload or {}).get("consulta") or (payload or {}).get("q") or ""
+    try:
+        limite = max(1, min(int((payload or {}).get("limite", 10) or 10), 50))
+    except (TypeError, ValueError):
+        limite = 10
+    recs = m.search(q, limit=limite)
+    return {"ok": True, "consulta": q, "total": len(recs), "recuerdos": recs}
+
+
+@app.put("/api/memory/{memory_id}")
+async def api_memory_update(request: Request, memory_id: str, payload: dict):
+    if not _exige_token(request):
+        return JSONResponse({"ok": False, "error": "sin token"}, status_code=401)
+    m = _mem_manager()
+    r = m.update(memory_id, (payload or {}).get("texto", ""))
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.delete("/api/memory/{memory_id}")
+async def api_memory_delete(request: Request, memory_id: str):
+    if not _exige_token(request):
+        return JSONResponse({"ok": False, "error": "sin token"}, status_code=401)
+    m = _mem_manager()
+    r = m.delete(memory_id)
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+@app.post("/api/memory/clear")
+async def api_memory_clear(request: Request):
+    """Borra TODA la memoria. Sin vuelta atrás, por eso es POST y no DELETE."""
+    if not _exige_token(request):
+        return JSONResponse({"ok": False, "error": "sin token"}, status_code=401)
+    m = _mem_manager()
+    r = m.clear()
+    return JSONResponse(r, status_code=200 if r.get("ok") else 400)
 
 
 # ------------------------------------------------------------------ #

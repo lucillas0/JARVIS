@@ -42,3 +42,13 @@ JARVIS/wa-bridge/owner.json
 _respaldo-ficheros-buenos/
 _herramientas/
 .freebuff/
+
+# El codigo fuente de Mem0 que se usa para compilar su servidor.
+#
+# Son 13,8 MB y 185 ficheros de un proyecto ajeno (github.com/mem0ai/mem0).
+# Subirlos al repo duplicaria ese codigo, lo haria divergir del original y
+# haria mas lento cada clonado. Se baja de su sitio con
+#     bash docker/mem0/bajar-mem0.sh
+# y el Dockerfile lo necesita antes de construir. El .env.example y el
+# MEMORIA.md cuentan el resto.
+JARVIS/docker/mem0/mem0-server/

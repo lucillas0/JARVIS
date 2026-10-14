@@ -128,6 +128,44 @@ class Config:
     SCREEN_ANALYSIS_MODE = _get("SCREEN_ANALYSIS_MODE", "continuous")
     SCREEN_CAPTURE_INTERVAL_SECONDS = int(_get("SCREEN_CAPTURE_INTERVAL_SECONDS", "5"))
 
+    # ------------------------------------------------------------------ #
+    # Memoria persistente · Mem0 OSS autoalojado
+    # ------------------------------------------------------------------ #
+    # La memoria deJARVIS es un servicio aparte (Mem0 OSS + PostgreSQL/pgvector)
+    # que corre en el mismo NAS. Aquí solo hay dirección y política; el
+    # cliente HTTP vive en memory/mem0_client.py y la politica en
+    # memory/manager.py. Ningun modulo habla con Mem0 directamente.
+    #
+    # MEMORY_ENABLED=0 apaga TODO y JARVIS sigue igual, con su SQLite y su
+    # Qdrant de siempre. La memoria nueva es una MAS, no un sustituto: si el
+    # servicio se cae, no se rompe la conversacion.
+    MEMORY_ENABLED = _get("MEMORY_ENABLED", "1").strip().lower() in (
+        "1", "true", "si", "sí", "yes", "on")
+    MEM0_URL = _get("MEM0_URL", "http://mem0:8888").rstrip("/")
+    # El servidor OSS acepta un X-API-Key por usuario. Si la instancia lleva
+    # AUTH_DISABLED=true (que es lo recomendado en una red domestica) esta
+    # vacia y no hace falta.
+    MEM0_API_KEY = _get("MEM0_API_KEY")
+    # Identidad estable. Con uno solo JARVIS es de un usuario y vale "default".
+    # El sistema esta preparado para varios sin tocar nada mas.
+    MEMORY_USER_ID = _get("MEMORY_USER_ID", "default")
+    # Cuantos recuerdos se meten en el prompt. Mas es mas contexto y mas
+    # latencia; menos es contexto insuficiente.
+    MEMORY_MAX_RESULTS = int(_get("MEMORY_MAX_RESULTS", "5"))
+    # Cada cuanto se reintenta si Mem0 no responde. La memoria es
+    # degradable: se avisa en el log y se sigue contestando.
+    MEMORY_RETRY_SECONDS = int(_get("MEMORY_RETRY_SECONDS", "30"))
+    MEMORY_TIMEOUT = float(_get("MEMORY_TIMEOUT", "6"))
+    # Si el señor dice "recuerda X", se guarda siempre. Con esto a 0 solo se
+    # guarda lo que el analizador vea claro, y las peticiones explicitas se
+    # ignorarian.
+    MEMORY_RESPETA_PETICION = _get("MEMORY_RESPETA_PETICION", "1").strip().lower() in (
+        "1", "true", "si", "sí", "yes", "on")
+    # Guardar solo lo que dura. Con esto a 0 se guarda cada conversacion, que
+    # es justo lo que NO hay que hacer.
+    MEMORY_SOLO_UTILES = _get("MEMORY_SOLO_UTILES", "1").strip().lower() in (
+        "1", "true", "si", "sí", "yes", "on")
+
     # Puertos
     BRAIN_HOST = _get("BRAIN_HOST", "127.0.0.1")
     BRAIN_PORT = int(_get("BRAIN_PORT", "8000"))

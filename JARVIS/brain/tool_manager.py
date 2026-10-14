@@ -95,7 +95,7 @@ class ToolManager:
 
     def _register_defaults(self) -> None:
         try:
-            from tools import system_tools, web_tools, virtualbox_tools, campus_tools, raspberry_tools, code_tools, syshealth_tools, auto_tools, git_tools, translate_tools, opencode_tools, diag_tools, install_tools, github_tools, mobile_tools, camera_tools
+            from tools import system_tools, web_tools, virtualbox_tools, campus_tools, raspberry_tools, code_tools, syshealth_tools, auto_tools, git_tools, translate_tools, opencode_tools, diag_tools, install_tools, github_tools, mobile_tools, camera_tools, memory_tools
             all_tools = (system_tools.TOOLS + system_tools.WINDOW_TOOLS +
                          system_tools.MEDIA_TOOLS + system_tools.NAV_TOOLS +
                          virtualbox_tools.VB_TOOLS +
@@ -112,6 +112,7 @@ class ToolManager:
                          github_tools.TOOLS +
                          mobile_tools.MOBILE_TOOLS +
                          camera_tools.CAMERA_TOOLS +
+                         memory_tools.MEMORY_TOOLS +
                          system_tools.danger_tools() +
                          system_tools.FILE_TOOLS +
                          web_tools.TOOLS)
