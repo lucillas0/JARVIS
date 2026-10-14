@@ -37,13 +37,27 @@ def _home() -> Path:
 
 
 def home_dirs() -> list[str]:
+    """Carpetas personales. En un NAS no existen, y ademas /root da permission
+    denied al usuario sin privilegios, que es como monta el entrypoint. Antes
+    is_dir() no llevaba try y ahi reventaba, que hacia que list_dir(None)
+    devolviera ok:false y el explorador entero no arrancara."""
     h = _home()
     out = []
     for sub in ("Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"):
-        p = h / sub
-        if p.is_dir():
-            out.append(str(p))
+        try:
+            p = h / sub
+            if p.is_dir():
+                out.append(str(p))
+        except OSError:
+            continue
     return out
+
+
+# Montajes que se esconden al usuario: son del sistema y no le sirven de nada.
+_OCULTOS = {
+    "proc", "sys", "dev", "run", "tmp", "var/lib/docker", "etc/ssl",
+    "usr", "lib", "lib64", "bin", "sbin", "boot", "root/.cache",
+}
 
 
 def fixed_drives() -> list[str]:
@@ -61,6 +75,97 @@ def fixed_drives() -> list[str]:
         except Exception:
             return ["C:\\"]
     return ["/"]
+
+
+def montajes() -> list[dict]:
+    """Puntos de montaje de verdad, leidos de /proc/mounts.
+
+    En un NAS esto es lo que hace util el explorador: sin esto solo ofrecia
+    "/" y no habia forma de llegar al share, porque /volume1 no esta colgado de
+    ningun sitio dentro del contenedor salvo que se monte explicitamente.
+    Se ignoran los montajes del propio sistema (proc, sys, dev...) y los que
+    son subrutas de otro ya listado, para no repetir veinte veces /usr/lib.
+    """
+    if os.name == "nt":
+        return [{"path": d, "label": d} for d in fixed_drives()]
+    vistos: list[str] = []
+    salida: list[dict] = []
+    try:
+        with open("/proc/mounts", encoding="utf-8", errors="replace") as fh:
+            lineas = fh.readlines()
+    except Exception:
+        return [{"path": "/", "label": "/"}]
+    for linea in lineas:
+        partes = linea.split()
+        if len(partes) < 3:
+            continue
+        ruta = partes[1].replace("\\040", " ")
+        fs = partes[2]
+        if ruta in ("/",):
+            continue
+        if ruta.startswith("/proc") or ruta.startswith("/sys") or ruta.startswith("/dev"):
+            continue
+        if ruta.startswith("/etc/") or ruta.startswith("/usr/") or ruta.startswith("/var/lib/"):
+            continue
+        # Un NFS o SMB montado se ve por fs; un bind de Docker tambien.
+        interesante = (ruta.startswith(("/mnt", "/volume", "/media", "/data"))
+                       or fs in ("nfs", "nfs4", "cifs", "smb3",
+                                 "fuse.sshfs", "fuse.rclone"))
+        if not interesante:
+            continue
+        # Si ya hay un padre listado, este es un submontaje: se salta.
+        if any(ruta.startswith(p.rstrip("/") + "/") for p in vistos):
+            continue
+        try:
+            if not os.path.isdir(ruta):
+                continue
+        except OSError:
+            continue
+        vistos.append(ruta)
+        etiqueta = ruta.rstrip("/").rsplit("/", 1)[-1] or ruta
+        salida.append({"path": ruta, "label": etiqueta})
+    salida.sort(key=lambda m: m["path"])
+    return salida
+
+
+def raices_lectura() -> list[str]:
+    """Carpetas desde las que se permite LEER y SERVIR un fichero.
+
+    El listado de carpetas (list_dir) no se restringe: el token ya protege y en
+    el escritorio hace falta para todo. Pero servir el contenido de un fichero
+    por HTTP es otra cosa: sin filtro, cualquiera con el token se lleva
+    /app/brain/.env con todas las claves. Asi que esto si es lista blanca.
+
+    JARVIS_RAICES lo ajusta; si no esta, en un NAS son los shares montados y
+    los datos. En Windows se devuelve vacio = sin restringir, porque la version
+    de escritorio ya esta detrás de la sesion del usuario.
+    """
+    crudo = (os.environ.get("JARVIS_RAICES") or "").strip()
+    if crudo:
+        return [p for p in (s.strip() for s in crudo.split(os.pathsep if os.pathsep in crudo else ",")) if p]
+    if os.name == "nt":
+        return []
+    return [p for p in ("/mnt/nas", "/data") if os.path.isdir(p)]
+
+
+def permitido_leer(ruta: str) -> tuple[bool, str]:
+    """Comprueba que ruta cae dentro de una raiz permitida."""
+    raices = raices_lectura()
+    if not raices:
+        return True, ""            # sin lista blanca: todo vale
+    try:
+        real = os.path.realpath(os.path.expanduser(ruta))
+    except Exception:
+        return False, "no se puede resolver la ruta"
+    for r in raices:
+        try:
+            base = os.path.realpath(r)
+        except Exception:
+            continue
+        if real == base or real.startswith(base.rstrip("/") + "/"):
+            return True, ""
+    return False, ("esta ruta no es del NAS. Solo se sirve lo que este en: "
+                   + ", ".join(raices))
 
 
 def list_apps() -> list[dict]:
@@ -139,11 +244,16 @@ def list_apps() -> list[dict]:
 def recent_files() -> list[dict]:
     out = []
     for sub in ("Documents", "Pictures", "Desktop", "Downloads"):
-        d = _home() / sub
-        if not d.is_dir():
-            continue
+        # El try no es decorativo: en un NAS la home puede ser /root, que es
+        # 0700 y del usuario root, y el is_dir() revienta con PermissionError.
+        # Ese error se llevaba por delante el listado entero.
         try:
+            d = _home() / sub
+            if not d.is_dir():
+                continue
             nombres = list(d.iterdir())
+        except OSError:
+            continue
         except Exception:
             continue
         for f in nombres:
@@ -165,12 +275,35 @@ def recent_files() -> list[dict]:
     return out
 
 
+def _raiz_entradas() -> list[dict]:
+    """Lo que hay en el punto de partida: los shares montados y las carpetas
+    personales. En un NAS no hay 'Recientes' porque no hay escritorio, asi que
+    sin esto el explorador abriria en una pantalla vacia sin pista de por donde
+    empezar."""
+    out: list[dict] = []
+    vistos: set[str] = set()
+    for m in montajes():
+        if m["path"] in vistos:
+            continue
+        vistos.add(m["path"])
+        out.append({"name": m["label"], "path": m["path"], "type": "folder"})
+    for h in home_dirs():
+        if h in vistos:
+            continue
+        vistos.add(h)
+        out.append({"name": os.path.basename(h) or h, "path": h, "type": "folder"})
+    return out
+
+
 def list_dir(directorio: str | None) -> dict:
     """Listado de una carpeta, con la misma forma que usa la pizarra."""
     if not directorio:
-        return {"path": None, "name": "Recientes", "parent": None,
+        recientes = recent_files()
+        return {"path": None, "name": "Recientes" if os.name == "nt" else "Shares",
+                "parent": None,
                 "homes": home_dirs(), "drives": fixed_drives(),
-                "folders": [], "entries": recent_files()}
+                "mounts": montajes(),
+                "folders": _raiz_entradas(), "entries": recientes}
     try:
         base = Path(directorio).expanduser().resolve()
     except Exception:
@@ -180,8 +313,13 @@ def list_dir(directorio: str | None) -> dict:
     carpetas, ficheros = [], []
     try:
         hijos = sorted(base.iterdir(), key=lambda p: p.name.lower())
-    except Exception:
-        return list_dir(None)
+    except Exception as e:
+        # Antes esto reventaba con ok:false y el explorador entero se quedaba
+        # en blanco. Ahora devuelve la raiz para que siempre haya algo que
+        # pulsar, y el motivo va en la respuesta para poder diagnosticarlo.
+        r = list_dir(None)
+        r["reason"] = str(e)[:160]
+        return r
     for d in hijos:
         if d.name.startswith("."):
             continue
@@ -205,7 +343,8 @@ def list_dir(directorio: str | None) -> dict:
     ficheros.sort(key=lambda e: e["name"].lower())
     padre = str(base.parent) if base.parent != base else None
     return {"path": str(base), "name": base.name or str(base), "parent": padre,
-            "homes": home_dirs(), "folders": carpetas, "entries": ficheros}
+            "homes": home_dirs(), "drives": fixed_drives(), "mounts": montajes(),
+            "folders": carpetas, "entries": ficheros}
 
 
 def list_apps_all(consulta: str = "", tope: int = 2000) -> list[dict]:
@@ -347,7 +486,15 @@ def abrir_terminal(shell: str = "") -> dict:
 
 
 def abrir(item: dict) -> dict:
-    """Abre una app o un fichero, igual que lo haría el IPC de Electron."""
+    """Abre una app o un fichero, igual que lo haría el IPC de Electron.
+
+    En un NAS no hay escritorio: no hay xdg-open, ni servidor X, ni nada que
+    pueda abrir una ventana. Antes se hacia subprocess.Popen(["xdg-open", ruta])
+    a ciegas y devolvia {"ok": true} sin haber abierto nada, que es peor que
+    un error: el usuario creia que estaba abierto y no lo estaba. Ahora, si no
+    hay escritorio de verdad, se dice que lo que hay es descargarlo, y el
+    frontend lo sirve por /api/board/fichero.
+    """
     ruta = (item or {}).get("path") or (item or {}).get("target") or ""
     nombre = (item or {}).get("name") or ""
     if not ruta and nombre:
@@ -361,9 +508,16 @@ def abrir(item: dict) -> dict:
             else:
                 from tools.system_tools import _resolve_open_target, _launch_native
                 _launch_native(_resolve_open_target(ruta))
-        else:
-            subprocess.Popen(["xdg-open", ruta],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"ok": True, "opened": ruta}
+        # Fuera de Windows: solo si hay un escritorio de verdad detrás.
+        if not shutil.which("xdg-open") or not os.environ.get("DISPLAY") \
+                and not os.environ.get("WAYLAND_DISPLAY"):
+            return {"ok": False, "sin_escritorio": True,
+                    "error": "En un NAS no hay escritorio donde abrirlo.",
+                    "descargar": ruta}
+        subprocess.Popen(["xdg-open", ruta],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"ok": True, "opened": ruta}
     except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+        return {"ok": False, "sin_escritorio": True, "error": str(e)[:200],
+                "descargar": ruta}

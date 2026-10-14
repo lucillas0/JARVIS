@@ -19,7 +19,7 @@ import time
 from typing import Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from config import Config, BRAIN_DIR, DATA_DIR
 from memory import sqlite_store as db
@@ -4016,6 +4016,29 @@ def _exige_token(req) -> bool:
     return _auth.coincide(_auth.token_por_cabecera(req.headers))
 
 
+def _exige_token_o_url(req) -> bool:
+    """Como _exige_token, pero además acepta el token en la query.
+
+    Existe solo para las descargas. Un <a download> o un window.open() no
+    mandan cabeceras, asi que no hay otra forma de que el token llegue; y sin
+    esto, pinchar en un fichero del NAS daria 401 siempre.
+
+    No se aplica al resto de endpoints a proposito: un token en la URL se queda
+    en el historial del navegador y en los logs del servidor, mientras que en
+    una cabecera no. Aqui se acepta porque es la unica via que tiene, y porque
+    el token ya viaja en la URL del WebSocket desde antes.
+    """
+    import auth as _auth
+    if req is None:
+        return False
+    if _auth.coincide(_auth.token_por_cabecera(req.headers)):
+        return True
+    try:
+        return _auth.coincide(req.query_params.get("token"))
+    except Exception:
+        return False
+
+
 def _inyecta_token(html: str) -> str:
     """Mete el token en la pagina para que sus fetch y sus WebSocket lo lleven.
 
@@ -5712,13 +5735,138 @@ async def board_dir(path: str = ""):
         return {"ok": False, "reason": str(e)[:160]}
 
 
-@app.post("/api/board/open")
-async def board_open(payload: dict):
+@app.api_route("/api/board/open", methods=["GET", "POST"])
+async def board_open(request: Request, path: str = ""):
+    """Abre una app o un fichero.
+
+    Acepta GET y POST porque el puente del navegador lo llama con GET y sus
+    parametros en la query, y con POST manda un cuerpo JSON: con una sola de
+    las dos, el explorador de la pizarra no abria nada y recibia un 405 del
+    que no se enteraba nadie.
+    """
+    payload: dict = {}
+    if request.method == "POST":
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    if path:
+        payload.setdefault("path", path)
     try:
         from webboard_backend import abrir
         return abrir(payload or {})
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
+
+
+@app.get("/api/board/fichero")
+async def board_fichero(request: Request, path: str = ""):
+    """Sirve un fichero del NAS para verlo o descargarlo desde el navegador.
+
+    En un contenedor no hay escritorio, así que "abrir" un documento no puede
+    lanzar una ventana como en Windows. Lo que se puede, y es lo que hace este
+    endpoint, es mandarlo al navegador: imágenes, PDF, texto, audio y vídeo se
+    ven ahí mismo; el resto se descarga.
+
+    Pide el token como el resto (/api/config/exportar-claves), porque sin el
+    cualquiera que lo tenga se baja el .env con todas las claves. Y aunque lo
+    tenga, solo se sirve lo que este bajo una raiz permitida: listar carpetas es
+    una cosa y leer el contenido de un fichero es otra.
+    """
+    if not _exige_token_o_url(request):
+        return JSONResponse({"ok": False, "error": "sin token"}, status_code=401)
+    if not path:
+        return JSONResponse({"ok": False, "error": "falta el path"}, status_code=400)
+    try:
+        from webboard_backend import permitido_leer
+        ok, motivo = permitido_leer(path)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:160]}, status_code=500)
+    if not ok:
+        return JSONResponse({"ok": False, "error": motivo}, status_code=403)
+    try:
+        real = os.path.realpath(os.path.expanduser(path))
+        if not os.path.isfile(real):
+            return JSONResponse({"ok": False, "error": "no es un fichero"},
+                                status_code=404)
+        tam = os.path.getsize(real)
+    except OSError as e:
+        return JSONResponse({"ok": False, "error": str(e)[:160]}, status_code=403)
+
+    # El token va en la query (es una descarga normal del navegador), asi que
+    # no se puede poner en la cabecera. FileResponse no lo permite, se hace a
+    # mano con un rango para que el navegador pueda ir Positionando el video.
+    rango = request.headers.get("range") or ""
+    desde, hasta = 0, tam - 1
+    parcial = False
+    if rango.startswith("bytes="):
+        try:
+            trozo = rango[6:].split("-")
+            desde = int(trozo[0] or 0)
+            hasta = int(trozo[1]) if len(trozo) > 1 and trozo[1] else tam - 1
+            parcial = True
+        except ValueError:
+            desde, hasta, parcial = 0, tam - 1, False
+    if desde >= tam:
+        return JSONResponse({"ok": False, "error": "rango fuera de fichero"},
+                            status_code=416)
+    hasta = min(hasta, tam - 1)
+    longitud = hasta - desde + 1
+
+    def cuerpo():
+        with open(real, "rb") as fh:
+            fh.seek(desde)
+            restante = longitud
+            while restante > 0:
+                trozo = fh.read(min(65536, restante))
+                if not trozo:
+                    break
+                restante -= len(trozo)
+                yield trozo
+
+    # disposition=inline para lo que el navegador sabe mirar y attachment para
+    # lo demas: si no, un .exe se descargaria pero un .txt tambien, y al abrir
+    # el dashboard te descarga media carpeta.
+    #
+    # El content-type NO puede ser siempre octet-stream: con eso el navegador
+    # descarga la imagen en vez de abrirla, y un PDF te sale como fichero. Se
+    # adivina por extension, que es lo que hay, y lo que no se sepa va con
+    # octet-stream para que el navegador lo baje en vez de intentar ejecutarlo.
+    import mimetypes
+    nombre = os.path.basename(real)
+    _MIRA = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".pdf",
+             ".txt", ".md", ".log", ".json", ".csv", ".mp4", ".webm", ".mp3",
+             ".wav", ".ogg", ".m4a", ".html", ".htm", ".xml"}
+    ext = os.path.splitext(nombre)[1].lower()
+    # mimetypes en slim a veces no trae los de webp o svg; se ponen a mano.
+    _TIPO = {".webp": "image/webp", ".svg": "image/svg+xml", ".mkv": "video/x-matroska",
+             ".m4v": "video/mp4", ".flac": "audio/flac", ".opus": "audio/opus",
+             ".epub": "application/epub+zip"}
+    tipo = _TIPO.get(ext) or mimetypes.guess_type(nombre)[0]
+    if not tipo or ext not in _MIRA:
+        tipo = tipo if (tipo and ext in _MIRA) else "application/octet-stream"
+    inline = ext in _MIRA
+    disposicion = "inline" if inline else "attachment"
+    # El nombre va entrecomillado porque los ficheros del NAS tienen espacios,
+    # acentos y de todo, y sin eso el navegador los parte por la mitad.
+    from urllib.parse import quote
+    cabeceras = {
+        "Content-Type": tipo,
+        "Content-Length": str(longitud),
+        "Content-Disposition":
+            f"{disposicion}; filename=\"{nombre}\"; "
+            f"filename*=UTF-8''{quote(nombre)}",
+        "Cache-Control": "private, max-age=60",
+        "Accept-Ranges": "bytes",
+        # Sin esto el navegador se fia del tipo que le digamos y un HTML del
+        # NAS podria ejecutar script con el origen del servidor.
+        "Content-Security-Policy": "sandbox; default-src 'none'",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if parcial:
+        cabeceras["Content-Range"] = f"bytes {desde}-{hasta}/{tam}"
+    return StreamingResponse(cuerpo(), status_code=206 if parcial else 200,
+                             headers=cabeceras)
 
 
 # ------------------------------------------------------------------ #

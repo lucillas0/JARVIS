@@ -61,13 +61,43 @@ function _jarvisWsUrl() {
   }
   cargarWebapps();
 
-  window.overlayAPI = {
-    // Datos de la pizarra: el brain devuelve la misma forma que el IPC.
+  // Abre un fichero en el navegador. inline lo pone el servidor segun la
+  // extension: imagenes, PDF, texto, audio y video se ven; el resto se baja.
+function verEnElNavegador(ruta) {
+  const url = window.overlayAPI.urlFichero(ruta);
+  window.open(url, '_blank', 'noopener');
+}
+
+window.overlayAPI = {
     getApps: () => get('/api/board/apps').then((d) => d.apps || []).catch(() => []),
     getRecent: () => get('/api/board/recent').then((d) => d.files || []).catch(() => []),
     listDir: (dir) => get('/api/board/dir' +
       (dir ? '?path=' + encodeURIComponent(dir) : '')).catch(() => null),
-    open: (item) => get('/api/board/open', item || {}).catch(() => ({ ok: false })),
+    // Abrir un fichero. En un NAS no hay escritorio, así que no hay nada que
+    // lanzar: el brain responde sin_escritorio y entonces lo que se hace es
+    // mandarlo al navegador con /api/board/fichero. En Windows el brain sí
+    // que abre con os.startfile y esto ni se usa.
+    open: (item) => get('/api/board/open', item || {})
+      .then((r) => {
+        if (r && r.sin_escritorio && r.descargar) {
+          verEnElNavegador(r.descargar);
+          return { ok: true, abierto_en: 'navegador' };
+        }
+        return r || { ok: false };
+      })
+      .catch(() => ({ ok: false })),
+
+    // URL con el token puesto, para abrirla en una pestaña. El token va en la
+    // query porque el navegador no manda cabeceras en un <a> ni en un
+    // window.open, y sin el el endpoint devuelve 401.
+    //
+    // OJO con el separador: window.JARVIS_TOKEN_URL ya empieza por "?token=",
+    // y pegarlo tal cual detrás de "?path=..." deja dos interrogantes. El token
+    // se acababa dentro del valor del path y la descarga devolvia 401 siempre.
+    urlFichero: (path) => {
+      const token = (window.JARVIS_TOKEN_URL || '').replace(/^\?/, '&');
+      return '/api/board/fichero?path=' + encodeURIComponent(path) + token;
+    },
 
     // Gestor de instaladas y terminal. En LITE no hay ventana de escritorio,
     // así que esto es lo que permite abrir CUALQUIER programa del equipo
