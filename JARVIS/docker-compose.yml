@@ -80,6 +80,17 @@ services:
       DSM_NAS_PASSWORD: "${DSM_NAS_PASSWORD:-}"
       DSM_NAS_INSEGURO: "${DSM_NAS_INSEGURO:-1}"
 
+      # ---- Domotica con Home Assistant (las herramientas domotica_*) ------
+      # Home Assistant corre en el mismo NAS por Container Manager. El token
+      # se crea en su perfil -> "Tokens de acceso de larga duración".
+      #
+      # OJO: ese token da control de TODA la casa. Quien lo tenga enciende el
+      # Heating y abre la cerradura. No se pone en el repositorio ni se
+      # comparte, y lo normal es dejarlo solo en tu .env.
+      HA_URL: "${HA_URL:-}"
+      HA_TOKEN: "${HA_TOKEN:-}"
+      HA_INSEGURO: "${HA_INSEGURO:-0}"
+
     # Volumenes con nombre: Docker los crea solo, no hay carpeta que hacer.
     volumes:
       - jarvis_data:/data
