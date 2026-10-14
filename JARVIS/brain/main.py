@@ -3857,7 +3857,12 @@ _DATA_TOOLS = {"vbox_exec", "vbox_read_file", "vbox_info", "vbox_list",
                "campus_notas", "campus_deadlines",
                "mobile_dispositivos", "mobile_apps",
                # Análisis de seguridad de ficheros.
-               "vt_scan_file", "vt_scan_url"}
+               "vt_scan_file", "vt_scan_url",
+               # Plugins de custom_tools. Sin esto, el plugin se ejecuta, se
+               # traga el resultado y el modelo contesta sin verlo, que es
+               # justo el fallo que se corrigio arriba para analisar_archivo.
+               "agenda_de_hoy", "correo_sin_leer",
+               "nas_espacio", "nas_salud", "nas_contenedores", "nas_registro"}
 
 
 def _compact_result(tool_name: str, result: dict, limit: int = 1500) -> str:
@@ -4031,6 +4036,15 @@ def _tool_label(tool_name: str) -> str:
 def _tool_result_to_frase(tool_name: str, r: dict) -> str:
     if r.get("status") == "success":
         res = r.get("result", {}) or {}
+        # Un handler puede devolver {"ok": false, "error": ...} en vez de
+        # lanzar. El ToolManager lo envuelve igual como success, y aqui se
+        # acababa en el "Hecho, señor." de debajo, tragandose el error: el
+        # señor oia que todo iba bien cuando no se habia hecho nada. Pasa con
+        # los plugins de custom_tools, que devuelven dicts y no recetas.
+        if isinstance(res, dict) and res.get("ok") is False:
+            motivo = str(res.get("error") or res.get("motivo")
+                         or "no se por que").strip()
+            return f"No he podido, señor: {motivo[:220]}"
         if tool_name == "vbox_list":
             vms = res.get("vms", []) if isinstance(res, dict) else []
             if not vms:
@@ -4129,6 +4143,15 @@ def _tool_result_to_frase(tool_name: str, r: dict) -> str:
             "web_fetch": "Página leída.",
             "web_search_results": "Resultados listos, señor.",
             "web_frontpage": _frase_frontpage(res),
+            # Plugins de custom_tools. Aquí no hace falta una frase por
+            # herramienta: son herramientas de DATOS, van por la ronda de
+            # razonamiento y el modelo ya cuenta lo que ha visto.
+            "agenda_de_hoy": "",
+            "correo_sin_leer": "",
+            "nas_espacio": "",
+            "nas_salud": "",
+            "nas_contenedores": "",
+            "nas_registro": "",
         }.get(tool_name, "Hecho, señor.")
     if r.get("status") == "cancelled":
         return "Acción cancelada, señor."

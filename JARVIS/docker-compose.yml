@@ -67,6 +67,19 @@ services:
       # .env con todas las claves. Esta es la lista blanca.
       JARVIS_RAICES: "${JARVIS_RAICES:-/mnt/nas,/data}"
 
+      # ---- API del Synology (las herramientas nas_*) ------------------------
+      # Sin esto, el brain no habla con el NAS: solo ve lo montado. Se pone la
+      # IP y el puerto de la API, que NO es el del DSM: 5000 por http, 5001 por
+      # https. Un NAS con la API en https usa DSM_NAS_INSEGURO=0.
+      #
+      # Las credenciales son de un usuario del DSM con permiso de lectura.
+      # Si no se ponen, el brain se conecta como invitado y lee lo que el
+      # invitado pueda; si tampoco, las herramientas lo dicen en claro.
+      DSM_NAS_URL: "${DSM_NAS_URL:-}"
+      DSM_NAS_USER: "${DSM_NAS_USER:-}"
+      DSM_NAS_PASSWORD: "${DSM_NAS_PASSWORD:-}"
+      DSM_NAS_INSEGURO: "${DSM_NAS_INSEGURO:-1}"
+
     # Volumenes con nombre: Docker los crea solo, no hay carpeta que hacer.
     volumes:
       - jarvis_data:/data

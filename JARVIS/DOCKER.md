@@ -219,6 +219,56 @@ docker logs jarvis 2>&1 | grep -A3 "Todos los proveedores fallaron"
 | `docker/entrypoint.sh` | Lo que va antes de uvicorn: comprueba permisos, avisa de lo que falta y baja a PUID/PGID. |
 | `configuracion.env.example` | Todas las opciones, comentadas y con los valores por defecto reales. Se copia a `.env` si lo quieres. |
 
+### Hablar con el NAS: la API de DSM
+
+Con el share montado, el brain ve tus archivos pero **no tu NAS**: no sabe cuánto
+disco queda, qué contenedores corren ni si el equipo se calienta. Para eso está
+la API de DSM, y hay cuatro herramientas que la usan:
+
+| Herramienta | Qué contesta |
+|---|---|
+| `nas_espacio` | Cuánto disco queda por volumen, con aviso si alguno está lleno. |
+| `nas_salud` | CPU, RAM, temperatura, modelo y uptime. |
+| `nas_contenedores` | Qué hay en Container Manager y qué está corriendo. |
+| `nas_registro` | Las últimas líneas del registro del NAS. |
+
+En el `.env` del proyecto:
+
+```ini
+DSM_NAS_URL=http://192.168.1.10:5000   # 5000 es la API por http, 5001 por https
+DSM_NAS_USER=mi_usuario
+DSM_NAS_PASSWORD=mi_clave
+DSM_NAS_INSEGURO=1                     # 0 solo si el NAS tiene certificado válido
+```
+
+Sin esto no se rompe nada: las herramientas lo dicen en claro en vez de
+inventarse una respuesta. El puerto **no** es el de DSM en el navegador, que es
+el mismo número con otro protocolo detrás (5000 http / 5001 https).
+
+---
+
+## Plugins
+
+`brain/tools/custom_tools.py` es la vía para ampliar JARVIS sin tocar el
+núcleo: se sueltan handlers y entradas en `CUSTOM_TOOLS`, y arrancan solos.
+Los que vienen de serie:
+
+- **Agenda y correo.** `agenda_de_hoy` y `correo_sin_leer`. Los módulos
+  (`integrations/calendar.py`, `integrations/gmail.py`) ya estaban escritos y
+  funcionaban, pero ninguna herramienta los exponía: solo los usaba el ritual
+  de las mañanas. Preguntar en una conversación normal devolvía un «Procederé a
+  revisarlo, señor» y nada más.
+- **El NAS.** Las cuatro de arriba, sin dependencias: la API de DSM es HTTP y
+  JSON, y meter una librería por eso añadiría seis paquetes a la imagen.
+
+El sistema **se amplía en caliente**: `custom_tools.py` se carga solo al
+arrancar, y el reparador lo vuelve a leer sin reiniciar.
+
+Un detalle que se nota: cuando el NAS no responde, las llamadas tardan **una
+vez** 8 s (el timeout) y las siguientes **0 ms** durante un minuto. Antes cada
+capa reintentaba por su cuenta y se pagaban cuatro timeouts seguidos: 32
+segundos de espera invisible.
+
 ### Variables del share
 
 | Variable | Por defecto | Qué hace |
