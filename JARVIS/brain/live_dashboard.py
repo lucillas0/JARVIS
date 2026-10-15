@@ -197,7 +197,7 @@ def _read_recent_events(brain) -> list[dict]:
 def _audit_events() -> list[dict]:
     """Los eventos persistentes salen de la auditoría SQL que ya usa Tool Manager."""
     try:
-        rows = db.list_audit(limit=15)
+        rows = db.list_audit(limit=60)
     except Exception as exc:
         log.debug("Auditoría reciente no disponible: %s", exc)
         return []
@@ -230,11 +230,6 @@ async def live_page(request: Request):
     html = index.read_text(encoding="utf-8")
     bootstrap = "<script>window.JARVIS_TOKEN=" + json.dumps(token()) + ";</script>"
     html = html.replace("</head>", bootstrap + "</head>", 1)
-    try:
-        from main import _mission_nav
-        html = html.replace("<!--MISSION-NAV-->", _mission_nav("live"))
-    except Exception:
-        html = html.replace("<!--MISSION-NAV-->", "")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 

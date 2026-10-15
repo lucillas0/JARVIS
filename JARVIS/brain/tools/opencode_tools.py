@@ -456,8 +456,14 @@ def _cerrar_job(job: dict, ok: bool) -> None:
     if fn is None:
         return
     try:
+        if ok:
+            fich = job.get("ficheros") or []
+            extra = f" ({len(fich)} ficheros: {', '.join(fich[:6])})" if fich else ""
+            titulo = f"Proyecto listo{extra}"
+        else:
+            titulo = "El proyecto no salio."
         fn({"type": "live_task_end", "task_id": job["id"],
-            "title": job["task"][:120] if ok else "El proyecto no salio.",
+            "title": titulo[:160],
             "failed": not ok})
     except Exception as e:
         log.debug("live_task_end: %s", e)
