@@ -13,6 +13,7 @@ log = logging.getLogger("tools.auto")
 
 _TASKS_FILE = None
 _sched_started = False
+_wakeup = threading.Event()
 
 
 def _tasks_path() -> str:
@@ -177,6 +178,7 @@ def schedule_task_handler(params: dict) -> dict:
     tasks.append({"name": name, "message": message,
                   "run_at": when["run_at"], "repeat": when["repeat"]})
     _save_tasks(tasks)
+    despertar()
     import datetime as _dt
     eta = _dt.datetime.fromtimestamp(when["run_at"]).strftime("%H:%M")
     rep = f", se repite cada {when['repeat'] // 60} min" if when["repeat"] else ""
@@ -237,10 +239,14 @@ def start_scheduler(handle_fn, emit_fn=None) -> bool:
     def _loop():
         while True:
             try:
+                _wakeup.clear()
                 now = time.time()
                 tasks = _load_tasks()
                 changed = False
                 for t in list(tasks):
+                    # Pausada desde Live: se salta sin tocarla ni borrarla.
+                    if t.get("paused"):
+                        continue
                     if t.get("run_at", 0) <= now:
                         try:
                             handle_fn(t.get("message", ""))
@@ -262,10 +268,20 @@ def start_scheduler(handle_fn, emit_fn=None) -> bool:
                     _save_tasks(tasks)
             except Exception as e:
                 log.debug("scheduler: %s", e)
-            time.sleep(20)
+            # Espera interrumpible: crear o lanzar una tarea la despierta al
+            # momento en vez de esperar al siguiente ciclo de 20 s.
+            _wakeup.wait(20)
 
     threading.Thread(target=_loop, daemon=True, name="task-scheduler").start()
     return True
+
+
+def despertar() -> None:
+    """Avisa al bucle de que las tareas cambiaron (crear, lanzar, pausar)."""
+    try:
+        _wakeup.set()
+    except Exception as e:
+        log.debug("scheduler wakeup: %s", e)
 
 
 AUTO_TOOLS = [

@@ -6,6 +6,7 @@
   const state = { connected: false, snapshot: null, ws: null, reconnect: null,
     failureTimer: null, refreshTimer: null, pollTimer: null, durationTimer: null,
     latestEvents: [], activeFilter: 'todos', lastPoll: 0, errors: 0 };
+  let uidSinId = 0;
   const categories = new Set(['tareas', 'cambios', 'permisos', 'errores', 'agentes', 'sistema', 'conversación']);
 
   function announce(message) {
@@ -135,7 +136,7 @@
       : type === 'assistant_reply' || type === 'user_heard' ? 'conversación'
       : type === 'status' || type === 'hello' ? 'sistema' : 'tareas';
     const category = categories.has(event.category) ? event.category : mapped;
-    return { id: String(event.id || event.event_id || `${type}-${event.at || Date.now()}-${Math.random().toString(36).slice(2,6)}`),
+    return { id: String(event.id || event.event_id || `local-${type}-${++uidSinId}`),
       at: event.at || Date.now() / 1000, category, title: title.slice(0,160),
       detail: String(event.detail || event.label || title).slice(0,350) };
   }
@@ -158,7 +159,31 @@
   }
   function renderTasks(list) {
     $('scheduled-count').textContent = String(list.length);
-    $('task-list').innerHTML = list.length ? list.slice(0,8).map(task => `<article class="tarea-item"><div class="tarea-head"><strong>${esc(task.name)}</strong><span class="estado-chip" data-state="pending">${esc(labelState(task.state))}</span></div><p>${esc(task.description || 'Sin descripción.')}</p><div class="tarea-meta"><span>${esc(task.agent || 'JARVIS')} · ${esc(dateTime(task.run_at))}</span><button type="button" class="task-cancel" data-cancel="${escAttr(task.id)}">Cancelar</button></div></article>`).join('') : '<div class="vacio-pequeno">No hay tareas programadas.</div>';
+    if (!list.length) {
+      $('task-list').innerHTML = '<div class="vacio-pequeno">No hay tareas programadas.</div>';
+      return;
+    }
+    $('task-list').innerHTML = list.slice(0, 8).map(task => {
+      const pausa = task.paused
+        ? `<button type="button" class="task-mini" data-resume="${escAttr(task.id)}">Reanudar</button>`
+        : `<button type="button" class="task-mini" data-pause="${escAttr(task.id)}">Pausar</button>`;
+      const repite = task.repeat ? ` · se repite cada ${Math.round(task.repeat / 60)} min` : '';
+      return `<article class="tarea-item"><div class="tarea-head"><strong>${esc(task.name)}</strong><span class="estado-chip" data-state="pending">${esc(labelState(task.state))}</span></div><p>${esc(task.description || 'Sin descripción.')}</p><div class="tarea-meta"><span>${esc(dateTime(task.run_at))}${esc(repite)}</span></div><div class="tarea-botones"><button type="button" class="task-mini" data-run="${escAttr(task.id)}">Ejecutar ahora</button>${pausa}<button type="button" class="task-cancel" data-cancel="${escAttr(task.id)}">Cancelar</button></div></article>`;
+    }).join('');
+  }
+  function renderRecent(list) {
+    const items = (list || []).slice(0, 8);
+    $('recent-count').textContent = String((list || []).length);
+    state.recent = {};
+    if (!items.length) {
+      $('recent-list').innerHTML = '<div class="vacio-pequeno">Aquí aparecerán los trabajos terminados, para reintentarlos.</div>';
+      return;
+    }
+    $('recent-list').innerHTML = items.map(task => {
+      state.recent[task.id] = task.message || '';
+      const marca = task.failed ? ' · falló' : '';
+      return `<article class="tarea-item"><div class="tarea-head"><strong>${esc(task.name)}</strong><span class="estado-chip" data-state="pending">${esc(labelState(task.failed ? 'failed' : 'completada'))}${esc(marca)}</span></div><div class="tarea-botones"><button type="button" class="task-mini" data-retry="${escAttr(task.id)}">Reintentar</button></div></article>`;
+    }).join('');
   }
   function renderAgents(list) {
     const active = list.filter(agent => agent.status === 'activo');
@@ -184,6 +209,7 @@
     updateHeading(data);
     renderApprovals(data.approvals || []);
     renderTasks(data.scheduled_tasks || []);
+    renderRecent(data.recent_tasks || []);
     renderAgents(data.agents || []);
     renderChanges(data.changes || []);
     const events = [...(data.audit_events || []), ...(data.events || [])].map(event => {
@@ -292,6 +318,14 @@
     clearTimeout(state.reconnect);
     state.reconnect = setTimeout(connect, 2800);
   }
+  function sendChat(text) {
+    if (!state.ws || state.ws.readyState !== 1) {
+      announce('Sin enlace en tiempo real. Espera a que conecte e inténtalo de nuevo.');
+      return false;
+    }
+    state.ws.send(JSON.stringify({ type: 'user_message', message: text, input_mode: 'text' }));
+    return true;
+  }
   async function postAction(action) {
     const button = action.button;
     const oldText = button.textContent;
@@ -325,6 +359,28 @@
       void postAction({ button: cancel, body: { kind: 'cancel_scheduled_task', target_id: cancel.dataset.cancel } });
       return;
     }
+    const run = event.target.closest('[data-run]');
+    if (run) {
+      void postAction({ button: run, body: { kind: 'run_scheduled_task', target_id: run.dataset.run } });
+      return;
+    }
+    const pause = event.target.closest('[data-pause]');
+    if (pause) {
+      void postAction({ button: pause, body: { kind: 'pause_scheduled_task', target_id: pause.dataset.pause } });
+      return;
+    }
+    const resume = event.target.closest('[data-resume]');
+    if (resume) {
+      void postAction({ button: resume, body: { kind: 'resume_scheduled_task', target_id: resume.dataset.resume } });
+      return;
+    }
+    const retryBtn = event.target.closest('[data-retry]');
+    if (retryBtn) {
+      const texto = (state.recent || {})[retryBtn.dataset.retry] || '';
+      if (!texto) { announce('Ese trabajo ya no guarda su mensaje para reintentarlo.'); return; }
+      if (sendChat(texto)) announce('Reintento enviado a JARVIS.');
+      return;
+    }
     const filter = event.target.closest('[data-filter]');
     if (filter) {
       document.querySelectorAll('.filtro').forEach(button => {
@@ -339,6 +395,20 @@
   window.addEventListener('online', () => { status('Red disponible; verificando el cerebro…', 'pending'); void refresh(true); });
   window.addEventListener('offline', () => status('Sin conexión de red; JARVIS continúa trabajando', 'offline'));
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refresh(true); });
+  $('task-clear').addEventListener('click', () => {
+    $('task-name').value = ''; $('task-message').value = ''; $('task-when').value = '';
+  });
+  $('task-form').addEventListener('submit', event => {
+    event.preventDefault();
+    const btn = $('task-submit');
+    const body = { kind: 'schedule_task', name: $('task-name').value.trim(),
+      message: $('task-message').value.trim(), schedule: $('task-when').value.trim() };
+    if (!body.message || !body.schedule) {
+      announce('Escribe la orden y el cuándo (18:30, en 30m o cada 1h).');
+      return;
+    }
+    void postAction({ button: btn, body });
+  });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
