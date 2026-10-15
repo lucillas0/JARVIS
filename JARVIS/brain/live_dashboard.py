@@ -191,6 +191,20 @@ def _scheduled_tasks() -> list[dict]:
     return result
 
 
+def _auditar(accion: str, detalle: str) -> None:
+    """Deja rastro de las ordenes del panel: quien programa que queda escrito.
+
+    Las acciones en si son de bajo riesgo (crear una fila, despertad al
+    planificador); el permiso de verdad se decide al ejecutarse, con el
+    RiskEngine de siempre.
+    """
+    try:
+        db.add_audit("live:" + accion, {"origen": "panel"},
+                     "low", True, "success", detalle[:300])
+    except Exception as e:
+        log.debug("auditoria live: %s", e)
+
+
 def _buscar_programada(task_id: str, source: list | None = None):
     """Localiza una tarea por su id estable (el mismo que muestra el panel).
 
@@ -214,8 +228,8 @@ def _buscar_programada(task_id: str, source: list | None = None):
 
 
 def _guardar_programadas(tasks: list) -> None:
-    from tools.auto_tools import _save_tasks, despertar
-    with _SCHEDULE_LOCK:
+    from tools.auto_tools import _save_tasks, _TASKS_LOCK, despertar
+    with _TASKS_LOCK:
         _save_tasks(tasks)
     try:
         despertar()
@@ -374,20 +388,21 @@ async def live_actions(request: Request, action: LiveAction):
         if not _validar_id_tarea(task_id):
             return JSONResponse({"ok": False, "error": "Identificador de tarea no válido."}, status_code=400)
         try:
-            from tools.auto_tools import _load_tasks
-            with _SCHEDULE_LOCK:
+            from tools.auto_tools import _load_tasks, _TASKS_LOCK
+            with _TASKS_LOCK:
                 current = [t for t in _load_tasks() if isinstance(t, dict)]
-            selected = _buscar_programada(task_id, current)
-            if not selected:
-                return JSONResponse({"ok": False, "error": "La tarea ya no está pendiente en el planificador."}, status_code=404)
-            left = [task for task in current if task is not selected]
-            _guardar_programadas(left)
+                selected = _buscar_programada(task_id, current)
+                if not selected:
+                    return JSONResponse({"ok": False, "error": "La tarea ya no está pendiente en el planificador."}, status_code=404)
+                left = [task for task in current if task is not selected]
+                _guardar_programadas(left)
             if len(left) == len(current):
                 return JSONResponse({"ok": False, "error": "La tarea ya se ejecutó o fue cancelada."}, status_code=409)
         except Exception:
             log.exception("No se pudo cancelar la tarea programada")
             return JSONResponse({"ok": False, "error": "No se pudo guardar la cancelación de la tarea."}, status_code=503)
         brain.emit({"type": "action_status", "label": "Tarea programada cancelada", "state": "cancelled"})
+        _auditar("cancel_scheduled_task", f"{selected.get('name', '')}: cancelada desde el panel")
         return JSONResponse({"ok": True, "message": "Tarea programada cancelada."})
     if action.kind == "schedule_task":
         # Programa con el planificador que ya existe (mismo formato, mismo
@@ -405,6 +420,7 @@ async def live_actions(request: Request, action: LiveAction):
         brain.emit({"type": "action_status",
                     "label": f"Tarea «{res.get('name', '')}» programada",
                     "state": "done"})
+        _auditar("schedule_task", f"{res.get('name', '')}: {action.message[:120]} -> {action.schedule}")
         return JSONResponse({"ok": True, "message": f"Programada para las {res.get('at', '')}{res.get('repeat', '')}."})
     if action.kind in ("run_scheduled_task", "pause_scheduled_task",
                        "resume_scheduled_task"):
@@ -412,27 +428,46 @@ async def live_actions(request: Request, action: LiveAction):
         if not _validar_id_tarea(task_id):
             return JSONResponse({"ok": False, "error": "Identificador de tarea no válido."}, status_code=400)
         try:
-            from tools.auto_tools import _load_tasks
+            from tools.auto_tools import _load_tasks, _TASKS_LOCK
             import time as _t
-            with _SCHEDULE_LOCK:
+            with _TASKS_LOCK:
                 current = [t for t in _load_tasks() if isinstance(t, dict)]
-            selected = _buscar_programada(task_id, current)
-            if not selected:
-                return JSONResponse({"ok": False, "error": "La tarea ya no está pendiente en el planificador."}, status_code=404)
-            if action.kind == "run_scheduled_task":
-                selected["run_at"] = _t.time()
-                texto = "La tarea se ejecutará en segundos."
-            elif action.kind == "pause_scheduled_task":
-                selected["paused"] = True
-                texto = "Tarea pausada: no se ejecutará hasta reanudarla."
-            else:
-                selected.pop("paused", None)
-                texto = "Tarea reanudada."
-            resto = [t for t in current if t is not selected]
-            _guardar_programadas(resto + [selected])
+                selected = _buscar_programada(task_id, current)
+                if not selected:
+                    return JSONResponse({"ok": False, "error": "La tarea ya no está pendiente en el planificador."}, status_code=404)
+                if action.kind == "run_scheduled_task":
+                    estaba_pausada = bool(selected.get("paused"))
+                    selected.pop("paused", None)
+                    selected["run_at"] = _t.time()
+                    texto = ("Reanudada y se ejecutará en segundos." if estaba_pausada
+                             else "La tarea se ejecutará en segundos.")
+                elif action.kind == "pause_scheduled_task":
+                    selected["paused"] = True
+                    texto = "Tarea pausada: no se ejecutará hasta reanudarla."
+                else:
+                    selected.pop("paused", None)
+                    texto = "Tarea reanudada."
+                resto = [t for t in current if t is not selected]
+                _guardar_programadas(resto + [selected])
         except Exception:
             log.exception("No se pudo modificar la tarea programada")
             return JSONResponse({"ok": False, "error": "No se pudo guardar el cambio."}, status_code=503)
+        _auditar(action.kind, f"{selected.get('name', '')}: {texto}")
         brain.emit({"type": "action_status", "label": texto, "state": "done"})
         return JSONResponse({"ok": True, "message": texto})
+    if action.kind == "cancel_build":
+        job_id = (action.target_id or "").strip()
+        if not job_id.startswith("build-") or len(job_id) > 120:
+            return JSONResponse({"ok": False, "error": "Identificador de trabajo no válido."}, status_code=400)
+        try:
+            from tools.opencode_tools import opencode_cancel
+            res = opencode_cancel(job_id)
+        except Exception:
+            log.exception("No se pudo detener el proyecto")
+            return JSONResponse({"ok": False, "error": "No se pudo detener."}, status_code=503)
+        if not res.get("ok"):
+            return JSONResponse({"ok": False, "error": res.get("error", "")[:200]}, status_code=404)
+        _auditar("cancel_build", f"{job_id}: detenido desde el panel")
+        brain.emit({"type": "action_status", "label": "Proyecto detenido.", "state": "cancelled"})
+        return JSONResponse({"ok": True, "message": res.get("mensaje", "Proyecto detenido.")})
     return JSONResponse({"ok": False, "error": "Acción no admitida por las APIs actuales de JARVIS."}, status_code=422)

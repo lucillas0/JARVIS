@@ -1,4 +1,4 @@
-﻿"""JARVIS Brain — orquestador (sección 10 y 12).
+"""JARVIS Brain — orquestador (sección 10 y 12).
 
 Servicio FastAPI + WebSocket en 127.0.0.1:8000/ws que une:
 - Model Router (Groq → Gemini → OpenRouter → Ollama)
@@ -29,6 +29,40 @@ from memory.semantic import semantic_memory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("brain")
+
+
+class _FiltroToken(logging.Filter):
+    """Tacha el token en los logs: viaja en la query del WebSocket (?token=)
+    y uvicorn lo escribe tal cual en cada linea de acceso. Quien lea los logs
+    no deberia llevarse la llave del cerebro puesta.
+
+    Solo actua sobre el texto ya formateado; no toca args ni niveles.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            texto = record.getMessage()
+            if "token=" in texto:
+                import re as _re
+                record.msg = _re.sub(r"(token=)[^&\s\"']+", r"\1***", texto)
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+def _tapar_token_en_logs() -> None:
+    """El filtro sobrevive a la reconfiguracion de uvicorn si se aplica en el
+    arranque ademas de aqui: dictConfig no toca los filtros del logger."""
+    try:
+        _f = _FiltroToken()
+        for nombre in ("", "uvicorn", "uvicorn.access", "uvicorn.error"):
+            logging.getLogger(nombre).addFilter(_f)
+    except Exception:
+        pass
+
+
+_tapar_token_en_logs()
 
 # Barómetro de progreso (texto, voz y puentes): qué decir cuando pensar
 # lleva su tiempo. Rápido (<4s) = respuesta directa sin avisos.
@@ -4500,6 +4534,7 @@ def _speak_text(text: str, text_fallback: bool = True) -> None:
 @app.on_event("startup")
 async def startup():
     brain.loop = asyncio.get_running_loop()
+    _tapar_token_en_logs()
     _init_services()
     # El índice del campus se levanta en segundo plano: así la primera pregunta
     # sobre sus cursos no espera a que se lea el Moodle entero.

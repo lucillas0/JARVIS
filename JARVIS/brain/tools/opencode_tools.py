@@ -42,19 +42,15 @@ PROTECT = ("keys.env", ".env", ".db", ".db-wal", ".db-shm", "auth.json",
 # Directorios que OpenCode no pisa jamás (dependencias, venvs, instaladores).
 SKIP_DIRS = ("node_modules", "venv", ".venv", "dist-installer", "win-unpacked",
              "__pycache__", ".git", "qdrant", "wa-session")
+# Lockfiles: al cerrar el job se cuentan aparte para no ensuciar la lista.
+_LOCKFILES = ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
+              "Cargo.lock", "Gemfile.lock", "composer.lock")
 
 
 def ensure_opencode(timeout: int = 180) -> bool:
     """Garantiza OpenCode CLI: si falta, intenta instalarlo con npm."""
-    if os.path.isfile(OC_CMD):
+    if _cli_disponible():
         return True
-    for cand in ("opencode.cmd", "opencode.exe", "opencode"):
-        try:
-            import shutil as _sh
-            if _sh.which(cand):
-                return True
-        except Exception:
-            pass
     try:
         import subprocess as _sp
         _sp.run(["npm", "install", "-g", "opencode"],
@@ -62,7 +58,33 @@ def ensure_opencode(timeout: int = 180) -> bool:
                 creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
     except Exception as e:
         log.warning("auto-install opencode: %s", e)
-    return os.path.isfile(OC_CMD)
+    return bool(_cli_disponible())
+
+
+def _cli_disponible() -> str:
+    """Ruta del CLI si esta, sin instalar nada: comprobar es instantaneo.
+
+    Se usa en el camino caliente (opencode_build). La autoinstalacion con npm
+    tarda minutos y bloquea al servidor: solo la intenta opencode_fix, que ya
+    era sincrono de por si.
+    """
+    if os.path.isfile(OC_CMD):
+        return OC_CMD
+    try:
+        import shutil as _sh
+        for cand in ("opencode.cmd", "opencode.exe", "opencode"):
+            ruta = _sh.which(cand)
+            if ruta:
+                return ruta
+    except Exception:
+        pass
+    return ""
+
+
+def _prompt_proyecto(objetivo: str, workdir: str) -> str:
+    # .replace y no .format: el objetivo lo escribe el señor y puede traer
+    # llaves, que con .format revientan con KeyError.
+    return BUILD_PROMPT.replace("{workdir}", workdir).replace("{objetivo}", objetivo)
 
 REPAIR_PROMPT = """Eres el reparador del asistente JARVIS (repo Python en {workdir}).
 Intento número {attempt}: NO te rindas, los intentos anteriores fallaron.
@@ -330,8 +352,41 @@ def _es_paso_importante(texto: str) -> bool:
         "error", "done", "complete"))
 
 
+def _matar_arbol(proc) -> None:
+    """Mata el proceso y sus hijos (opencode lanza npm/node por debajo).
+
+    Sin esto, matar al padre deja huerfanos compilando en segundo plano y el
+    panel dice "detenido" mientras la CPU sigue ardiendo.
+    """
+    try:
+        import psutil as _ps
+        try:
+            root = _ps.Process(proc.pid)
+            for hijo in root.children(recursive=True):
+                try:
+                    hijo.kill()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 def _ejecutar_job(job: dict, cmd: list, env: dict, timeout: int) -> None:
-    """Corre el agente en un hilo: emite pasos y cierra la tarea al final."""
+    """Corre el agente en un hilo: emite pasos y cierra la tarea al final.
+
+    El timeout se mide con el RELOJ, no con las vueltas del bucle: antes se
+    restaba uno por linea leida, asi que un agente hablador moria a los pocos
+    segundos y uno callado colgaba el hilo para siempre (readline bloquea).
+    Ahora un lector aparte encola las lineas y este bucle solo vigila el
+    reloj y si el proceso sigue vivo.
+    """
+    import queue as _q
     import threading as _th
     import time as _t
 
@@ -341,20 +396,35 @@ def _ejecutar_job(job: dict, cmd: list, env: dict, timeout: int) -> None:
     job["estado"] = "ejecutando"
     job["inicio"] = _t.time()
     ultimo_emit = 0.0
-    salida = []
+    salida: list = []
     try:
         p = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", env=env, cwd=workdir,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         job["pid"] = p.pid
-        resto = timeout
-        while True:
+        job["proc"] = p
+        cola: _q.Queue = _q.Queue()
+
+        def _lector():
             try:
-                linea = p.stdout.readline()
+                while True:
+                    linea = p.stdout.readline()
+                    if not linea:
+                        break
+                    cola.put(linea)
             except Exception:
-                linea = ""
-            if linea:
+                pass
+
+        _th.Thread(target=_lector, daemon=True,
+                   name=f"oc-lector-{job['id']}").start()
+        limite = _t.monotonic() + max(1, timeout)
+        while True:
+            while True:
+                try:
+                    linea = cola.get_nowait()
+                except Exception:
+                    break
                 salida.append(linea)
                 if len(salida) > 400:
                     salida = salida[-400:]
@@ -373,22 +443,24 @@ def _ejecutar_job(job: dict, cmd: list, env: dict, timeout: int) -> None:
                               or (ahora - ultimo_emit) > 20):
                     ultimo_emit = ahora
                     _step(task, texto)
+            if job.get("cancelado"):
+                _matar_arbol(p)
+                job["estado"] = "cancelado"
+                job["error"] = "Detenido por el usuario."
+                _step(task, "Proyecto detenido por el usuario.", done=True)
+                _cerrar_job(job, False, "Proyecto detenido por el usuario.")
+                return
             if p.poll() is not None:
                 break
-            resto -= 1
-            if resto <= 0:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+            if _t.monotonic() >= limite:
+                _matar_arbol(p)
                 job["estado"] = "fallido"
                 job["error"] = "Tardo demasiado y se detuvo."
                 _step(task, "Se detuvo por tiempo.", done=True,
                       error=job["error"])
                 _cerrar_job(job, False)
                 return
-            if not linea:
-                _t.sleep(1)
+            _t.sleep(0.5)
         resto_out = "".join(salida)[-2000:]
         if p.returncode not in (0, None):
             job["estado"] = "fallido"
@@ -397,10 +469,13 @@ def _ejecutar_job(job: dict, cmd: list, env: dict, timeout: int) -> None:
                   error=job["error"])
             _cerrar_job(job, False)
             return
-        # Ficheros nuevos o tocados dentro del proyecto.
+        # Ficheros nuevos o tocados dentro del proyecto. Los lockfiles se
+        # cuentan aparte: son ruido del gestor de paquetes, no trabajo.
         after = _snapshot(workdir)
-        changed = sorted(p for p in after
-                         if after.get(p) != job["before"].get(p))
+        todos = sorted(p for p in after
+                       if after.get(p) != job["before"].get(p))
+        lock = [p for p in todos if os.path.basename(p) in _LOCKFILES]
+        changed = [p for p in todos if p not in lock]
         # Verifica sintaxis de lo tocado (mismo criterio que opencode_fix).
         import py_compile
         bad = []
@@ -442,6 +517,10 @@ def _ejecutar_job(job: dict, cmd: list, env: dict, timeout: int) -> None:
             return
         job["estado"] = "completado"
         job["resumen"] = resto_out[-500:]
+        if lock:
+            job["resumen"] += f" (+{len(lock)} lockfiles omitidos)"
+        if avisos:
+            job["resumen"] += " Avisos: " + "; ".join(avisos[:4])
         _step(task, f"Proyecto listo: {len(changed)} ficheros.", done=True)
         _cerrar_job(job, True)
     except Exception as e:
@@ -451,17 +530,18 @@ def _ejecutar_job(job: dict, cmd: list, env: dict, timeout: int) -> None:
         _cerrar_job(job, False)
 
 
-def _cerrar_job(job: dict, ok: bool) -> None:
+def _cerrar_job(job: dict, ok: bool, titulo: str = "") -> None:
     fn = _progress_emit
     if fn is None:
         return
     try:
-        if ok:
-            fich = job.get("ficheros") or []
-            extra = f" ({len(fich)} ficheros: {', '.join(fich[:6])})" if fich else ""
-            titulo = f"Proyecto listo{extra}"
-        else:
-            titulo = "El proyecto no salio."
+        if not titulo:
+            if ok:
+                fich = job.get("ficheros") or []
+                extra = f" ({len(fich)} ficheros: {', '.join(fich[:6])})" if fich else ""
+                titulo = f"Proyecto listo{extra}"
+            else:
+                titulo = "El proyecto no salio."
         fn({"type": "live_task_end", "task_id": job["id"],
             "title": titulo[:160],
             "failed": not ok})
@@ -476,7 +556,9 @@ def opencode_build(objetivo: str, proyecto: str = "",
     if not objetivo:
         return {"ok": False, "error": "Falta decir que proyecto quieres."}
     nombre = _sanitizar_proyecto(proyecto or objetivo.split("\n")[0][:30])
-    if not ensure_opencode():
+    if not _cli_disponible():
+        # Comprobacion instantanea, sin intentar instalar: instalar tarda
+        # minutos y bloquearia al servidor en cada lanzamiento.
         return {"ok": False,
                 "error": "OpenCode CLI no esta disponible en este equipo. "
                          "En el servidor Docker no hay node ni opencode; "
@@ -496,16 +578,22 @@ def opencode_build(objetivo: str, proyecto: str = "",
            "before": _snapshot(workdir)}
     with _jobs_lock():
         _JOBS[job_id] = job
-    prompt = BUILD_PROMPT.format(workdir=workdir, objetivo=objetivo)
-    cmd = [OC_CMD if os.path.isfile(OC_CMD) else "opencode",
-           "run", "-m", OC_MODEL, "--format", "json", "--auto",
+    prompt = _prompt_proyecto(objetivo, workdir)
+    cli = _cli_disponible()
+    if not cli:
+        return {"ok": False,
+                "error": "OpenCode CLI no esta disponible en este equipo. "
+                         "En el servidor Docker no hay node ni opencode; "
+                         "esto funciona en el JARVIS de escritorio."}
+    cmd = [cli, "run", "-m", OC_MODEL, "--format", "json", "--auto",
            "--dir", workdir, prompt]
-    # live_task_start: los paneles lo muestran como trabajo activo.
+    # live_task_start: los paneles lo muestran como trabajo activo. Lleva el
+    # objetivo para que el trabajo salga en Recientes y se pueda reintentar.
     fn = _progress_emit
     if fn is not None:
         try:
             fn({"type": "live_task_start", "task_id": job_id,
-                "title": tarea[:120],
+                "title": tarea[:120], "message": objetivo[:2000],
                 "description": "OpenCode desarrollando el proyecto"})
         except Exception as e:
             log.debug("live_task_start: %s", e)
@@ -524,8 +612,37 @@ def opencode_jobs() -> dict:
     with _jobs_lock():
         jobs = [dict(j) for j in _JOBS.values()]
     for j in jobs:
+        # Ni el snapshot ni el proceso son serializables ni aportan nada fuera.
         j.pop("before", None)
+        j.pop("proc", None)
     return {"ok": True, "jobs": jobs}
+
+
+def opencode_cancel(job_id: str = "") -> dict:
+    """Detiene un proyecto en marcha. Lo ya escrito se queda como esta."""
+    job_id = (job_id or "").strip()
+    if not job_id:
+        return {"ok": False, "error": "Falta el id del trabajo."}
+    with _jobs_lock():
+        job = _JOBS.get(job_id)
+    if job is None:
+        return {"ok": False, "error": "Ese trabajo no existe."}
+    if job.get("estado") != "ejecutando":
+        return {"ok": False, "error": f"Ya no esta en marcha ({job.get('estado')})."}
+    job["cancelado"] = True
+    proc = job.get("proc")
+    if proc is not None:
+        _matar_arbol(proc)
+    return {"ok": True, "job_id": job_id,
+            "mensaje": "Orden de parada enviada; el panel lo confirmara."}
+
+
+def opencode_cancel_handler(params: dict) -> dict:
+    """Tool: detiene un proyecto en marcha."""
+    res = opencode_cancel(params.get("job_id") or params.get("id") or "")
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error", "No se pudo detener."))
+    return res
 
 
 def opencode_build_handler(params: dict) -> dict:
@@ -627,4 +744,12 @@ OCODE_TOOLS = [
      "description": "Cómo van los proyectos que OpenCode está desarrollando: estado, ficheros creados y errores.",
      "label": "Viendo proyectos en marcha",
      "handler": opencode_jobs_handler},
+    {"name": "opencode_cancel",
+     "risk_level": "medium",
+     "requires_confirmation": True,
+     "confirm_text": "¿Detener el proyecto en marcha? Lo ya escrito se queda.",
+     "parameters": {"job_id": "str, el id del trabajo (build-...)"},
+     "description": "Detiene un proyecto que OpenCode está desarrollando ahora mismo. Lo ya escrito no se borra.",
+     "label": "Deteniendo proyecto",
+     "handler": opencode_cancel_handler},
 ]
