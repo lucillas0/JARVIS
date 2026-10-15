@@ -35,7 +35,8 @@ def _step(task: str, label: str, done: bool = False, error: str = "") -> None:
         log.debug("progress emit: %s", e)
 
 OC_CMD = r"C:\Users\Lucas\AppData\Roaming\npm\opencode.cmd"
-OC_MODEL = "opencode/muse-spark-1.3-contributor-free"
+# El modelo se puede cambiar sin tocar codigo: OPENCODE_MODEL="groq/llama-3.3-70b-versatile".
+OC_MODEL = os.environ.get("OPENCODE_MODEL", "opencode/muse-spark-1.3-contributor-free")
 OC_TIMEOUT = 480
 PROTECT = ("keys.env", ".env", ".db", ".db-wal", ".db-shm", "auth.json",
            "creds.json", "opencode_tools.py")
@@ -51,9 +52,12 @@ def ensure_opencode(timeout: int = 180) -> bool:
     """Garantiza OpenCode CLI: si falta, intenta instalarlo con npm."""
     if _cli_disponible():
         return True
+    # OJO: el paquete npm se llama opencode-ai (el binario, opencode). Con
+    # "opencode" a secas el registro devuelve 404 y la autoinstalacion no
+    # funciono nunca.
     try:
         import subprocess as _sp
-        _sp.run(["npm", "install", "-g", "opencode"],
+        _sp.run(["npm", "install", "-g", "opencode-ai"],
                 capture_output=True, timeout=timeout,
                 creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
     except Exception as e:
@@ -560,9 +564,7 @@ def opencode_build(objetivo: str, proyecto: str = "",
         # Comprobacion instantanea, sin intentar instalar: instalar tarda
         # minutos y bloquearia al servidor en cada lanzamiento.
         return {"ok": False,
-                "error": "OpenCode CLI no esta disponible en este equipo. "
-                         "En el servidor Docker no hay node ni opencode; "
-                         "esto funciona en el JARVIS de escritorio."}
+                "error": "OpenCode CLI no esta disponible en este equipo."}
     base = _dir_proyectos()
     workdir = os.path.join(base, nombre)
     try:
