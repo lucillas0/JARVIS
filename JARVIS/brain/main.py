@@ -3992,6 +3992,18 @@ def _handle(text: str, input_mode: str) -> str:
 
     # --- Ejecutar tool si el modelo la pidió (bucle autónomo: 3, 6 en modo autónomo/investigación) ---
     rounds = _parse_tool_plan(reply)
+    if not rounds:
+        # Red de seguridad para la autonomia: si el señor pide DESARROLLAR
+        # algo y el modelo contesta texto plano (escribe el codigo el en el
+        # chat en vez de delegar), se propone opencode_build igual que si lo
+        # hubiera pedido el: con su confirmacion y su ejecucion normales. Solo
+        # actua cuando el modelo no pidio ninguna tool: nunca pisa su decision.
+        _dev = _intencion_desarrollo(cleaned)
+        if _dev:
+            rounds = [{"reply": "De inmediato, señor. Lo encargo al taller.",
+                       "tool": "opencode_build",
+                       "parameters": {"objetivo": cleaned[:1500],
+                                      "proyecto": _dev}}]
     if rounds:
         _auto = bool(re.search(
             r"\b(modo aut[óo]nomo|aut[óo]nomo|encadena|en cadena|hazlo todo|"
@@ -4022,6 +4034,38 @@ def _handle(text: str, input_mode: str) -> str:
         else:
             reply = f"(Modo local.) {reply}"
     return reply
+
+
+def _intencion_desarrollo(texto: str) -> str:
+    """¿Pide el señor DESARROLLAR algo? Devuelve un nombre de proyecto o "".
+
+    Solo salta con verbo de construccion + objeto de software a la vez
+    ("desarrollame una web", "creame una app", "hazme una tienda"). Jamas con
+    recordatorios, avisos o notas, que son del planificador, ni con preguntas
+    ("que es", "como funciona"), que son conversacion.
+    """
+    import re as _re
+    import unicodedata as _ud
+    t = _ud.normalize("NFKD", (texto or "").lower())
+    t = "".join(c for c in t if not _ud.combining(c))
+    if _re.search(r"\b(recordatorio|alarma|aviso|nota|apunta|recuerda|despertador|"
+                  r"cada \d|a las \d|calendario)\b", t):
+        return ""
+    if _re.search(r"^(que es|qué es|como funciona|cómo funciona|que significa|"
+                  r"expl[ii]came|cuentame|háblame)\b", t.strip()):
+        return ""
+    objeto = (r"(proyecto|web|app|aplicacion|programa|script|tienda|pagina|"
+              r"software|juego)")
+    verbo = (r"(desarrolla(?:me|r)?|programa(?:me)?|crea(?:me)?|hazme|"
+             r"construye(?:me)?|disena(?:me)?)")
+    if not _re.search(verbo + r"\b.{0,40}\b" + objeto, t):
+        return ""
+    nombre = _re.sub(r"^(por favor |oye |jarvis[, ]*)*", "", t.strip())
+    nombre = _re.sub(r"\b(desarrollame|desarrolla|programame|programa|creame|crea|"
+                     r"hazme|construyeme|construye|disename|disena|quiero|que|un|una|"
+                     r"nuevo|nueva|para|mi|el|la|de|del)\b", " ", nombre)
+    nombre = _re.sub(r"[^a-z0-9]+", "-", nombre).strip("-")[:30].strip("-")
+    return nombre or "proyecto"
 
 
 def _parse_tool_plan(reply: str):
