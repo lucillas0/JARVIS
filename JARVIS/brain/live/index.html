@@ -83,7 +83,16 @@
         </article>
 
         <aside class="lateral">
-          <section class="tarjeta-lateral" aria-labelledby="tasks-heading"><div class="titulo-seccion"><div><p class="kicker">PLANIFICADOR ACTUAL</p><h2 id="tasks-heading">Próximas tareas</h2></div><span id="scheduled-count" class="cantidad-lateral">0</span></div><div id="task-list" class="lista-tareas"><div class="vacio-pequeno">No hay tareas programadas.</div></div></section>
+          <section class="tarjeta-lateral" aria-labelledby="tasks-heading"><div class="titulo-seccion"><div><p class="kicker">PLANIFICADOR ACTUAL</p><h2 id="tasks-heading">Próximas tareas</h2></div><span id="scheduled-count" class="cantidad-lateral">0</span></div><div id="task-list" class="lista-tareas"><div class="vacio-pequeno">No hay tareas programadas.</div></div>
+          <form class="tarea-form" id="task-form" aria-label="Programar una tarea nueva">
+            <strong>Programar tarea</strong>
+            <label>Nombre<input type="text" id="task-name" maxlength="60" placeholder="Aviso de…" autocomplete="off"></label>
+            <label>Orden para JARVIS<textarea id="task-message" rows="2" maxlength="500" placeholder="Qué debe hacer…"></textarea></label>
+            <label>Cuándo<input type="text" id="task-when" maxlength="40" placeholder="18:30 · en 30m · cada 1h" autocomplete="off"></label>
+            <button type="submit" id="task-submit">Programar</button>
+            <button type="button" class="task-cancel" id="task-clear">Limpiar</button>
+          </form></section>
+          <section class="tarjeta-lateral" aria-labelledby="recent-heading"><div class="titulo-seccion"><div><p class="kicker">SESIÓN ACTUAL</p><h2 id="recent-heading">Recientes</h2></div><span id="recent-count" class="cantidad-lateral">0</span></div><div id="recent-list" class="lista-tareas"><div class="vacio-pequeno">Aquí aparecerán los trabajos terminados, para reintentarlos.</div></div><p class="nota-recursos">Solo de esta sesión: al reiniciar se vacía.</p></section>
           <section class="tarjeta-lateral" aria-labelledby="agents-heading"><div class="titulo-seccion"><div><p class="kicker">DETECCIÓN EXISTENTE</p><h2 id="agents-heading">Agentes</h2></div><span id="agents-total" class="cantidad-lateral">0</span></div><div id="agent-list" class="lista-agentes"></div><p class="nota-recursos">Estado detectado por procesos. No implica conocer la tarea de cada editor.</p></section>
           <section class="tarjeta-lateral" aria-labelledby="changes-heading"><div class="titulo-seccion"><div><p class="kicker">GIT EN ESTE PROYECTO</p><h2 id="changes-heading">Cambios locales</h2></div><span id="changes-total" class="cantidad-lateral">0</span></div><div id="change-list" class="lista-cambios"></div><p class="nota-recursos">Solo se muestran las modificaciones que Git detecta; JARVIS no crea otro historial.</p></section>
         </aside>

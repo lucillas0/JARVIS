@@ -63,6 +63,9 @@ class Brain:
         self._live_task_lock = threading.Lock()
         self._live_event_lock = threading.Lock()
         self._live_started_at = time.time()
+        # Ultimas tareas terminadas, para reintentarlas desde Live. Solo
+        # memoria de sesion: al reiniciar se vacia, y es honesto decirlo.
+        self._live_done = deque(maxlen=20)
 
     # ---------------- emisor de eventos a la app ----------------
     def record_live_event(self, msg: dict) -> dict | None:
@@ -77,6 +80,7 @@ class Brain:
                     self._live_tasks[task_id] = {
                         "id": task_id, "name": str(msg.get("title", "Trabajo de JARVIS"))[:120],
                         "description": str(msg.get("description", ""))[:240],
+                        "message": str(msg.get("message", ""))[:2000],
                         "state": "ejecutando", "agent": "JARVIS", "progress": None,
                         "started_at": time.time(), "priority": "normal",
                     }
@@ -84,6 +88,17 @@ class Brain:
             elif kind == "live_task_end" and task_id:
                 with self._live_task_lock:
                     task = self._live_tasks.pop(task_id, None)
+                    # Se guarda para reintentar desde Live. Sin el mensaje
+                    # original no hay reintento posible: si no esta, no se
+                    # ofrece el boton.
+                    if task and task.get("message"):
+                        self._live_done.appendleft({
+                            "id": task_id,
+                            "name": task.get("name", "Trabajo de JARVIS"),
+                            "message": task.get("message", ""),
+                            "failed": bool(msg.get("failed")),
+                            "ended_at": time.time(),
+                        })
                 summary = str(msg.get("title") or (task or {}).get("name") or "Tarea completada")
                 details, category = summary[:400], "errores" if msg.get("failed") else "tareas"
         elif kind == "task_step":
@@ -4624,6 +4639,7 @@ async def websocket_endpoint(ws: WebSocket):
                 task_id = "live-" + uuid4().hex[:16]
                 brain.emit({"type": "live_task_start", "task_id": task_id,
                             "title": str(message).strip()[:120],
+                            "message": str(message)[:2000],
                             "description": "Consulta recibida por JARVIS"})
                 asyncio.create_task(_process_user_message(
                     message, data.get("input_mode", "text"), bool(data.get("speak", False)),
