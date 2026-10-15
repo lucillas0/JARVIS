@@ -88,7 +88,19 @@
       $('activity-description').textContent = task.description || 'Trabajo en ejecución. El porcentaje de avance no está disponible en el gestor actual.';
       $('current-activity').textContent = `JARVIS está trabajando: ${task.name || 'trabajo activo'}`;
       $('current-task').hidden = false;
-      $('current-task').textContent = `${task.id} · ${labelState(task.state)} · Agente: ${task.agent || 'JARVIS'} · Tiempo transcurrido: ${duration(task.started_at)}`;
+      const esBuild = String(task.id || '').startsWith('build-');
+      $('current-task').innerHTML = '';
+      const info = document.createElement('span');
+      info.textContent = `${task.id} · ${labelState(task.state)} · Agente: ${task.agent || 'JARVIS'} · Tiempo transcurrido: ${duration(task.started_at)}`;
+      $('current-task').appendChild(info);
+      if (esBuild) {
+        const parar = document.createElement('button');
+        parar.type = 'button';
+        parar.className = 'task-mini';
+        parar.dataset.stopBuild = task.id;
+        parar.textContent = 'Detener';
+        $('current-task').appendChild(parar);
+      }
     } else {
       $('activity-title').textContent = pending ? 'JARVIS está esperando autorización.' : 'El cerebro está disponible.';
       $('activity-description').textContent = pending
@@ -372,6 +384,12 @@
     const resume = event.target.closest('[data-resume]');
     if (resume) {
       void postAction({ button: resume, body: { kind: 'resume_scheduled_task', target_id: resume.dataset.resume } });
+      return;
+    }
+    const stop = event.target.closest('[data-stop-build]');
+    if (stop) {
+      if (!window.confirm('¿Detener este proyecto? Lo ya escrito se queda como está.')) return;
+      void postAction({ button: stop, body: { kind: 'cancel_build', target_id: stop.dataset.stopBuild } });
       return;
     }
     const retryBtn = event.target.closest('[data-retry]');

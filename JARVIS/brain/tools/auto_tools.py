@@ -14,6 +14,9 @@ log = logging.getLogger("tools.auto")
 _TASKS_FILE = None
 _sched_started = False
 _wakeup = threading.Event()
+# Un solo cerrojo REENTRANTE para leer-modificar-guardar tareas. Sin el, dos
+# clics seguidos en el panel (pausar y cancelar a la vez) pisan el fichero.
+_TASKS_LOCK = threading.RLock()
 
 
 def _tasks_path() -> str:
@@ -31,13 +34,14 @@ def _load_tasks() -> list:
 
 
 def _save_tasks(tasks: list) -> None:
-    try:
-        tmp = _tasks_path() + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(tasks, f, ensure_ascii=False)
-        os.replace(tmp, _tasks_path())
-    except Exception as e:
-        log.debug("tasks save: %s", e)
+    with _TASKS_LOCK:
+        try:
+            tmp = _tasks_path() + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(tasks, f, ensure_ascii=False)
+            os.replace(tmp, _tasks_path())
+        except Exception as e:
+            log.debug("tasks save: %s", e)
 
 
 def _parse_when(spec: str):
@@ -174,10 +178,11 @@ def schedule_task_handler(params: dict) -> dict:
         raise ValueError("Falta el mensaje (qué debe hacer).")
     if not when:
         raise ValueError("Cuándo: 'HH:MM', 'en 2h', 'en 30m', 'cada 1h'.")
-    tasks = [t for t in _load_tasks() if t.get("name") != name]
-    tasks.append({"name": name, "message": message,
-                  "run_at": when["run_at"], "repeat": when["repeat"]})
-    _save_tasks(tasks)
+    with _TASKS_LOCK:
+        tasks = [t for t in _load_tasks() if t.get("name") != name]
+        tasks.append({"name": name, "message": message,
+                      "run_at": when["run_at"], "repeat": when["repeat"]})
+        _save_tasks(tasks)
     despertar()
     import datetime as _dt
     eta = _dt.datetime.fromtimestamp(when["run_at"]).strftime("%H:%M")
@@ -197,9 +202,11 @@ def list_tasks_handler(params: dict) -> dict:
 
 def cancel_task_handler(params: dict) -> dict:
     name = (params.get("name", "") or "").strip()
-    tasks = _load_tasks()
-    left = [t for t in tasks if t.get("name") != name] if name else []
-    _save_tasks(left)
+    with _TASKS_LOCK:
+        tasks = _load_tasks()
+        left = [t for t in tasks if t.get("name") != name] if name else []
+        _save_tasks(left)
+    despertar()
     return {"cancelled": name or "todas", "remaining": len(left)}
 
 
