@@ -12,6 +12,28 @@ import time
 
 log = logging.getLogger("tools.opencode")
 
+# --- Progreso hacia los paneles (sin import circular) -----------------------
+# main.py cablea brain.emit aqui al arrancar, igual que hace con
+# status.set_emit. Las tools nunca importan main.
+_progress_emit = None
+
+
+def set_progress_emit(fn) -> None:
+    """Lo llama main.py una vez: a partir de ahi los jobs emiten pasos."""
+    global _progress_emit
+    _progress_emit = fn
+
+
+def _step(task: str, label: str, done: bool = False, error: str = "") -> None:
+    fn = _progress_emit
+    if fn is None:
+        return
+    try:
+        fn({"type": "task_step", "task": task[:120], "label": label[:240],
+            "done": bool(done), "error": (error or "")[:240]})
+    except Exception as e:
+        log.debug("progress emit: %s", e)
+
 OC_CMD = r"C:\Users\Lucas\AppData\Roaming\npm\opencode.cmd"
 OC_MODEL = "opencode/muse-spark-1.3-contributor-free"
 OC_TIMEOUT = 480
@@ -222,6 +244,314 @@ def opencode_fix(task: str, timeout: int = OC_TIMEOUT, workdir: str = "") -> dic
     return {"ok": True, "output": out[-800:], "files": changed}
 
 
+BUILD_PROMPT = """Eres el programador del asistente JARVIS. Te piden un proyecto nuevo
+desde cero en {workdir} (esa carpeta ya existe y esta vacia o con lo justo).
+
+PROYECTO PEDIDO:
+{objetivo}
+
+REGLAS DURAS:
+1. Trabaja SOLO dentro de {workdir}. PROHIBIDO salir de ahi, tocar keys.env,
+   .env, *.db, credenciales, tokens o borrar nada fuera del proyecto.
+2. Sin dependencias pesadas ni raras: lo normal es un proyecto pequeno que se
+   pueda abrir y usar. Si necesita instalar algo, que sea con el gestor
+   habitual (npm install / pip install) y quede anotado en un README.
+3. Codigo que funcione a la primera: al terminar, el proyecto debe arrancar
+   con UN comando (anotalo en README.md: como instalar y como arrancar).
+4. Estructura minima y clara: README.md, el codigo y nada mas que haga falta.
+5. Al terminar resume en 5 lineas: que hace, ficheros creados, como arrancar,
+   que falta (si falta algo, dilo, no lo inventes).
+6. Habla poco mientras trabajas: cada fichero que crees o pruebes deja rastro
+   en tu salida para que se vea el avance.
+"""
+
+
+def _dir_proyectos() -> str:
+    """Carpeta donde viven los proyectos que JARVIS desarrolla."""
+    try:
+        from config import DATA_DIR
+        base = os.path.join(str(DATA_DIR), "proyectos")
+    except Exception:
+        base = os.path.join(os.getcwd(), "proyectos")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return base
+
+
+def _sanitizar_proyecto(nombre: str) -> str:
+    """Nombre seguro para carpeta. Sin rutas, sin puntos, sin sorpresas."""
+    n = (nombre or "").strip().lower().replace(" ", "-")
+    n = "".join(c for c in n if c.isascii() and (c.isalnum() or c in ("-", "_")))
+    return n[:40] or "proyecto"
+
+
+_JOBS: dict = {}
+_JOBS_LOCK = None
+
+
+def _jobs_lock():
+    global _JOBS_LOCK
+    if _JOBS_LOCK is None:
+        import threading
+        _JOBS_LOCK = threading.Lock()
+    return _JOBS_LOCK
+
+
+def _resumen_linea(obj) -> str:
+    """Una linea JSON de `opencode run --format json` -> texto corto.
+
+    El esquema exacto de OpenCode puede cambiar entre versiones, asi que no se
+    ata a ningun campo: prueba las claves habituales y si no hay nada, pasa.
+    """
+    if not isinstance(obj, dict):
+        return ""
+    for k in ("text", "message", "content", "title", "summary"):
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:160]
+    t = str(obj.get("type", "") or "")
+    nombre = str(obj.get("name", "") or obj.get("tool", "") or "")
+    if t and "step" in t:
+        return f"Paso: {nombre or t}"[:160]
+    if nombre and any(w in t for w in ("tool", "call", "exec", "write", "edit")):
+        return f"{nombre}"[:160]
+    return ""
+
+
+def _es_paso_importante(texto: str) -> bool:
+    t = (texto or "").lower()
+    return any(w in t for w in (
+        "crea", "creado", "creando", "modifica", "modificado", "escrib",
+        "instala", "instalado", "instalando", "ejecuta", "probando", "prueba",
+        "error", "fallo", "completado", "terminado", "readme", "fichero",
+        "archivo", "carpeta", "create", "write", "edit", "install", "test",
+        "error", "done", "complete"))
+
+
+def _ejecutar_job(job: dict, cmd: list, env: dict, timeout: int) -> None:
+    """Corre el agente en un hilo: emite pasos y cierra la tarea al final."""
+    import threading as _th
+    import time as _t
+
+    task = job["task"]
+    workdir = job["workdir"]
+    _step(task, "Agente OpenCode en marcha", done=False)
+    job["estado"] = "ejecutando"
+    job["inicio"] = _t.time()
+    ultimo_emit = 0.0
+    salida = []
+    try:
+        p = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", env=env, cwd=workdir,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        job["pid"] = p.pid
+        resto = timeout
+        while True:
+            try:
+                linea = p.stdout.readline()
+            except Exception:
+                linea = ""
+            if linea:
+                salida.append(linea)
+                if len(salida) > 400:
+                    salida = salida[-400:]
+                texto = ""
+                s = linea.strip()
+                if s.startswith("{"):
+                    try:
+                        import json as _js
+                        texto = _resumen_linea(_js.loads(s))
+                    except Exception:
+                        texto = ""
+                if not texto and len(s) > 4 and not s.startswith("{"):
+                    texto = s[:160]
+                ahora = _t.time()
+                if texto and (_es_paso_importante(texto)
+                              or (ahora - ultimo_emit) > 20):
+                    ultimo_emit = ahora
+                    _step(task, texto)
+            if p.poll() is not None:
+                break
+            resto -= 1
+            if resto <= 0:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                job["estado"] = "fallido"
+                job["error"] = "Tardo demasiado y se detuvo."
+                _step(task, "Se detuvo por tiempo.", done=True,
+                      error=job["error"])
+                _cerrar_job(job, False)
+                return
+            if not linea:
+                _t.sleep(1)
+        resto_out = "".join(salida)[-2000:]
+        if p.returncode not in (0, None):
+            job["estado"] = "fallido"
+            job["error"] = f"OpenCode termino con codigo {p.returncode}."
+            _step(task, "OpenCode termino con error.", done=True,
+                  error=job["error"])
+            _cerrar_job(job, False)
+            return
+        # Ficheros nuevos o tocados dentro del proyecto.
+        after = _snapshot(workdir)
+        changed = sorted(p for p in after
+                         if after.get(p) != job["before"].get(p))
+        # Verifica sintaxis de lo tocado (mismo criterio que opencode_fix).
+        import py_compile
+        bad = []
+        avisos = []
+        for f in changed:
+            try:
+                if f.endswith(".py"):
+                    py_compile.compile(f, doraise=True)
+            except Exception as e:
+                bad.append(f"{os.path.basename(f)}: {str(e)[:100]}")
+        _hay_node = False
+        try:
+            import shutil as _sh
+            _hay_node = bool(_sh.which("node"))
+        except Exception:
+            pass
+        for f in changed:
+            if f.endswith(".js") and _hay_node:
+                try:
+                    import subprocess as _sp2
+                    r2 = _sp2.run(["node", "--check", f], capture_output=True,
+                                  timeout=60, creationflags=getattr(
+                                      _sp2, "CREATE_NO_WINDOW", 0))
+                    if r2.returncode != 0:
+                        bad.append(f"{os.path.basename(f)}: sintaxis JS")
+                except Exception as e:
+                    avisos.append(f"{os.path.basename(f)}: no comprobado ({e})")
+        if any(f.endswith(".js") for f in changed) and not _hay_node:
+            avisos.append("JS sin comprobar: no hay node en este equipo")
+        job["ficheros"] = [os.path.relpath(p, workdir) for p in changed]
+        if avisos:
+            job["resumen"] = "Avisos: " + "; ".join(avisos[:4])
+        if bad:
+            job["estado"] = "fallido"
+            job["error"] = "Sintaxis rota en: " + "; ".join(bad[:4])
+            _step(task, "El codigo salio con errores de sintaxis.", done=True,
+                  error=job["error"])
+            _cerrar_job(job, False)
+            return
+        job["estado"] = "completado"
+        job["resumen"] = resto_out[-500:]
+        _step(task, f"Proyecto listo: {len(changed)} ficheros.", done=True)
+        _cerrar_job(job, True)
+    except Exception as e:
+        job["estado"] = "fallido"
+        job["error"] = str(e)[:200]
+        _step(task, "El agente fallo al arrancar.", done=True, error=job["error"])
+        _cerrar_job(job, False)
+
+
+def _cerrar_job(job: dict, ok: bool) -> None:
+    fn = _progress_emit
+    if fn is None:
+        return
+    try:
+        fn({"type": "live_task_end", "task_id": job["id"],
+            "title": job["task"][:120] if ok else "El proyecto no salio.",
+            "failed": not ok})
+    except Exception as e:
+        log.debug("live_task_end: %s", e)
+
+
+def opencode_build(objetivo: str, proyecto: str = "",
+                   timeout: int = 1500) -> dict:
+    """Lanza a OpenCode a desarrollar un proyecto en segundo plano."""
+    objetivo = (objetivo or "").strip()
+    if not objetivo:
+        return {"ok": False, "error": "Falta decir que proyecto quieres."}
+    nombre = _sanitizar_proyecto(proyecto or objetivo.split("\n")[0][:30])
+    if not ensure_opencode():
+        return {"ok": False,
+                "error": "OpenCode CLI no esta disponible en este equipo. "
+                         "En el servidor Docker no hay node ni opencode; "
+                         "esto funciona en el JARVIS de escritorio."}
+    base = _dir_proyectos()
+    workdir = os.path.join(base, nombre)
+    try:
+        os.makedirs(workdir, exist_ok=True)
+    except Exception as e:
+        return {"ok": False, "error": f"No pude crear la carpeta: {e}"}
+    import uuid as _uu
+    job_id = "build-" + _uu.uuid4().hex[:10]
+    tarea = f"Proyecto {nombre}: {objetivo[:80]}"
+    job = {"id": job_id, "task": tarea, "proyecto": nombre,
+           "workdir": workdir, "estado": "lanzado", "inicio": 0.0,
+           "ficheros": [], "error": "", "resumen": "",
+           "before": _snapshot(workdir)}
+    with _jobs_lock():
+        _JOBS[job_id] = job
+    prompt = BUILD_PROMPT.format(workdir=workdir, objetivo=objetivo)
+    cmd = [OC_CMD if os.path.isfile(OC_CMD) else "opencode",
+           "run", "-m", OC_MODEL, "--format", "json", "--auto",
+           "--dir", workdir, prompt]
+    # live_task_start: los paneles lo muestran como trabajo activo.
+    fn = _progress_emit
+    if fn is not None:
+        try:
+            fn({"type": "live_task_start", "task_id": job_id,
+                "title": tarea[:120],
+                "description": "OpenCode desarrollando el proyecto"})
+        except Exception as e:
+            log.debug("live_task_start: %s", e)
+    import threading as _th
+    _th.Thread(target=_ejecutar_job,
+               args=(job, cmd, _keys_env(), max(120, int(timeout or 1500))),
+               daemon=True, name=f"opencode-{nombre}").start()
+    return {"ok": True, "job_id": job_id, "proyecto": nombre,
+            "carpeta": workdir,
+            "mensaje": f"OpenCode ya esta trabajando en '{nombre}'. "
+                       "Mira el avance en los paneles."}
+
+
+def opencode_jobs() -> dict:
+    """Lo que estan haciendo (o hicieron) los agentes de proyectos."""
+    with _jobs_lock():
+        jobs = [dict(j) for j in _JOBS.values()]
+    for j in jobs:
+        j.pop("before", None)
+    return {"ok": True, "jobs": jobs}
+
+
+def opencode_build_handler(params: dict) -> dict:
+    """Tool: JARVIS encarga un proyecto a OpenCode y se sigue en paneles."""
+    res = opencode_build(
+        objetivo=params.get("objetivo") or params.get("task") or "",
+        proyecto=params.get("proyecto") or params.get("name") or "",
+        timeout=params.get("timeout", 1500))
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error", "No se pudo lanzar."))
+    return res
+
+
+def opencode_jobs_handler(params: dict) -> dict:
+    """Tool: estado de los proyectos en marcha."""
+    return opencode_jobs()
+    """Pregunta rápida al agente (sin editar nada): devuelve texto."""
+    if not os.path.isfile(OC_CMD):
+        return ""
+    try:
+        r = subprocess.run(
+            [OC_CMD, "run", "-m", OC_MODEL, "--format", "json",
+             "--dir", _brain_dir(), question],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, env=_keys_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return (r.stdout or "")[-1500:]
+    except Exception as e:
+        log.debug("opencode ask: %s", e)
+        return ""
+
+
 def opencode_ask(question: str, timeout: int = 180) -> str:
     """Pregunta rápida al agente (sin editar nada): devuelve texto."""
     if not os.path.isfile(OC_CMD):
@@ -274,4 +604,21 @@ OCODE_TOOLS = [
      "description": "Pregunta técnica a OpenCode (solo lectura, sin cambios).",
      "label": "Consultando a OpenCode",
      "handler": opencode_ask_handler},
+    {"name": "opencode_build",
+     "risk_level": "medium",
+     "requires_confirmation": True,
+     "confirm_text": "¿Encargo a OpenCode desarrollar el proyecto '{objetivo}' en su carpeta?",
+     "parameters": {"objetivo": "str, qué programa o proyecto desarrollar",
+                    "proyecto": "str opcional, nombre corto para la carpeta",
+                    "timeout": "int opcional, segundos máximos"},
+     "description": "Encarga a OpenCode desarrollar un proyecto o programa nuevo desde cero (una app, una web, un script, lo que pida el señor). Trabaja en segundo plano en su propia carpeta y el avance se ve en directo en los paneles.",
+     "label": "Desarrollando proyecto con OpenCode",
+     "handler": opencode_build_handler},
+    {"name": "opencode_jobs",
+     "risk_level": "low",
+     "requires_confirmation": False,
+     "parameters": {},
+     "description": "Cómo van los proyectos que OpenCode está desarrollando: estado, ficheros creados y errores.",
+     "label": "Viendo proyectos en marcha",
+     "handler": opencode_jobs_handler},
 ]

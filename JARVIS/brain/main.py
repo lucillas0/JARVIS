@@ -613,6 +613,13 @@ def _init_services() -> None:
     brain.risk = RiskEngine(emit=brain.emit,
                             confirmation_timeout=Config.CONFIRMATION_TIMEOUT_SECONDS)
     brain.tools = ToolManager(brain.risk)
+    # Los jobs de OpenCode emiten su avance al bus que pintan los paneles.
+    # Sin esto, el trabajo en segundo plano terminaria en silencio.
+    try:
+        from tools import opencode_tools as _oc
+        _oc.set_progress_emit(brain.emit)
+    except Exception as e:
+        log.debug("opencode progress: %s", e)
     brain.proactive = ProactiveEngine(
         emit=brain.emit,
         run_tool=lambda name, params: _run_tool_sync(name, params),
