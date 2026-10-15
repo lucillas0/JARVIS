@@ -1,4 +1,4 @@
-"""JARVIS Brain — orquestador (sección 10 y 12).
+﻿"""JARVIS Brain — orquestador (sección 10 y 12).
 
 Servicio FastAPI + WebSocket en 127.0.0.1:8000/ws que une:
 - Model Router (Groq → Gemini → OpenRouter → Ollama)
@@ -16,7 +16,9 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -55,16 +57,138 @@ class Brain:
         self._proactive_thread: Optional[threading.Thread] = None
         self._conversation_count = 0
         self._pending_scan = None
+        self._live_events = deque(maxlen=500)
+        self._live_event_id = 0
+        self._live_tasks: dict[str, dict] = {}
+        self._live_task_lock = threading.Lock()
+        self._live_event_lock = threading.Lock()
+        self._live_started_at = time.time()
 
     # ---------------- emisor de eventos a la app ----------------
+    def record_live_event(self, msg: dict) -> dict | None:
+        """Enriquece el bus existente y conserva una ventana pequeña en RAM."""
+        kind = msg.get("type", "")
+        details = ""
+        category = "tareas"
+        if kind in ("live_task_start", "live_task_end"):
+            task_id = str(msg.get("task_id", "") or "")
+            if kind == "live_task_start" and task_id:
+                with self._live_task_lock:
+                    self._live_tasks[task_id] = {
+                        "id": task_id, "name": str(msg.get("title", "Trabajo de JARVIS"))[:120],
+                        "description": str(msg.get("description", ""))[:240],
+                        "state": "ejecutando", "agent": "JARVIS", "progress": None,
+                        "started_at": time.time(), "priority": "normal",
+                    }
+                    details, category = self._live_tasks[task_id]["name"], "tareas"
+            elif kind == "live_task_end" and task_id:
+                with self._live_task_lock:
+                    task = self._live_tasks.pop(task_id, None)
+                summary = str(msg.get("title") or (task or {}).get("name") or "Tarea completada")
+                details, category = summary[:400], "errores" if msg.get("failed") else "tareas"
+        elif kind == "task_step":
+            details = str(msg.get("label", ""))[:240]
+            task_name = str(msg.get("task") or "Trabajo de JARVIS")[:120]
+            with self._live_task_lock:
+                status_id = "status:" + task_name
+                if msg.get("done"):
+                    self._live_tasks.pop(status_id, None)
+                else:
+                    # El bus de progreso ya es global y no lleva correlation ID;
+                    # conservar un registro por nombre evita cerrar trabajos paralelos.
+                    self._live_tasks[status_id] = {
+                        "id": status_id, "name": task_name, "description": details,
+                        "state": "ejecutando", "agent": "JARVIS", "progress": None,
+                        "started_at": self._live_tasks.get(status_id, {}).get("started_at", time.time()),
+                        "priority": "normal",
+                    }
+            category = "errores" if msg.get("error") else "tareas"
+        elif kind == "action_status":
+            details = str(msg.get("label", ""))
+            category = "permisos" if msg.get("state") in ("waiting_approval", "confirmation_required") else "tareas"
+        elif kind == "error_report":
+            details = str(msg.get("error") or "Error notificado al cerebro")[:400]
+            category = "errores"
+        elif kind == "confirmation_request":
+            details, category = str(msg.get("description", "Acción protegida requiere permiso"))[:400], "permisos"
+        elif kind == "confirmation_resolved":
+            details, category = "Resultado de confirmación: " + str(msg.get("approved", msg.get("ok", False))), "permisos"
+        elif kind == "heal_approval_request":
+            details, category = str(msg.get("error", "Autocorrección requiere permiso"))[:400], "permisos"
+        elif kind == "selfheal_update":
+            details, category = str(msg.get("note") or msg.get("error", kind))[:400], "errores"
+        elif kind in ("assistant_reply", "user_heard"):
+            details, category = str(msg.get("text", ""))[:400], "conversación"
+        elif kind in ("agent_state", "agent_update"):
+            details, category = str(msg.get("name") or msg.get("agent") or "Agente")[:160], "agentes"
+
+        if kind in ("live_task_end", "task_step"):
+            with self._live_task_lock:
+                if kind == "live_task_end" and msg.get("task_id"):
+                    self._live_tasks.pop(str(msg["task_id"]), None)
+                while len(self._live_tasks) > 100:
+                    removable = next((key for key in self._live_tasks if key.startswith("status:")), None)
+                    if removable is None:
+                        break
+                    self._live_tasks.pop(removable, None)
+        if kind == "live_task_end" and msg.get("task_id"):
+            # El resultado del mensaje entra por el protocolo antiguo y no incluye
+            # correlation ID; el último cierre quita el marcador legado temporal.
+            with self._live_task_lock:
+                self._live_tasks.pop("status:Trabajo de JARVIS", None)
+        if not details:
+            return None
+        with self._live_event_lock:
+            self._live_event_id += 1
+            event = {"id": self._live_event_id, "at": time.time(),
+                     "category": category, "type": str(kind)[:60],
+                     "title": details[:160], "detail": details[:400]}
+            self._live_events.append(event)
+        return event
+
     def emit(self, msg: dict) -> None:
-        """Thread-safe broadcast a todos los WebSockets conectados."""
+        """Thread-safe broadcast y registro limitado para JARVIS Live."""
+        if not isinstance(msg, dict):
+            return
+        event = self.record_live_event(msg)
+        outgoing = {**msg, "live_event": event} if event else msg
+        self._broadcast_to_loop(outgoing)
+
+    def _broadcast_to_loop(self, msg: dict) -> None:
+        """Entrega eventos desde callbacks de voz/audio y otros hilos worker."""
         if self.loop is None:
             return
         try:
+            if msg.get("type") in ("confirmation_request", "heal_approval_request"):
+                self._alert_discord_approval(msg)
             asyncio.run_coroutine_threadsafe(self._broadcast(msg), self.loop)
         except Exception as e:
             log.debug("emit falló: %s", e)
+
+    def _alert_discord_approval(self, msg: dict) -> None:
+        """Aviso privado solo cuando una aprobación detiene una acción sensible."""
+        kind = msg.get("type")
+        if kind not in ("confirmation_request", "heal_approval_request"):
+            return
+        bridge = getattr(self, "discord", None)
+        if bridge is None or not hasattr(bridge, "dm_owner") or not hasattr(bridge, "_loop"):
+            return
+        if kind == "confirmation_request":
+            text = ("🚨 JARVIS · APROBACIÓN PENDIENTE\n"
+                    "Hay una acción sensible detenida hasta recibir tu decisión. "
+                    "Revisa la solicitud en el Centro de operaciones (/live).")
+        else:
+            text = ("🚨 JARVIS · AUTOCORRECCIÓN PENDIENTE\n"
+                    "Una reparación requiere tu autorización. Revísala en el Centro de operaciones (/live).")
+        try:
+            loop = bridge._loop()
+            if loop is None or not loop.is_running():
+                return
+            future = asyncio.run_coroutine_threadsafe(bridge.dm_owner(text), loop)
+            future.add_done_callback(lambda result: log.debug(
+                "Aviso privado de aprobación en Discord: %s", "enviado" if result.exception() is None else "no disponible"))
+        except Exception as exc:
+            log.debug("No se pudo enviar el aviso privado de aprobación: %s", exc)
 
     async def _broadcast(self, msg: dict) -> None:
         body = json.dumps(msg, ensure_ascii=False, default=str)
@@ -76,9 +200,16 @@ class Brain:
             except Exception:
                 self.clients.discard(ws)
 
+    async def broadcast(self, msg: dict) -> None:
+        """Procesa emisiones ya en el hilo del event loop."""
+        if not isinstance(msg, dict):
+            return
+        event = self.record_live_event(msg)
+        outgoing = {**msg, "live_event": event} if event else msg
+        await self._broadcast(outgoing)
+
     def mark_screen(self, b64: Optional[str]) -> None:
         self._screen_b64 = b64
-
 
 brain = Brain()
 
@@ -4412,6 +4543,8 @@ async def websocket_endpoint(ws: WebSocket):
         return
     await ws.accept()
     brain.clients.add(ws)
+    # Solo se recuperan los permisos pendientes existentes; los eventos históricos
+    # tienen un endpoint propio y no alteran la semántica del chat existente.
     v = brain.voice
     if v is None:
         _voice_txt = "sin hardware"
@@ -4470,9 +4603,9 @@ async def websocket_endpoint(ws: WebSocket):
                     continue
                 # El cliente ve siempre lo que dijo el señor, venga de voz,
                 # de la pizarra, de Discord o de WhatsApp.
-                await brain._broadcast({"type": "user_heard",
-                                        "text": message[:400],
-                                        "mode": data.get("input_mode", "text")})
+                await brain.broadcast({"type": "user_heard",
+                                       "text": message[:400],
+                                       "mode": data.get("input_mode", "text")})
                 # Feedback inmediato para el HUD/orbe (antes de bloquearse en el LLM).
                 await brain._broadcast({"type": "conversation_state", "state": "thinking"})
                 # El LLM es una llamada lenta: se procesa en tarea aparte para que
@@ -4481,14 +4614,20 @@ async def websocket_endpoint(ws: WebSocket):
                 request_id = data.get("request_id")
                 if not isinstance(request_id, str) or len(request_id) > 100:
                     request_id = None
-                asyncio.create_task(_process_user_message(message, data.get("input_mode", "text"),
-                                            bool(data.get("speak", False)), request_id=request_id))
+                task_id = "live-" + uuid4().hex[:16]
+                brain.emit({"type": "live_task_start", "task_id": task_id,
+                            "title": str(message).strip()[:120],
+                            "description": "Consulta recibida por JARVIS"})
+                asyncio.create_task(_process_user_message(
+                    message, data.get("input_mode", "text"), bool(data.get("speak", False)),
+                    request_id=request_id, live_task_id=task_id))
 
             elif mtype == "confirmation_response":
                 ok = brain.risk.resolve(data.get("action_id", ""),
                                         bool(data.get("approved", False)))
-                await brain._broadcast({"type": "confirmation_resolved",
-                                        "action_id": data.get("action_id"), "ok": ok})
+                brain.emit({"type": "confirmation_resolved",
+                            "action_id": data.get("action_id"),
+                            "approved": bool(data.get("approved", False)), "ok": ok})
 
             elif mtype == "voice_activate":
                 if brain.voice:
@@ -4613,7 +4752,8 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 async def _process_user_message(message: str, input_mode: str = "text", speak: bool = False,
-                                request_id: Optional[str] = None) -> None:
+                                request_id: Optional[str] = None,
+                                live_task_id: Optional[str] = None) -> None:
     """Procesa un mensaje en segundo plano (hilo) y devuelve el orbe a idle al acabar.
 
     Si speak=True (p. ej. desde la pizarra Win+J), además de emitir la respuesta
@@ -4637,8 +4777,8 @@ async def _process_user_message(message: str, input_mode: str = "text", speak: b
             done.set()
 
     async def _say(text, voice_text=None):
-        await brain._broadcast({"type": "assistant_reply", "text": text,
-                                "request_id": request_id, "persisted": False})
+        await brain.broadcast({"type": "assistant_reply", "text": text,
+                               "request_id": request_id, "persisted": False})
         if speak and brain.voice is not None:
             await asyncio.to_thread(_speak_text, voice_text or text, input_mode != "text")
 
@@ -4661,12 +4801,18 @@ async def _process_user_message(message: str, input_mode: str = "text", speak: b
         await runner
         reply = result.get("reply", "")
         if request_id:
-            await brain._broadcast({"type": "assistant_reply", "text": reply,
-                                    "request_id": request_id, "persisted": True})
+            await brain.broadcast({"type": "assistant_reply", "text": reply,
+                                  "request_id": request_id, "persisted": True})
         if speak and reply and brain.voice is not None:
             # El texto ya se mostró (input text); solo sonar, sin duplicar.
             await asyncio.to_thread(_speak_text, reply, input_mode != "text")
     finally:
+        if live_task_id:
+            brain.emit({"type": "live_task_end", "task_id": live_task_id,
+                        "title": "Tarea completada" if result.get("reply") else
+                                 "La tarea terminó sin respuesta. "
+                                 "Consulta los registros para ver el error.",
+                        "failed": not bool(result.get("reply"))})
         await brain._broadcast({"type": "conversation_state", "state": "idle"})
 
 def _providers_str() -> str:
@@ -5014,7 +5160,7 @@ _CONFIG_DEFAULTS = {
              "screen_interval": 5},
     "humor": 65,
     "speech": {"style": "mayordomo"},
-    "voice": {"tts_speed": 1.12, "read_aloud": True},
+    "voice": {"tts_speed": 1.12, "read_aloud": True, "clap_enabled": False},
 }
 
 _CFG_SECTIONS = ("theme", "messages", "orb", "anims", "perf",
@@ -5097,6 +5243,18 @@ def _cfg_save(payload: dict) -> dict:
             Config.TTS_SPEED = _ts
     except Exception:
         pass
+    # Interruptor de palmadas: se aplica en caliente para que el dashboard
+    # sirva al momento, sin reiniciar. Solo toca el detector, nada mas.
+    try:
+        _v = payload.get("voice") or {}
+        if isinstance(_v, dict) and "clap_enabled" in _v:
+            from voice import clap as _clap
+            _on = bool(_v.get("clap_enabled"))
+            _clap.aplicar_preferencia(_on)
+            log.info("Activacion por palmadas %s.",
+                     "activada" if _on else "desactivada")
+    except Exception as e:
+        log.debug("clap apply: %s", e)
     try:
         _db.set_setting("jarvis_config", _js.dumps(saved, ensure_ascii=False))
     except Exception as e:
@@ -5646,6 +5804,8 @@ button.danger{background:rgba(255,107,107,.10);color:#ffb3b3;border:1px solid rg
     <p class="d">Piper local, en su PC. Sin subir su voz a ningún sitio.</p>
     <div class="row"><label>Velocidad: <b id="vval">1.12</b></label><input type="range" id="v_tts" min="0.8" max="1.4" step="0.01" value="1.12" oninput="document.getElementById('vval').textContent=this.value"></div>
     <div class="row"><label>Leer en alto en la pizarra</label><input type="checkbox" id="v_read" checked></div>
+    <div class="row"><label>Activación mediante palmadas</label><input type="checkbox" id="v_clap"></div>
+    <p class="d">Permite activar JARVIS mediante dos palmadas consecutivas.</p>
     <div class="actions"><button onclick="saveVoice()">Guardar voz</button></div>
   </div>
 </section>
@@ -5788,6 +5948,7 @@ async function load(){
  if(c.speech&&c.speech.style)$('h_style').value=c.speech.style;
  if(c.voice&&c.voice.tts_speed){$('v_tts').value=c.voice.tts_speed;$('vval').textContent=c.voice.tts_speed;}
  if(c.voice)$('v_read').checked=c.voice.read_aloud!==false;
+ if(c.voice)$('v_clap').checked=c.voice.clap_enabled===true;
  paint();
  const t=await (await fetch('/api/tools')).json();
  const sel=$('pr_tool');sel.innerHTML='';
@@ -5943,7 +6104,7 @@ async function exportKeys(){
   }catch(e){_importMsg('Fallo al exportar: '+e,true);}
 }
 function saveTalk(){post({humor:parseInt($('h_humor').value),speech:{style:$('h_style').value}});}
-function saveVoice(){post({voice:{tts_speed:parseFloat($('v_tts').value),read_aloud:$('v_read').checked}});}
+function saveVoice(){post({voice:{tts_speed:parseFloat($('v_tts').value),read_aloud:$('v_read').checked,clap_enabled:$('v_clap').checked}});}
 function addAction(){const ta=$('pr_actions');let arr=[];try{arr=JSON.parse(ta.value||'[]');}catch(e){arr=[];}arr.push({tool:$('pr_tool').value,params:{}});ta.value=JSON.stringify(arr,null,1);}
 async function saveProto(){
  const p={name:$('pr_name').value.trim(),triggers:$('pr_trig').value.split('|').map(s=>s.trim()).filter(Boolean),say:$('pr_say').value.trim(),actions:[]};
@@ -6022,6 +6183,12 @@ try:
     _apps.registrar(app)
 except Exception as _e2:  # noqa: BLE001
     log.warning('no pude montar /api/apps: %s', _e2)
+
+try:
+    import live_dashboard as _live_dashboard
+    _live_dashboard.register(app)
+except Exception as _live_error:
+    log.warning('no pude montar JARVIS Live: %s', _live_error)
 
 try:
     import recap as _recap

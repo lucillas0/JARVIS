@@ -8,6 +8,7 @@
 """
 import asyncio
 import logging
+import threading
 import uuid
 from typing import Awaitable, Callable, Optional
 
@@ -72,6 +73,7 @@ class RiskEngine:
         self.emit = emit
         self.timeout = confirmation_timeout or 30
         self._pending: dict[str, PendingConfirmation] = {}
+        self._pending_lock = threading.RLock()
 
     async def check(self, tool: dict, params: dict) -> bool:
         """True → ejecutar. False → no ejecutar.
@@ -96,7 +98,8 @@ class RiskEngine:
         )
 
         pending = PendingConfirmation(action_id, description, self.timeout)
-        self._pending[action_id] = pending
+        with self._pending_lock:
+            self._pending[action_id] = pending
 
         # Doble canal: popup en la app (esta emit) + anuncio por voz (en main.py).
         self.emit({
@@ -108,7 +111,8 @@ class RiskEngine:
         log.info("Confirmación requerida para %s (%s)", name, action_id)
 
         approved = await pending.wait()
-        self._pending.pop(action_id, None)
+        with self._pending_lock:
+            self._pending.pop(action_id, None)
 
         if approved:
             db.add_audit(name, params, risk, True, "success", "confirmado por usuario")
@@ -120,8 +124,9 @@ class RiskEngine:
         return approved
 
     def resolve(self, action_id: str, approved: bool) -> bool:
-        p = self._pending.get(action_id)
-        if not p:
-            return False
-        p.set_result(approved)
-        return True
+        with self._pending_lock:
+            p = self._pending.get(action_id)
+            if not p:
+                return False
+            p.set_result(approved)
+            return True

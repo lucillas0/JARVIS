@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#09100f">
+  <meta name="description" content="Centro de operaciones en tiempo real de JARVIS">
+  <title>JARVIS Live · Centro de operaciones</title>
+  <link rel="stylesheet" href="/live/live.css">
+  <script defer src="/live/live.js"></script>
+</head>
+<body>
+  <a class="saltar" href="#contenido">Saltar al panel de operaciones</a>
+  <div class="marco">
+    <header class="barra">
+      <a class="marca" href="/live" aria-label="JARVIS Live — centro de operaciones">
+        <span class="sello" aria-hidden="true">J</span>
+        <span><strong translate="no">JARVIS</strong><small>Live <span class="marca-punto" aria-hidden="true"></span></small></span>
+      </a>
+      <nav aria-label="Navegación principal" class="nav-principal">
+        <a class="nav-activo" href="#contenido" aria-current="page">Operaciones</a>
+        <a href="/ui">Asistente</a>
+        <a href="/board">Pizarra</a>
+      </nav>
+      <div class="enlace" id="connection" role="status" aria-live="polite">
+        <span class="enlace-punto" id="connection-dot"></span><span id="connection-label">Conectando con el cerebro…</span>
+      </div>
+    </header>
+
+    <main id="contenido">
+      <section class="cabecera" aria-labelledby="titulo">
+        <div><p class="fecha" id="fecha">CENTRO DE OPERACIONES</p><h1 id="titulo">JARVIS <span>Live</span></h1><p class="subtitulo" id="current-activity">Esperando actividad del cerebro.</p></div>
+        <div class="estado-chip" id="system-status" data-state="loading"><span aria-hidden="true" class="estado-luz"></span><span>Verificando sistemas</span></div>
+      </section>
+
+      <section class="resumen" aria-label="Estado de JARVIS y recursos del equipo">
+        <article class="estado-panel">
+          <div class="encabezado-panel"><div><p class="kicker">ESTADO DEL SISTEMA</p><h2>Todo a la vista.</h2></div><span class="latido" id="jarvis-mark" aria-hidden="true">J</span></div>
+          <p class="estado-principal"><span class="punto-estado" aria-hidden="true"></span><strong id="jarvis-state">Conectando</strong><span id="capacity-label" class="capacidad">—</span></p>
+          <p class="descripcion-sistema" id="system-summary">Conectando con el cerebro y sus sistemas actuales.</p>
+          <div class="metrica-fila">
+            <div class="metrica"><div class="metrica-datos"><span>CPU</span><strong id="cpu-value">—</strong></div><div class="pista"><span id="cpu-bar"></span></div></div>
+            <div class="metrica"><div class="metrica-datos"><span>Memoria</span><strong id="ram-value">—</strong></div><div class="pista"><span id="ram-bar"></span></div></div>
+          </div>
+          <p class="nota-recursos" id="resource-note">Las métricas aparecen cuando el gestor del sistema las ofrece.</p>
+        </article>
+
+        <article class="live-panel">
+          <div class="encabezado-panel"><div><p class="kicker">AHORA MISMO</p><h2>En tiempo real</h2></div><span class="etiqueta-live"><span aria-hidden="true"></span>EN DIRECTO</span></div>
+          <p class="ahora-titulo" id="activity-title">El cerebro está disponible.</p>
+          <p class="ahora-texto" id="activity-description">La conversación, los pasos de trabajo y los permisos aparecerán aquí, sin recargar la página.</p>
+          <div class="marcadores"><span><strong id="active-count">0</strong> trabajos activos</span><span class="separador" aria-hidden="true"></span><span><strong id="agent-count">0</strong> agentes activos</span></div>
+          <div class="trabajo-resumen" id="current-task" hidden></div>
+        </article>
+
+        <article class="operador-panel">
+          <div class="operador-cabecera"><span class="avatar-operador" aria-hidden="true">J</span><div><h2>El cerebro</h2><p id="brain-context">Voz · Discord</p></div></div>
+          <div class="indicador"><span class="indicador-punto"></span><span>JARVIS sigue trabajando aunque cierres esta página.</span></div>
+          <div class="canales"><div><span>VOZ</span><strong id="voice-state">Comprobando…</strong></div><div><span>DISCORD</span><strong id="discord-state">Comprobando…</strong></div><div><span>CONEXIONES</span><strong id="client-count">—</strong></div></div>
+        </article>
+      </section>
+
+      <section class="aprobaciones" id="approval-section" aria-labelledby="approval-heading" hidden>
+        <div class="titulo-seccion aprobacion-titulo"><div><p class="kicker">ACCIÓN BLOQUEADA</p><h2 id="approval-heading">Aprobaciones pendientes</h2></div><span class="contador-riesgo" id="approval-count">0</span></div>
+        <div class="aprobacion-lista" id="approvals-list"></div>
+      </section>
+
+      <section class="cuerpo" aria-label="Actividad, tareas y cambios">
+        <article class="timeline-panel">
+          <div class="titulo-seccion"><div><p class="kicker">SECUENCIA DEL CEREBRO</p><h2>JARVIS Live</h2></div><span class="event-count" id="event-count">0 eventos</span></div>
+          <div class="filtros" role="group" aria-label="Filtrar actividad">
+            <button type="button" class="filtro seleccionado" data-filter="todos" aria-pressed="true">Todo</button>
+            <button type="button" class="filtro" data-filter="tareas" aria-pressed="false">Tareas</button>
+            <button type="button" class="filtro" data-filter="cambios" aria-pressed="false">Cambios</button>
+            <button type="button" class="filtro" data-filter="permisos" aria-pressed="false">Permisos</button>
+            <button type="button" class="filtro" data-filter="errores" aria-pressed="false">Errores</button>
+            <button type="button" class="filtro" data-filter="agentes" aria-pressed="false">Agentes</button>
+            <button type="button" class="filtro" data-filter="sistema" aria-pressed="false">Sistema</button>
+          </div>
+          <div class="timeline" id="event-list" role="log" aria-label="Actividad reciente de JARVIS" aria-live="polite" aria-relevant="additions text">
+            <div class="vacio" id="events-empty"><span aria-hidden="true" class="vacio-icono">◷</span><strong>La actividad del cerebro aparecerá aquí.</strong><p>El historial existente y los nuevos eventos se conectan al mismo WebSocket de JARVIS.</p></div>
+          </div>
+        </article>
+
+        <aside class="lateral">
+          <section class="tarjeta-lateral" aria-labelledby="tasks-heading"><div class="titulo-seccion"><div><p class="kicker">PLANIFICADOR ACTUAL</p><h2 id="tasks-heading">Próximas tareas</h2></div><span id="scheduled-count" class="cantidad-lateral">0</span></div><div id="task-list" class="lista-tareas"><div class="vacio-pequeno">No hay tareas programadas.</div></div></section>
+          <section class="tarjeta-lateral" aria-labelledby="agents-heading"><div class="titulo-seccion"><div><p class="kicker">DETECCIÓN EXISTENTE</p><h2 id="agents-heading">Agentes</h2></div><span id="agents-total" class="cantidad-lateral">0</span></div><div id="agent-list" class="lista-agentes"></div><p class="nota-recursos">Estado detectado por procesos. No implica conocer la tarea de cada editor.</p></section>
+          <section class="tarjeta-lateral" aria-labelledby="changes-heading"><div class="titulo-seccion"><div><p class="kicker">GIT EN ESTE PROYECTO</p><h2 id="changes-heading">Cambios locales</h2></div><span id="changes-total" class="cantidad-lateral">0</span></div><div id="change-list" class="lista-cambios"></div><p class="nota-recursos">Solo se muestran las modificaciones que Git detecta; JARVIS no crea otro historial.</p></section>
+        </aside>
+      </section>
+    </main>
+    <footer><span>JARVIS continúa activo cuando cierras esta ventana.</span><a href="/health">Estado del cerebro</a><span id="last-updated">A la espera del primer estado.</span></footer>
+  </div>
+  <div class="notificacion" id="notice" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
