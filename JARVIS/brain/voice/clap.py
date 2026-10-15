@@ -296,14 +296,14 @@ def _leer_preferencia() -> bool:
 # El detector vive durante toda la sesion, igual que el motor de voz. Se crea
 # de forma perezosa para que importar este modulo no tenga coste en un NAS sin
 # microfono.
-_detalector: ClapDetector | None = None
-_lock_detalector = threading.Lock()
+_detector: ClapDetector | None = None
+_lock_detector = threading.Lock()
 
 
 def detector() -> ClapDetector:
     global _detector
     if _detector is None:
-        with _lock_detalector:
+        with _lock_detector:
             if _detector is None:
                 _detector = ClapDetector(enabled=_leer_preferencia())
     return _detector
