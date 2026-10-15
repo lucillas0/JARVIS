@@ -48,6 +48,13 @@ class VoiceManager:
     def start(self):
         if not self.engine.start():
             log.error("Sin audio, arranco igualmente pero sin voz.")
+        # El interruptor de palmadas se lee del dashboard (jarvis_config.voice).
+        # Si nunca se guardo, queda OFF y el detector no calcula nada.
+        try:
+            from voice import clap as _clap
+            _clap.aplicar_preferencia()
+        except Exception as e:
+            log.debug("clap init: %s", e)
         if self.engine.has_input or self.engine.has_output:
             # También vigila el final del TTS si solo hay altavoces; antes, sin
             # micro no arrancaba el bucle y el HUD quedaba eternamente en SPEAKING.
@@ -82,6 +89,11 @@ class VoiceManager:
             except Exception:
                 pass
             self._wake_detected_at = 0.0
+            try:
+                from voice import clap as _clap
+                _clap.detector().reiniciar()
+            except Exception:
+                pass
             self._set_state(IDLE)
         if not silent:
             self.emit({"type": "mic_state", "muted": self.mic_muted})
@@ -95,6 +107,21 @@ class VoiceManager:
             if wake_word.process_audio(chunk):
                 log.info("Wake word detectado.")
                 self.wake_now()
+                return
+            # Trigger de dos palmadas: usa el MISMO bloque que el wake word,
+            # sin abrir otro stream ni crear hilos. Si esta OFF, es una
+            # comparacion y sale. Solo activa: los permisos los decide el
+            # RiskEngine despues, como con cualquier otra activacion.
+            try:
+                from voice import clap as _clap
+                if _clap.detector().process(chunk):
+                    log.info("JARVIS activado mediante palmadas.")
+                    self.emit({"type": "action_status",
+                               "label": "Activacion por palmadas",
+                               "state": "done"})
+                    self.wake_now()
+            except Exception as e:
+                log.debug("clap: %s", e)
 
     def _on_barge_in(self):
         if self.state == SPEAKING:
