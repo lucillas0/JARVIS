@@ -5245,6 +5245,9 @@ def _cfg_save(payload: dict) -> dict:
         pass
     # Interruptor de palmadas: se aplica en caliente para que el dashboard
     # sirva al momento, sin reiniciar. Solo toca el detector, nada mas.
+    # Si falla se avisa en warning, no en debug: un ajuste que el señor acaba
+    # de tocar y no se aplica no puede fallar en silencio. Asi se encontro un
+    # NameError que habria quedado escondido una semana.
     try:
         _v = payload.get("voice") or {}
         if isinstance(_v, dict) and "clap_enabled" in _v:
@@ -5254,7 +5257,8 @@ def _cfg_save(payload: dict) -> dict:
             log.info("Activacion por palmadas %s.",
                      "activada" if _on else "desactivada")
     except Exception as e:
-        log.debug("clap apply: %s", e)
+        log.warning("No se pudo aplicar la opcion de palmadas: %s: %s",
+                    type(e).__name__, e)
     try:
         _db.set_setting("jarvis_config", _js.dumps(saved, ensure_ascii=False))
     except Exception as e:
