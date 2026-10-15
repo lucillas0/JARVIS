@@ -4878,6 +4878,9 @@ async def ui_page():
     # three.js vive junto a la pagina. Al abrir '/ui' sin barra final, el
     # importmap pediria "three" y no lo resolveria: se apunta al suyo.
     html = html.replace('"three": "./three.module.js"', '"three": "/ui/three.module.js"')
+    # Mission Control solo en LIGHT: en escritorio el marcador se vacia y no
+    # queda rastro del modulo en la navegacion.
+    html = html.replace("<!--MISSION-NAV-->", _mission_nav("ui"))
     # El token va dentro: el WebSocket ya no se acepta sin el.
     html = _inyecta_token(html)
     return HTMLResponse(html)
@@ -6193,6 +6196,31 @@ try:
     _live_dashboard.register(app)
 except Exception as _live_error:
     log.warning('no pude montar JARVIS Live: %s', _live_error)
+
+def _mission_nav(estilo: str = "ui") -> str:
+    """Enlace a Mission Control, o cadena vacia en FULL.
+
+    Las plantillas traen <!--MISSION-NAV--> y se sustituye al servir, igual
+    que el token: en escritorio no hay rastro del modulo, ni enlace ni codigo.
+    """
+    try:
+        import mission_control as _mc
+        if not _mc.habilitado():
+            return ""
+    except Exception:
+        return ""
+    if estilo == "live":
+        return '<a href="/mission">Mission Control</a>'
+    return '<a class="link-btn" href="/mission">Mission Control</a>'
+
+
+try:
+    # Solo existe en LIGHT: el modulo responde 404 en FULL y la navegacion
+    # lo oculta (ver _mission_nav).
+    import mission_control as _mission_control
+    _mission_control.register(app)
+except Exception as _mission_error:
+    log.warning('no pude montar Mission Control: %s', _mission_error)
 
 try:
     import recap as _recap
