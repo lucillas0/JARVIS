@@ -30,9 +30,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # tzdata hace que las fechas del resumen semanal y los horarios usen la zona
 # que pone TZ en el .env, en vez de ir a UTC. curl no se usa: la comprobacion de
 # salud va en python, que ya esta, y meter mas paquetes engorda la imagen.
+#
+# node es para OpenCode: sin el, JARVIS puede pedir proyectos pero no
+# desarrollarlos solo (el CLI no existe en el servidor y la autoinstalacion
+# tarda minutos). Pesa ~200 MB mas de imagen; a cambio el servidor es
+# autonomo: pides, autorizas y se construye.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends tzdata curl ca-certificates \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g --no-audit --no-fund opencode-ai@1.19.0 \
+ && opencode --version
 
 WORKDIR /app
 

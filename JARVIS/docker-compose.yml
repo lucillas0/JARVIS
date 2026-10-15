@@ -101,6 +101,13 @@ services:
       HA_TOKEN: "${HA_TOKEN:-}"
       HA_INSEGURO: "${HA_INSEGURO:-0}"
 
+      # ---- Proyectos con OpenCode (autonomia) -----------------------------
+      # Modelo que usa OpenCode para programar. Formato proveedor/modelo de
+      # opencode; con la clave de Groq que ya tiene JARVIS, sin pagar nada.
+      # Comprobado con esa clave: gpt-oss-120b responde; llama-3.3-70b ya no
+      # existe y qwen-qwq-32b esta retirado. Si da 403/404, cambia aqui.
+      OPENCODE_MODEL: "${OPENCODE_MODEL:-groq/openai/gpt-oss-120b}"
+
       # ---- Memoria persistente (Mem0 OSS) ---------------------------------
       # Todo lo de Mem0: donde esta, si esta activada, y cuanta memoria se
       # le mete al modelo en cada respuesta. Sin MEM0_URL no se hace nada y
