@@ -191,12 +191,20 @@ def _scheduled_tasks() -> list[dict]:
     return result
 
 
-def _buscar_programada(task_id: str):
-    """Localiza una tarea por su id estable (el mismo que muestra el panel)."""
+def _buscar_programada(task_id: str, source: list | None = None):
+    """Localiza una tarea por su id estable (el mismo que muestra el panel).
+
+    Si se pasa source, busca dentro de esa lista: es la forma de mutar y
+    guardar sin duplicar, porque la identidad solo vale dentro de la misma
+    carga del fichero.
+    """
     from tools.auto_tools import _load_tasks
-    with _SCHEDULE_LOCK:
-        source = [t for t in _load_tasks() if isinstance(t, dict)]
+    if source is None:
+        with _SCHEDULE_LOCK:
+            source = _load_tasks()
     for task in source:
+        if not isinstance(task, dict):
+            continue
         name = str(task.get("name", "tarea"))[:80]
         run_at = _safe_float(task.get("run_at"))
         cid = hashlib.sha256(f"{name}:{run_at}".encode("utf-8")).hexdigest()[:12]
@@ -368,8 +376,8 @@ async def live_actions(request: Request, action: LiveAction):
         try:
             from tools.auto_tools import _load_tasks
             with _SCHEDULE_LOCK:
-                current = _load_tasks()
-            selected = _buscar_programada(task_id)
+                current = [t for t in _load_tasks() if isinstance(t, dict)]
+            selected = _buscar_programada(task_id, current)
             if not selected:
                 return JSONResponse({"ok": False, "error": "La tarea ya no está pendiente en el planificador."}, status_code=404)
             left = [task for task in current if task is not selected]
@@ -408,7 +416,7 @@ async def live_actions(request: Request, action: LiveAction):
             import time as _t
             with _SCHEDULE_LOCK:
                 current = [t for t in _load_tasks() if isinstance(t, dict)]
-            selected = _buscar_programada(task_id)
+            selected = _buscar_programada(task_id, current)
             if not selected:
                 return JSONResponse({"ok": False, "error": "La tarea ya no está pendiente en el planificador."}, status_code=404)
             if action.kind == "run_scheduled_task":
