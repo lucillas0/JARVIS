@@ -3981,23 +3981,12 @@ def _handle(text: str, input_mode: str) -> str:
     result = brain.router.respond(messages, heavy=is_heavy and not _fast,
                                   light=is_light or _fast, segundos=_reloj)
     reply = result.get("reply", "")
-    if result.get("agotado") or not (reply or "").strip():
-        # Se acabó el reloj o el modelo no dijo nada. No se espera más: se
-        # responde corto y se ofrece el atajo rápido, que siempre funciona.
-        reply = _corto_si_se_paso(cleaned, bool(result.get("agotado")))
-        return reply
-    log.info("reset a %.2fs vía %s (fallback=%s, reloj=%.0fs)",
-             time.time() - timing, result.get("provider"),
-             result.get("fallback"), _reloj)
-
-    # --- Ejecutar tool si el modelo la pidió (bucle autónomo: 3, 6 en modo autónomo/investigación) ---
-    rounds = _parse_tool_plan(reply)
+    rounds = _parse_tool_plan(reply) if (reply or "").strip() else None
     if not rounds:
-        # Red de seguridad para la autonomia: si el señor pide DESARROLLAR
-        # algo y el modelo contesta texto plano (escribe el codigo el en el
-        # chat en vez de delegar), se propone opencode_build igual que si lo
-        # hubiera pedido el: con su confirmacion y su ejecucion normales. Solo
-        # actua cuando el modelo no pidio ninguna tool: nunca pisa su decision.
+        # Red de seguridad para la autonomia (tambien si el modelo fallo o
+        # vino vacio): si el señor pide DESARROLLAR algo, se propone
+        # opencode_build igual que si lo hubiera pedido el modelo. Solo
+        # cuando no hay plan: nunca pisa su decision.
         _dev = _intencion_desarrollo(cleaned)
         if _dev:
             rounds = [{"reply": "De inmediato, señor. Lo encargo al taller.",
@@ -4016,6 +4005,16 @@ def _handle(text: str, input_mode: str) -> str:
                                max_rounds=6 if (_auto or _es_investigacion) else 3)
         if final is not None:
             return final
+
+    if not (reply or "").strip():
+        # Se acabo el reloj o el modelo no dijo nada, y no era un desarrollo
+        # (eso ya salio por el bucle de arriba con su confirmacion).
+        # Respuesta corta y atajo rapido, como antes.
+        reply = _corto_si_se_paso(cleaned, bool(result.get("agotado")))
+        return reply
+    log.info("reset a %.2fs vía %s (fallback=%s, reloj=%.0fs)",
+             time.time() - timing, result.get("provider"),
+             result.get("fallback"), _reloj)
 
     # Si no hubo plan de herramienta pero la respuesta venía en formato JSON
     # ("tool" vacio), al señor le llega el JSON entero. Se desenvuelve aquí.

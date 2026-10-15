@@ -175,11 +175,31 @@ class ModelRouter:
                 _GROQ_COOLDOWN = time.time() + espera
                 log.warning("Groq sin cuota: %d s de espera (intento %d).",
                             espera, _GROQ_PENALTY)
-            else:
-                # Un fallo que no es de cuota no demuestra nada sobre el
-                # l\u00edmite, as\u00ed que no se penaliza: se prueba normal.
-                _GROQ_COOLDOWN = 0.0
-            log.warning("Groq fall\u00f3: %s", e)
+                log.warning("Groq falló: %s", e)
+                return None
+            if "413" in str(e) or "too large" in str(e).lower():
+                # El prompt no cabe (p. ej. historial con un volcado grande):
+                # se reintenta UNA vez con el sistema y los dos ultimos
+                # intercambios. Sin esto, cada peticion siguiente falla igual
+                # hasta que el historial rote y el cerebro queda mudo un rato.
+                log.warning("Groq: prompt demasiado grande, reintento encogido.")
+                try:
+                    encogido = ([messages[0]] + messages[-4:]
+                                if len(messages) > 5 else messages[-4:])
+                    completion = client.chat.completions.create(
+                        model=kwargs.get("model"), messages=encogido,
+                        temperature=0.7, timeout=_queda())
+                    log.info("Groq OK en %.2fs (encogido)", time.time() - start)
+                    if _GROQ_PENALTY:
+                        _GROQ_PENALTY = 0
+                    return completion.choices[0].message.content
+                except Exception as e2:
+                    log.warning("Groq encogido fallo: %s", e2)
+                    return None
+            # Un fallo que no es de cuota no demuestra nada sobre el
+            # limite, asi que no se penaliza: se prueba normal.
+            _GROQ_COOLDOWN = 0.0
+            log.warning("Groq falló: %s", e)
             return None
 
     def _chat_gemini(self, messages: list[dict], vision: Optional[str] = None) -> Optional[str]:
