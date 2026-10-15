@@ -230,6 +230,11 @@ async def live_page(request: Request):
     html = index.read_text(encoding="utf-8")
     bootstrap = "<script>window.JARVIS_TOKEN=" + json.dumps(token()) + ";</script>"
     html = html.replace("</head>", bootstrap + "</head>", 1)
+    try:
+        from main import _mission_nav
+        html = html.replace("<!--MISSION-NAV-->", _mission_nav("live"))
+    except Exception:
+        html = html.replace("<!--MISSION-NAV-->", "")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
