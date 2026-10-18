@@ -57,16 +57,26 @@ def main_() -> int:
 
     # --- 2. Y NO se dispara con los dobles del repo ---------------------
     print("\n2. Los dobles del propio repo no se marcan")
-    import subprocess
-    r = subprocess.run(["git", "grep", "-l", "gsk_", "--", "."],
-                       cwd=str(BRAIN.parent), capture_output=True, text=True)
+    # Se recorre el directorio, no se llama a `git`: en el contenedor de Docker
+    # no hay git instalado, y una prueba que depende de una herramienta que
+    # allí no existe no está probando el código sino el entorno.
+    con_gsk = []
+    for p in BRAIN.rglob("*.py"):
+        if any(d in ("venv", "__pycache__", "node_modules", ".git")
+               for d in p.parts):
+            continue
+        try:
+            if "gsk_" in p.read_text(encoding="utf-8", errors="replace"):
+                con_gsk.append(p)
+        except OSError:
+            pass
     ha.hallazgos.clear()
     ha.auditar_secretos()
     de_proveedor = [h for h in ha.hallazgos
                     if h["categoria"] == "clave-de-proveedor-en-codigo"]
     comprobar(not de_proveedor,
               f"ningún doble salta ({len(de_proveedor)} hallazgos en "
-              f"{len(r.stdout.split())} ficheros con gsk_)")
+              f"{len(con_gsk)} ficheros con gsk_)")
 
     # --- 3. Y sí salta con una clave de verdad --------------------------
     print("\n3. Pero una clave de verdad sí salta")

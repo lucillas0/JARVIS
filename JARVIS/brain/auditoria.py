@@ -231,8 +231,12 @@ def _red_groq() -> str:
 
     from ai_gateway.providers import groq as g
 
+    # El User-Agent no es opcional: Cloudflare rechaza con 1010 la firma de
+    # `urllib`, y eso llegaba aquí como un "bloqueada" que no era del chave sino
+    # de cómo hacíamos la petición.
     peticion = urllib.request.Request(f"{g.base_url()}/models",
-                                     headers={"Authorization": "Bearer prueba"})
+                                     headers={"Authorization": "Bearer prueba",
+                                              "User-Agent": g._USER_AGENT})
     try:
         with urllib.request.urlopen(peticion, timeout=8) as r:
             return f"contesta {r.status}"

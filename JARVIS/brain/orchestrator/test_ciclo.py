@@ -421,8 +421,19 @@ def main() -> int:
     _comprobar("opencode" in recuperada["error"].lower() and
                "trabajando" in recuperada["error"].lower(),
                "se explica por que quedo parada")
-    _comprobar(recuperada["recoverable"] is True,
-               "se marca como recuperable porque la sesion de OpenCode sigue viva")
+    # `recoverable` depende de que HAYA un servidor de OpenCode: si no lo hay,
+    # la tarea no se puede continuar y hay que decirlo. Antes esta comprobación
+    # pedía True a pelo, y pasaba en el portátil solo porque ahí había un
+    # OpenCode de verdad registrado; en el contenedor, donde no lo hay, fallaba
+    # sin que hubiera ningún fallo. Ahora se compara con lo que el propio
+    # servicio dice, que es lo que decide.
+    from orchestrator import service as _svc
+    _hay_servidor = bool(_svc.describe().get("ok"))
+    _comprobar(recuperada["recoverable"] is _hay_servidor,
+               f"recuperable dice la verdad según el servidor "
+               f"(hay={_hay_servidor}, marca={recuperada['recoverable']})")
+    _comprobar(bool(ESTADO.sesion) or not _hay_servidor,
+               "y hay sesion que conservar")
     _comprobar(recuperada["session_id"] == ESTADO.sesion,
                "conserva la sesion para poder continuar en ella")
 

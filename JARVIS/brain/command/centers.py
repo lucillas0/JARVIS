@@ -83,7 +83,18 @@ def _red() -> dict:
         enviados += c.bytes_sent
         recibidos += c.bytes_recv
     total = enviados + recibidos
-    anterior = _RED_ANTERIOR.get("total")
+    # OJO: aquí se guardaba `total` (un número) y dos líneas más abajo se le
+    # subscripiaba como si fuera la tupla (total, momento):
+    #
+    #     anterior = _RED_ANTERIOR.get("total")      # float
+    #     if ... ahora <= anterior[1] ...            # TypeError
+    #
+    # La primera llamada pasaba de casualidad (el `or` cortocircuita con
+    # None) y de la segunda en adelante `/api/cmd/estado` devolvía 500. O sea:
+    # el panel de Live funcionaba al abrir y se caía al refrescarlo. Se ve al
+    # llamar dos veces seguidas, que es justo lo que hace Live.
+    anterior = _RED_ANTERIOR.get("anterior")
+    _RED_ANTERIOR["anterior"] = (total, ahora)
     _RED_ANTERIOR["total"] = total
     _RED_ANTERIOR["at"] = ahora
     if anterior is None or ahora <= anterior[1] or ahora - anterior[1] < 1.0:

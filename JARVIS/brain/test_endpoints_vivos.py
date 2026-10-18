@@ -2,9 +2,9 @@
 
 Por que este fichero existe: se comprobo que las 28 rutas nuevas estaban
 montadas en la app y la matriz dio verde. Pero estar montada no es funcionar:
-`PUT /memoria/recuerdos/{id}` estaba montada, aparecía en el recuento y
+`PUT /memoria/recuerdos/{id}` estaba montada, aparecÃ­a en el recuento y
 reventaba con un 500, porque el modelo de Pydantic usaba `Optional` sin
-importarlo. Aquí se llama a los endpoints de verdad y se mira qué contestan.
+importarlo. AquÃ­ se llama a los endpoints de verdad y se mira quÃ© contestan.
 
     python test_endpoints_vivos.py
 """
@@ -26,7 +26,7 @@ n = [0]
 
 def comprobar(cond, texto):
     n[0] += 1
-    print(f"    · {'OK' if cond else 'FALLA'}  {texto}")
+    print(f"    Â· {'OK' if cond else 'FALLA'}  {texto}")
     if not cond:
         fallos.append(texto)
     return bool(cond)
@@ -47,8 +47,8 @@ def main_() -> int:
             continue                      # la clase base no se instancia
         try:
             # Se llama con `model_construct` para no fallar por campos
-            # obligatorios: aquí lo que se comprueba es que el TIPO se ha
-            # podido resolver, no que el cuerpo sea válido.
+            # obligatorios: aquÃ­ lo que se comprueba es que el TIPO se ha
+            # podido resolver, no que el cuerpo sea vÃ¡lido.
             obj.model_construct()
             bien = True
             detalle = ""
@@ -80,16 +80,16 @@ def main_() -> int:
         try:
             r = fn(*args)
             bien = isinstance(r, dict) and r.get("ok") is not False
-            detalle = "" if bien else f"contestó {str(r)[:90]}"
+            detalle = "" if bien else f"contestÃ³ {str(r)[:90]}"
         except Exception as exc:  # noqa: BLE001
             bien = False
             detalle = f"{type(exc).__name__}: {str(exc)[:110]}"
         comprobar(bien, f"services.{nombre}() responde {detalle}")
 
     # --- 4. Lo que se escribe en la base se puede volver a leer ---------
-    # `list_llm_usage` llamaba a un `_fila()` que no existía: reventaba con
-    # NameError y quien lo llamaba lo silenciaba, así que las métricas del
-    # gateway se leían SIEMPRE de memoria y nunca del disco. Sin historial.
+    # `list_llm_usage` llamaba a un `_fila()` que no existÃ­a: reventaba con
+    # NameError y quien lo llamaba lo silenciaba, asÃ­ que las mÃ©tricas del
+    # gateway se leÃ­an SIEMPRE de memoria y nunca del disco. Sin historial.
     import time as _time
 
     from memory import sqlite_store as store
@@ -104,19 +104,19 @@ def main_() -> int:
         leidas = store.list_llm_usage(0, 10)
         encuentra = [f for f in leidas if f.get("id") == "prueba-viva"]
         comprobar(bool(encuentra),
-                  "una métrica guardada se puede volver a leer del disco")
+                  "una mÃ©trica guardada se puede volver a leer del disco")
         if encuentra:
             fila = encuentra[0]
             comprobar(fila.get("streaming") is True,
                       f"y vuelve como booleano de verdad (no 0/1): "
                       f"{fila.get('streaming')!r}")
             comprobar(fila.get("ok") is True,
-                      f"igual que «ok»: {fila.get('ok')!r}")
+                      f"igual que Â«okÂ»: {fila.get('ok')!r}")
             comprobar(fila.get("total_tokens") == 8,
                       f"y los tokens son los que se guardaron: "
                       f"{fila.get('total_tokens')!r}")
     except Exception as exc:  # noqa: BLE001
-        comprobar(False, f"la métrica no se puede guardar/leer: "
+        comprobar(False, f"la mÃ©trica no se puede guardar/leer: "
                          f"{type(exc).__name__}: {str(exc)[:120]}")
 
     # --- 5. Y el endpoint de verdad, de punta a punta -------------------
@@ -152,32 +152,58 @@ def main_() -> int:
                           f"EDITAR un recuerdo responde {edi.status_code} "
                           f"(era 500: modelo sin Optional importado)")
                 if edi.status_code == 200:
-                    # El PUT no devuelve el registro entero: devuelve qué campos
-                    # cambiaron. Por eso el "se guardó" se comprueba yendo a
-                    # por él después, que es lo que de verdad importa.
+                    # El PUT no devuelve el registro entero: devuelve quÃ© campos
+                    # cambiaron. Por eso el "se guardÃ³" se comprueba yendo a
+                    # por Ã©l despuÃ©s, que es lo que de verdad importa.
                     edi_cuerpo = edi.json()
                     comprobar(edi_cuerpo.get("ok") is True
                               and "contenido" in (edi_cuerpo.get("cambios") or []),
-                              f"y dice qué cambió: {edi_cuerpo.get('cambios')}")
+                              f"y dice quÃ© cambiÃ³: {edi_cuerpo.get('cambios')}")
                     ver = cliente.get(f"/api/cmd/memoria/recuerdos/{rid}",
                                       headers=cabeceras)
                     comprobar(ver.status_code == 200
                               and "Editado" in ver.text,
-                              f"y al releerlo ya está editado "
+                              f"y al releerlo ya estÃ¡ editado "
                               f"({ver.status_code})")
             else:
-                comprobar(False, f"la API no devolvió id: {str(cuerpo)[:90]}")
+                comprobar(False, f"la API no devolviÃ³ id: {str(cuerpo)[:90]}")
+
+        # --- 6. Y ahora los que se llaman REPETIDOS, que es lo que hace Live
+        # Un endpoint que funciona la primera vez y revienta la segunda pasa
+        # desapercibido en cualquier prueba que lo llame una sola vez. Y Live
+        # lo refresca cada pocos segundos: es justo el caso que se rompe.
+        # Este fue un TypeError real en la red de `centers.recursos()`.
+        print()
+        print("ENDPOINTS QUE SE LLAMAN REPETIDOS")
+        for i in range(3):
+            e = cliente.get("/api/cmd/estado", headers=cabeceras)
+            comprobar(e.status_code != 500,
+                      f"/api/cmd/estado en la llamada n.Âº {i + 2}: "
+                      f"HTTP {e.status_code}")
+            if e.status_code == 500:
+                break
     except ImportError:
         comprobar(False, "no hay httpx: no se puede probar la API de verdad")
     except Exception as exc:  # noqa: BLE001
-        comprobar(False, f"la prueba de la API reventó: {type(exc).__name__}: "
+        comprobar(False, f"la prueba de la API reventÃ³: {type(exc).__name__}: "
                          f"{str(exc)[:140]}")
+
+    # --- 7. La red de recursos, dos veces seguidas -----------------------
+    try:
+        from command import centers
+        for i in range(3):
+            r = centers.recursos(forzar=True)
+            comprobar(isinstance(r, dict) and r.get("red") is not None,
+                      f"centers.recursos() n.Âº {i + 1} mide la red sin reventar")
+    except Exception as exc:  # noqa: BLE001
+        comprobar(False, f"centers.recursos() falla a la segunda: "
+                         f"{type(exc).__name__}: {str(exc)[:110]}")
 
     print()
     if fallos:
         print(f"{len(fallos)} COMPROBACIONES FALLIDAS de {n[0]}:")
         for f in fallos:
-            print(f"  · {f}")
+            print(f"  Â· {f}")
         return 1
     print(f"ENDPOINTS VIVOS: {n[0]} comprobaciones.")
     return 0

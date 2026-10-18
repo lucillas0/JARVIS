@@ -278,6 +278,55 @@ def probar_si_piensa():
               f"sin plan (marcas: {parece_plan})")
 
 
+def probar_que_no_se_escapa_por_la_otra_puerta():
+    """opencode_build tiene DOS entradas, y hay que cerrar las dos.
+
+    La red de seguridad de `_handle` solo se usa cuando el modelo NO devuelve
+    un plan. Pero el prompt del sistema le dice al modelo que llame a esa
+    herramienta, y el modelo hace caso: entonces entra por `_run_tool_loop` y
+    se iba por OpenCode sin pensar. Preguntando en el contenedor y buscando la
+    tarea en `/api/dev/tasks` se vio que no había ninguna.
+    """
+    seccion("6. La otra puerta a OpenCode también pasa por el orquestador")
+
+    from fastapi.testclient import TestClient
+    import main
+
+    ored = {"creo": []}
+
+    class _Gestor:
+        def crear(self, idea="", project_path="", **kw):
+            ored["creo"].append(idea)
+            return {"ok": True, "task": {"id": "T-OTRA"}}
+
+        def analizar(self, task_id):
+            pass
+
+    with TestClient(main.app):
+        anterior = getattr(main.brain, "dev", None)
+        main.brain.dev = _Gestor()
+        # Se llama al bucle de herramientas con un plan COMO lo emite el modelo:
+        # con la herramienta `opencode_build` ya elegida por él.
+        plan = {"reply": "De inmediato, señor.",
+                "tool": "opencode_build",
+                "parameters": {"objetivo": "quiero una app de notas",
+                               "proyecto": "notas"}}
+        r = main._run_tool_loop([], plan, max_rounds=1)
+        main.brain.dev = anterior
+
+    texto = r if isinstance(r, str) else str(r)
+    comprobar(bool(ored["creo"]),
+              "el plan del modelo NO va directo a OpenCode: "
+              "se encamina por el orquestador")
+    if ored["creo"]:
+        comprobar(ored["creo"][0] == "quiero una app de notas",
+                  f"con la idea tal cual: {ored['creo'][0]!r}")
+    comprobar("panel" in texto.lower() or "Live" in texto,
+              f"y el señor se le dice dónde verlo: {texto[:80]!r}")
+    comprobar("opencode" not in texto.lower() or "OpenCode ya" in texto,
+              f"sin prometer que OpenCode ya está trabajando: {texto[:80]!r}")
+
+
 def main_() -> int:
     print("IDEA -> LIVE · ¿llega de punta a punta?")
     probar_deteccion()
@@ -285,6 +334,7 @@ def main_() -> int:
     probar_live()
     probar_live_de_verdad()
     probar_si_piensa()
+    probar_que_no_se_escapa_por_la_otra_puerta()
 
     print()
     if fallos:

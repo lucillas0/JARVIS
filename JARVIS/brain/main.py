@@ -4372,6 +4372,26 @@ def _run_tool_loop(messages: list, first_plan: dict, is_heavy: bool = False,
     _stop_at = max(1, min(8, max_rounds)) - 1
     for rnd in range(max(1, min(8, max_rounds))):
         tool_name = tool_plan["tool"]
+
+        # opencode_build tiene DOS puertas de entrada, y hay que cerrar las
+        # dos: (1) la red de seguridad de arriba, cuando el modelo NO devuelve
+        # un plan; y (2) esta, que es la que se usa casi siempre, porque el
+        # prompt del sistema le dice al modelo que llame a esa herramienta y
+        # el modelo hace caso.
+        #
+        # Antes de cerrarlo solo por la primera, la idea seguía yéndose por
+        # aquí: OpenCode recibía el texto tal cual con `--auto`, sin análisis
+        # ni riesgos ni permiso. Se vio preguntando en el contenedor y
+        # buscando la tarea en /api/dev/tasks: no había ninguna.
+        if tool_name in ("opencode_build", "opencode_build_handler"):
+            _idea = str((tool_plan.get("parameters") or {}).get("objetivo")
+                        or (tool_plan.get("parameters") or {}).get("task")
+                        or (tool_plan.get("reply") or "")).strip()
+            _proy = _intencion_desarrollo(_idea) or "proyecto"
+            _enc = _encargar_al_taller(_idea, _proy)
+            if _enc is not None:
+                return _enc
+            # Sin orquestador (o si falla) se sigue por aquí, que es la red.
         params = tool_plan.get("parameters", {}) or {}
         try:
             brain.emit({"type": "action_status", "label": _tool_label(tool_name),

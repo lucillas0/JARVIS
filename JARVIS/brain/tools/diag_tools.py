@@ -363,11 +363,25 @@ def _check_jarvis() -> list:
 
 
 def _check_net() -> list:
+    # User-Agent: sin esto, Cloudflare devuelve 403 y este chequeo diría
+    # "conectado" cuando en realidad JARVIS no puede hablar con nadie. Y si no
+    # lo entiende como HTTP, diría "sin internet" con la red perfectamente
+    # buena. Es el mismo problema que tenía el proveedor de Groq.
+    import urllib.request
+    peticion = urllib.request.Request(
+        "https://api.groq.com",
+        headers={"User-Agent": "openai-python/1.40.0"})
     try:
-        import urllib.request
-        urllib.request.urlopen("https://api.groq.com", timeout=6)
+        urllib.request.urlopen(peticion, timeout=6)
         return [{"area": "Red", "ok": True, "detail": "conectado a internet"}]
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as e:
+        # Un 403 de Cloudflare SÍ quiere decir que hay red: la petición llegó
+        # hasta el borde y la rechazaron. Antes esto pasaba por el mismo `except`
+        # que el de "sin internet", y no era lo mismo.
+        if e.code in (401, 403):
+            return [{"area": "Red", "ok": True,
+                     "detail": f"conectado a internet (Groq responde {e.code}: "
+                               f"revise la clave)"}]
         return [{"area": "Red", "ok": True, "detail": "conectado a internet"}]
     except Exception as e:
         return [{"area": "Red", "ok": False, "detail": f"sin internet: {str(e)[:80]}"}]

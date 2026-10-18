@@ -66,6 +66,23 @@ def modelos_configurados() -> dict:
 # --------------------------------------------------------------------------- #
 # Utilidades HTTP
 # --------------------------------------------------------------------------- #
+# Groq está detrás de Cloudflare, y Cloudflare rechaza por DEFECTO las
+# peticiones cuya firma no parece la de un cliente real: código 1010
+# ("browser signature banned"). `urllib` manda `User-Agent: Python-urllib/3.x`
+# y con eso TODAS las llamadas devolvían 403, aunque la clave fuese correcta y
+# la red fuese buena.
+#
+# Comprobado dentro del contenedor, con la misma clave y en el mismo instante:
+#     python-urllib   -> HTTP 403  error code: 1010
+#     curl/8.4.0      -> HTTP 200  (11 modelos)
+#     openai-python   -> HTTP 200
+#     httpx           -> HTTP 200
+#
+# El SDK de Groq (que usa httpx) sí pasaba; por eso el camino viejo del router
+# funcionaba y el del gateway no, y el fallo parecía intermitente.
+_USER_AGENT = "openai-python/1.40.0"
+
+
 def _peticion(metodo: str, url: str, cuerpo: Optional[dict], *,
               timeout: float, stream: bool = False,
               cancelacion: Optional[threading.Event] = None):
@@ -75,7 +92,8 @@ def _peticion(metodo: str, url: str, cuerpo: Optional[dict], *,
                              PROVEEDOR)
     datos = None if cuerpo is None else json.dumps(cuerpo).encode("utf-8")
     cabeceras = {"Authorization": f"Bearer {_clave()}",
-                "Accept": "text/event-stream" if stream else _CT}
+                "Accept": "text/event-stream" if stream else _CT,
+                "User-Agent": _USER_AGENT}
     if datos is not None:
         cabeceras["Content-Type"] = _CT
     peticion = urllib.request.Request(url, data=datos, headers=cabeceras,
