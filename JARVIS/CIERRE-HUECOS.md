@@ -6,7 +6,7 @@
 > cd brain
 > python verificacion.py        # la matriz de requisitos
 > python todas_las_pruebas.py   # las 9 suites
-> python rutas_reales.py        # las 161 rutas de la app
+> python rutas_reales.py        # las 160 rutas de la app
 > python hardening_audit.py     # análisis estático
 > ```
 
@@ -31,7 +31,8 @@ aceptados a propósito — ver más abajo).**
 verifican el ciclo completo sin Contador, porque comprueban que *no* se
 simule nada por el camino).
 
-Y **161 rutas** en la API (antes 133).
+Y **160 rutas** en la API (antes 133). Eran 161 hasta que se detectó que
+`/api/cmd/recursos` estaba declarada dos veces: la segunda era código muerto.
 
 ---
 
@@ -120,6 +121,32 @@ Cinco tablas nuevas en `SCHEMA`, que se crean con `CREATE TABLE IF NOT EXISTS`:
 **No se borra ni reconstruye nada.** Las instalaciones existentes las crean al
 abrir la base, como ya hacía el resto del esquema. La migración de `audit_log`
 (que sí tenía que rehacerse por su `CHECK`) conserva fila a fila.
+
+---
+
+## Lo que hay que decidir (no se toca sin permiso)
+
+### Una base de datos está publicada en un repositorio público
+
+`github.com/lucillas0/JARVIS` es público y `JARVIS/brain/db/jarvis.db` se
+descarga **sin autenticación**. Lleva 21 mensajes de conversación reales.
+
+No es culpa de este trabajo: `.gitignore` ya ignoraba `**/db/*.db`, pero la
+base se commiteó **antes** de que existiera esa regla, y `.gitignore` solo
+afecta a ficheros que Git todavía no sigue. Por eso el fichero se siguió
+subiendo durante todas las versiones.
+
+Lo que **sí** se ha hecho ya: dejar de seguirla (`git rm --cached`). El
+fichero sigue en el disco del equipo y el repo no volverá a subirlo, pero
+**sigue en el historial**, así que la URL pública sigue sirviendo la versión
+antigua.
+
+Para quitarlo de verdad hay que reescribir el historial (`git filter-repo`) y
+forzar el push. Eso rompe los clones que ya tengan el repo, así que no se ha
+hecho. También convendría mirar si el repo debería ser privado.
+
+La misma regla aplica a `db/qdrant/` (el índice local) y a los `.json` de
+`db/`, que también están publicados.
 
 ---
 
