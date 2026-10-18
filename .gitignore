@@ -6,6 +6,10 @@ build/
 dist-installer/
 dist-temp*/
 
+# Salida del analizador de hardening: se regenera con
+# `python brain/hardening_audit.py`, no tiene que ir al repo.
+JARVIS/brain/.auditoria/
+
 # Las ruedas de Python se descargan al compilar (ver build.yml). Son cientos
 # de MB y son distintas para cada plataforma, asi que no van en el repo.
 *.whl

@@ -19,6 +19,9 @@ NAS o cualquier servidor con Python 3.10.
 - [Dejarlo al día](#dejarlo-al-día)
 - [El modo servidor](#el-modo-servidor)
 - [La interfaz](#la-interfaz)
+- [El centro de mando](#el-centro-de-mando)
+- [Groq como proveedor de modelos](#groq-como-proveedor-de-modelos)
+- [Desarrollo con OpenCode](#desarrollo-con-opencode)
 - [La isla de Coucou](#la-isla-de-coucou)
 - [Voz](#voz)
 - [Integraciones](#integraciones)
@@ -246,6 +249,156 @@ configuración y el estado del servidor.
 
 La página **no depende de internet**: el three.js va incluido y no usa ninguna
 fuente externa. En un NAS sin conexión funciona igual.
+
+---
+
+## El centro de mando
+
+`http://<servidor>:8000/live` no es un panel de tonos: es donde se manda.
+
+- **Cabecera**: marca, recursos medidos de verdad (CPU, RAM, GPU, disco y red
+  cuando existen), estado global, reloj, notificaciones y configuracion.
+- **Sidebar**: Dashboard, Nueva tarea, Tareas, Agentes, Cambios, Permisos,
+  Preguntas, Tests, Historial, Sistema y Asistente. Los contadores son reales y
+  se ocultan cuando no hay nada.
+- **Principal**: en el Dashboard, la tarea protagonista con su progreso
+  explicable y sus fases, el plan de JARVIS con sus riesgos, los cambios
+  recientes, la linea de tiempo y los agentes. Cada seccion tiene ademas su
+  propia vista.
+- **Panel derecho**: lo que te necesita ahora mismo (permisos, incidentes,
+  preguntas), los permisos concedidos y denegados, los medidores del sistema y
+  el historial reciente.
+- **Barra de orden**: «¿Que quieres que haga JARVIS?». Va por el mismo camino
+  que la voz.
+
+Cada pantalla que se enseña se puede actuar: crear una tarea, aprobar o
+modificar su plan, responder a OpenCode, autorizar con `una vez` / `siempre` /
+`denegar`, programar tareas, pausarlas, adelantarlas, abrir agentes, ejecutar
+tests, guardar y restaurar checkpoints, confirmar cambios, pedir un resumen de
+lo que paso mientras no estabas, diagnosticar, optimizar, limpiar disco o
+reiniciar el servidor de OpenCode… Todo pasa por el backend real y, si es
+delicado, por el Permission Manager.
+
+El progreso de una mision no es inventado: es *pasos con evidencia ÷ pasos del
+plan*, y debajo se escribe en cuantos pasos se basa. El agente no dice «voy por
+el paso 3», asi que el paso en curso se marca como el siguiente del plan.
+
+Dos ejemplos de lo que **no** se hace: no hay gestor de Docker en este
+sistema, asi que no se pintan contenedores; y `apps.py` solo detecta procesos,
+asi que no se ofrece parar un agente. Lo que no tiene backend no aparece.
+
+La documentacion completa esta en
+[`JARVIS/CENTRO-MANDO.md`](JARVIS/CENTRO-MANDO.md).
+
+---
+
+## Groq como proveedor de modelos
+
+Groq no es un parche: es el camino que JARVIS sigue para pensar. Por detrás hay
+un **AI Gateway** (`brain/ai_gateway`) que decide qué modelo toca, reintenta
+cuando tiene sentido, avisa al bus de eventos, mide lo que ha costado de verdad
+y, si un proveedor falla, cambia al siguiente sin quedarse mudo.
+
+```
+conversación · voz · Discord · /api/ai/chat
+        ↓
+ModelRouter.respond()      ← la misma puerta de siempre
+        ↓
+AI Gateway                 ← modelo, reintentos, bus, métricas
+        ├── Groq (API oficial por HTTP, con streaming)
+        ├── Gemini · OpenRouter · Ollama (los que ya había)
+        └── OpenCode         ← la programación sigue siendo suya
+```
+
+- **Un modelo por tipo de tarea**: rápido, general, razonamiento, visión y
+  programación (esta última va a OpenCode, no a Groq).
+- **Streaming de verdad**: por texto, cada trozo sale por el bus y JARVIS Live
+  la escribe mientras se genera. Por voz no: el TTS solo recibe la respuesta
+  final, nunca el razonamiento interno.
+- **Errores controlados**: 401, 403, 404, 429, 5xx, timeout, red y respuesta
+  malformada tienen cada uno su tratamiento, y el 429 espera lo que dice el
+  proveedor antes de reintentar.
+- **Permisos intactos**: el gateway no ejecuta nada. Si el modelo pide una
+  herramienta, la pide el Permission Manager de siempre.
+- **Métricas reales**: tokens que declara el proveedor, latencia, reintentos y
+  errores. El coste sale como `unknown` porque Groq no lo devuelve y aquí no se
+  inventa ningún precio.
+- **En JARVIS Live**: vista **IA** con el estado de cada proveedor, el modelo
+  por tarea (cambiable), prueba de conexión, catálogo y las últimas peticiones.
+
+La clave se pone en `/setup` (se guarda en `keys.env`, fuera de la instalación)
+o en el entorno. En Docker, `docker-compose.yml` ya la pasa al contenedor.
+Nunca se escribe en el código, ni se imprime, ni sale por la API.
+
+La documentación completa está en [`JARVIS/IA-GROQ.md`](JARVIS/IA-GROQ.md).
+
+```bash
+python brain/ai_gateway/test_ai.py   # 83 comprobaciones contra un doble HTTP
+```
+
+---
+
+## Desarrollo
+
+Las pruebas del cerebro son dos scripts que no necesitan nada instalado:
+
+```bash
+python brain/orchestrator/test_ciclo.py   # 46 comprobaciones: ciclo con OpenCode
+python brain/command/test_cmd.py          # 66 comprobaciones: centro de mando
+```
+
+JARVIS no solo programme: dirige. En `http://<servidor>:8000/live`, con una idea
+nueva, se abre el ciclo completo:
+
+```
+IDEA → ANÁLISIS → PLAN + RIESGOS → APROBACIÓN → OPENCODE →
+EJECUCIÓN → PERMISOS → PREGUNTAS → TESTS → VALIDACIÓN → RESULTADO
+```
+
+1. **Idea.** Escribes qué quieres en *Nueva tarea* y pulsas *Crear tarea*. No se
+   ejecuta nada todavía.
+2. **Análisis.** JARVIS lee el proyecto de verdad (estructura, stack,
+   dependencias, Git, tests) y propone un plan, sus riesgos con mitigación y una
+   estimación aproximada.
+3. **Aprobación.** Puedes *Modificar plan* («usa SQLite», «no uses Docker»…)
+   y, cuando quieras, *Aprobar plan*.
+4. **Ejecución.** JARVIS manda a OpenCode un prompt con todo el contexto y se
+   queda mirando su sesión: llamadas a herramientas, ficheros que toca y tests
+   que ejecuta.
+5. **Permisos.** Si OpenCode pide permiso, JARVIS Live lo enseña con las tres
+   opciones que el propio OpenCode entiende: *Denegar*, *Una vez*, *Siempre*.
+   JARVIS no se salta su sistema de permisos.
+6. **Preguntas.** Si OpenCode necesita una decisión, aparece su tarjeta con las
+   opciones y un campo de respuesta libre. La respuesta se le devuelve a
+   OpenCode y sigue trabajando.
+7. **Resultado.** Comprobaciones, ficheros tocados, tests leídos de su salida y
+   tiempos separados: total, ejecutando y esperando a ti.
+
+También funciona hablando: di «JARVIS, quiero que añadas autenticación con
+Google» y se crea la tarea; si no estás delante, los avisos y las respuestas van
+por Discord.
+
+Si OpenCode no está instalado o su servidor no está en marcha, el panel lo dice
+con todas las letras. Nunca hay progreso inventado.
+
+Todo el código está en `brain/orchestrator/`:
+
+| Módulo | De qué se ocupa |
+|---|---|
+| `service.py` | Localiza el servidor real de OpenCode (registro, `service start`, `serve`) |
+| `client.py` | Cliente HTTP de su API, sin dependencias nuevas |
+| `adapter.py` | `OpenCodeAdapter`: sesión, prompt, permisos, preguntas, cambios |
+| `planner.py` | Análisis del proyecto, diseño, riesgos y prompt final |
+| `manager.py` | El orquestador: estados, tiempos, validación y resumen |
+| `store.py` | Las tareas en SQLite (sobreviven al reinicio) |
+| `routes.py` | API `/api/dev` que consume JARVIS Live |
+| `test_ciclo.py` | Prueba del ciclo entero contra un doble de la API |
+
+Para comprobar que el cableado sigue bien:
+
+```bash
+python brain/orchestrator/test_ciclo.py
+```
 
 ---
 
