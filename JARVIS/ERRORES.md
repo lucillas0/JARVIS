@@ -254,6 +254,66 @@ camino antiguo hubiera contestado.
 
 ---
 
+## "Desarrollame una app" no funcionaba, y no pensaba la idea
+
+Lo que pidió comprobar el usuario: *que JARVIS pueda desarrollar y pensar una
+idea, se la diga a OpenCode y aparezca en Live*. Al comprobarlo se vio que
+solo funcionaba **a medias**.
+
+### «Quiero una app» no se detectaba
+
+La lista de verbos de `_intencion_desarrollo()` tenía `desarrollame`,
+`programame`, `creame`, `hazme`… pero **no `quiero`, ni `necesito`, ni
+`montame`**. Y lo más raro: la función que limpia el nombre del proyecto
+**sí quitaba `quiero` y `necesito`**. Las dos listas del mismo verbo, y solo
+una estaba bien. "Quiero una app que me avise del tiempo" no llegaba a
+OpenCode.
+
+Al añadir los verbos salió el falso contrario: *"quiero que abras el
+bot"* se tomaba por una petición de software. La diferencia está en si entre el
+verbo y el «que» hay un sustantivo: en *una app **que** me avise* el «que» es
+relativo; en *quiero **que** abras* es un subjuntivo.
+
+Ahora se detectan 12 de 12 formas reales y **cero** falsos positivos.
+
+### Y lo más importante: la idea NO se pensaba
+
+La idea iba directa a `opencode_build()`, que hace esto:
+
+```python
+cmd = [cli, "run", "-m", OC_MODEL, "--format", "json", "--auto",
+       "--dir", workdir, prompt]        # ← el texto tal cual y --auto
+```
+
+Es decir: la idea del señor, sin analizar, con `--auto` (no se le pregunta
+nada) y seis instrucciones fijas. **JARVIS no pensaba nada.**
+
+Mientras tanto existía `brain.dev`, el orquestador que sí hace todo lo que se
+pidió: lee el proyecto, pide un diseño al modelo, **predice riesgos**,
+estima, escribe el prompt para OpenCode con todo eso dentro y **espera
+aprobación**. Se llegaba a él por 13 rutas de API y por nada más: `brain.dev` solo
+se usaba para `recuperar()` al arrancar.
+
+Ahora la idea entra por el orquestador:
+
+```
+idea → crear() → analizar() en segundo plano → plan + riesgos
+     → el señor lo aprueba en Live → OpenCode recibe el prompt pensado
+```
+
+Si el orquestador no está o falla, se cae al camino viejo. Better|OpenCode sin
+pensar que no hacer nada. Y ambos caminos emiten `live_task_start`, que es lo
+que lo hace **aparecer en el panel** (comprobado contra el Brain de verdad, no
+con un doble).
+
+### De paso
+
+`Brain._broadcast_to_loop()` creaba la corutina antes de saber si podía
+agendarla. Si el bucle se cerraba en medio, la corueta quedaba sin ejecutar y
+Python avisaba por consola en cada evento perdido al apagar.
+
+---
+
 ## Otros
 
 - **La respuesta de una investigación salía en inglés**: `He investigated

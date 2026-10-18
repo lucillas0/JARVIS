@@ -221,10 +221,23 @@ class Brain:
         """Entrega eventos desde callbacks de voz/audio y otros hilos worker."""
         if self.loop is None:
             return
+        if self.loop.is_closed():
+            return          # apagando: no hay a quién entregarle nada
         try:
             if msg.get("type") in ("confirmation_request", "heal_approval_request"):
                 self._alert_discord_approval(msg)
-            asyncio.run_coroutine_threadsafe(self._broadcast(msg), self.loop)
+            # OJO: la corutina se crea ANTES de saber si se puede agendar. Si
+            # el bucle se cierra entre medias, `run_coroutine_threadsafe`
+            # lanza y la corueta queda sin ejecutar nunca: Python avisa por
+            # consola con "coroutine was never awaited" en cada evento que se
+            # pierde al apagar. Por eso se comprueba antes y, si falla el
+            # agendado, se cierra la corueta explícitamente.
+            co = self._broadcast(msg)
+            try:
+                asyncio.run_coroutine_threadsafe(co, self.loop)
+            except Exception:
+                co.close()
+                raise
         except Exception as e:
             log.debug("emit falló: %s", e)
 
@@ -4080,6 +4093,20 @@ def _handle(text: str, input_mode: str) -> str:
         # cuando no hay plan: nunca pisa su decision.
         _dev = _intencion_desarrollo(cleaned)
         if _dev:
+            # Antes esta idea iba directa a `opencode_build`, que le pasa el
+            # texto tal cual a OpenCode con `--auto`: sin analizar, sin riesgos
+            # y sin preguntar nada. El orquestador (`brain.dev`) sí hace todo
+            # eso —analiza el proyecto, predice riesgos, escribe el prompt y
+            # pide permiso— pero solo se llegaba a él por API, no desde una
+            # conversación.
+            #
+            # Ahora la idea entra por ahí y sale con el trabajo en el panel.
+            # Si el orquestador no está (equipo sin el módulo, o import
+            # fallido), se cae al camino viejo: mejor|OpenCode sin pensar que
+            # no hacer nada.
+            _encargo = _encargar_al_taller(cleaned, _dev)
+            if _encargo is not None:
+                return _encargo
             rounds = [{"reply": "De inmediato, señor. Lo encargo al taller.",
                        "tool": "opencode_build",
                        "parameters": {"objetivo": cleaned[:1500],
@@ -4126,6 +4153,40 @@ def _handle(text: str, input_mode: str) -> str:
     return reply
 
 
+def _encargar_al_taller(idea: str, proyecto: str) -> Optional[str]:
+    """Manda la idea al orquestador: la analiza y la deja en el panel.
+
+    Devuelve lo que se le dice al señor, o None si aquí no se pudo (y entonces
+    quien llama usa el camino viejo, que mete la idea sin más en OpenCode).
+
+    El orquestador es quien de verdad piensa la idea: lee el proyecto, pide un
+    diseño al modelo, predice riesgos, estima y escribe el prompt para OpenCode
+    con todo eso dentro. Luego deja la tarea esperando aprobación, así que el
+    señor ve el plan en JARVIS Live antes de que se toque un solo fichero.
+    """
+    gestor = getattr(brain, "dev", None)
+    if gestor is None:
+        return None
+    try:
+        crear = gestor.crear(idea=idea, project_path="")
+        if not crear.get("ok"):
+            log.info("el orquestador no acepto la idea: %s", crear.get("error"))
+            return None
+        tarea = crear.get("task") or {}
+        task_id = tarea.get("id") or ""
+        # El análisis va en un hilo (tarda: lee el proyecto y pregunta al
+        # modelo). Se lanza en segundo plano porque `_handle` está en el hilo
+        # del mensaje y no puede quedarse esperando.
+        gestor.analizar(task_id)
+    except Exception as exc:  # noqa: BLE001
+        log.info("no se pudo encargar al orquestador (%s); va por el camino viejo",
+                 exc)
+        return None
+    return (f"Lo he encargado, señor. Estoy pensando la idea y preparando el "
+            f"plan; en cuanto esté le digo qué he pensado y lo apruebo usted "
+            f"antes de tocar nada. Lo verá en JARVIS Live.")
+
+
 def _intencion_desarrollo(texto: str) -> str:
     """¿Pide el señor DESARROLLAR algo? Devuelve un nombre de proyecto o "".
 
@@ -4144,15 +4205,37 @@ def _intencion_desarrollo(texto: str) -> str:
     if _re.search(r"^(que es|qué es|como funciona|cómo funciona|que significa|"
                   r"expl[ii]came|cuentame|háblame)\b", t.strip()):
         return ""
+    # «quiero que abras el bot» es una ORDEN, no una petición de software: el
+    # "que" introduce un subjuntivo y no hay sustantivo de por medio.
+    # «quiero una app que me avise» sí lo es: el "que" es relativo y describe
+    # la app. La diferencia no es el "que", es si entre el verbo y el "que"
+    # hay un sustantivo de software. Por eso no vale un patrón suelto.
+    if _re.search(r"\b(quiero|necesito|monta|saca)\b([^.\n]{0,30}?)\bque\b", t):
+        _entre = _re.search(r"\b(quiero|necesito|monta|saca)\b([^.\n]{0,30}?)\bque\b",
+                            t).group(2)
+        _obj = (r"(proyecto|web|app|aplicacion|programa|script|tienda|pagina|"
+                r"software|juego|plugin|extension|calculadora|formulario|"
+                r"panel|bot|dashboard|cron[óo]metro)")
+        if not _re.search(_obj, _entre):
+            return ""
     objeto = (r"(proyecto|web|app|aplicacion|programa|script|tienda|pagina|"
-              r"software|juego)")
+              r"software|juego|plugin|extension|calculadora|formulario|"
+              r"panel|bot|dashboard|cron[óo]metro)")
+    # Ojo con la lista: más abajo, al limpiar el nombre del proyecto, se quitan
+    # `quiero` y `necesito`. Si aquí no estaban, «quiero una app que me avise del
+    # tiempo» no se detectaba como desarrollo: se limpiaba el verbo del nombre
+    # pero no se buscaba. Son las dos listas del mismo verbo y tienen que
+    # coincidir.
     verbo = (r"(desarrolla(?:me|r)?|programa(?:me)?|crea(?:me)?|hazme|"
-             r"construye(?:me)?|disena(?:me)?)")
+             r"construye(?:me)?|disena(?:me)?|quiero|necesito|monta(?:me)?|"
+             r"arme|saca(?:me)?|re[ae]liza(?:me)?|implemen(?:ta|te)(?:me)?)")
     if not _re.search(verbo + r"\b.{0,40}\b" + objeto, t):
         return ""
     nombre = _re.sub(r"^(por favor |oye |jarvis[, ]*)*", "", t.strip())
     nombre = _re.sub(r"\b(desarrollame|desarrolla|programame|programa|creame|crea|"
-                     r"hazme|construyeme|construye|disename|disena|quiero|que|un|una|"
+                     r"hazme|construyeme|construye|disename|disena|quiero|necesito|"
+                     r"montame|monta|arme|arma|sacame|saca|realizame|realiza|"
+                     r"realeizame|implementame|implementa|que|un|una|"
                      r"nuevo|nueva|para|mi|el|la|de|del)\b", " ", nombre)
     nombre = _re.sub(r"[^a-z0-9]+", "-", nombre).strip("-")[:30].strip("-")
     return nombre or "proyecto"

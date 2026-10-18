@@ -65,6 +65,20 @@ SECRETOS = re.compile(
     ["'][A-Za-z0-9_\-]{16,}["']
     """)
 
+# Claves con prefijo reconocible. El patrón de arriba exige una asignación con
+# comillas, y una clave pegada sola en una línea se le escapaba. Estos
+# prefijos no admiten falsos positivos: no son palabras, son firmas.
+PREFIJOS = re.compile(
+    r"""(?xi)
+    \b(
+        gsk_          | sk-ant-  | sk-or-v1- | AIza        |
+        ghp_ | gho_ | ghu_ | ghs_ | github_pat_ |
+        xox[abprs]-  | glpat-   | dckr_pat_  | hf_ | shpat_
+    )[A-Za-z0-9_\-]{24,}
+    | \bsk-[A-Za-z0-9]{20,}          # OpenAI (sk- a secas, sin sufijo)
+    | \bnpm_[A-Za-z0-9]{20,}         # npm
+    """)
+
 hallazgos: list[dict] = []
 
 
@@ -474,11 +488,17 @@ def auditar_tareas(f: Path, arbol: ast.AST) -> None:
 # --------------------------------------------------------------------------- #
 # 7. Secretos en el código
 # --------------------------------------------------------------------------- #
-def auditar_secretos() -> None:
+def auditar_secretos(ficheros: list[Path] | None = None) -> None:
+    """Busca claves escritas en el código.
+
+    `ficheros` se puede pasar para poder probarla sin tocar el repo entero.
+    """
     permitidos = re.compile(r"(example|plantilla|placeholder|changeme|todo|cambia|"
                             r"tu_clave|aqui|xxx+|\.\.\.|<.*>|prueba|falsa|fake|"
                             r"dummy|test|ejemplo|no_valida|no_existe)", re.I)
-    for f in ficheros_python() + list(RAIZ.glob("*.yml")) + list(RAIZ.glob("*.yaml")):
+    objetivo = (ficheros if ficheros is not None else
+                ficheros_python() + list(RAIZ.glob("*.yml")) + list(RAIZ.glob("*.yaml")))
+    for f in objetivo:
         texto = f.read_text(encoding="utf-8", errors="replace")
         for num, linea in enumerate(texto.splitlines(), 1):
             if linea.lstrip().startswith("#"):
@@ -493,6 +513,23 @@ def auditar_secretos() -> None:
                       "clave escrita en el fichero: "
                       + trozo[:40] + "...",
                       "quien clonee el repo tiene la clave; rotala")
+                break
+            # Claves con prefijo reconocible, esterEAK donde esten: sueltas en
+            # una línea, sin comillas y sin nombre de variable. El patrón de
+            # arriba solo las pilla si hay un `api_key = "..."`, y una clave
+            # pegada a mano en un fichero se cuela por ahí.
+            for hallazgo in PREFIJOS.finditer(linea):
+                trozo = hallazgo.group(0)
+                if permitidos.search(linea[max(0, hallazgo.start() - 60):
+                                            hallazgo.end()]):
+                    continue
+                # Solo se enseña el principio: la clave entera no sale por
+                # pantalla ni queda en el informe.
+                anota("CRITICAL", "clave-de-proveedor-en-codigo", f, num,
+                      f"clave de proveedor con prefijo «{trozo[:6]}…»"
+                      f" escrita en el fichero ({len(trozo)} caracteres)",
+                      "quien clonee el repo tiene la clave y puede usarla; "
+                      "rotala en la web del proveedor")
                 break
 
 
