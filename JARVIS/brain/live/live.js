@@ -1,451 +1,1433 @@
 'use strict';
+/* JARVIS Live · centro de mando.
+ *
+ * Un solo WebSocket, un solo token, una sola fuente de verdad: el backend de
+ * /api/cmd y /api/dev. Aquí no se calcula nada que el backend no haya medido.
+ *
+ * Regla de refresco: el bus avisa, el REST manda. Cuando llega un evento se
+ * repinta lo afectado; el resto llega por sondeo corto mientras haya algo en
+ * marcha y se alarga cuando la pantalla está tranquila.
+ */
 (() => {
   const $ = (id) => document.getElementById(id);
   const token = typeof window.JARVIS_TOKEN === 'string' ? window.JARVIS_TOKEN : '';
-  const API = '/api/live';
-  const state = { connected: false, snapshot: null, ws: null, reconnect: null,
-    failureTimer: null, refreshTimer: null, pollTimer: null, durationTimer: null,
-    latestEvents: [], activeFilter: 'todos', lastPoll: 0, errors: 0 };
-  let uidSinId = 0;
-  const categories = new Set(['tareas', 'cambios', 'permisos', 'errores', 'agentes', 'sistema', 'conversación']);
 
-  function announce(message) {
-    const notice = $('notice');
-    notice.textContent = String(message || '');
-    notice.hidden = false;
-    clearTimeout(announce.timer);
-    announce.timer = setTimeout(() => { notice.hidden = true; }, 4400);
+  const S = {
+    conectado: false, ws: null, reintento: null,
+    estado: null, act: null, per: null, ag: null, voz: null,
+    vista: 'dashboard', tab: 'propuesta',
+    diff: '', cargando: false, repetir: false,
+    errores: 0, ultimo: 0, incidente: null,
+    cache: {},
+  };
+
+  const ICONO_VACIO = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 9h8M8 13h5"/></svg>';
+
+  /* ───────────────────────── utilidades ───────────────────────── */
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const ts = (v) => (typeof v === 'number' && v > 0 ? v * 1000
+    : (typeof v === 'string' && v ? Date.parse(v) : NaN));
+
+  function dur(seg) {
+    const s = Math.max(0, Math.floor(Number(seg) || 0));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h) return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+    if (m) return `${m} min ${String(s % 60).padStart(2, '0')} s`;
+    return `${s} s`;
   }
-  function status(text, mode) {
-    $('connection-label').textContent = text;
-    $('connection').dataset.state = mode;
+  function relojDe(valor) {
+    const ms = ts(valor);
+    if (!Number.isFinite(ms)) return '--:--';
+    return new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }).format(ms);
   }
-  function esc(value) {
-    return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    })[c]);
+  function relativo(valor) {
+    const ms = ts(valor);
+    if (!Number.isFinite(ms)) return '—';
+    const dif = Math.round((Date.now() - ms) / 1000);
+    if (dif < 45) return 'ahora mismo';
+    if (dif < 3600) return `hace ${Math.round(dif / 60)} min`;
+    if (dif < 86400) return `hace ${Math.round(dif / 3600)} h`;
+    return `hace ${Math.round(dif / 86400)} d`;
   }
-  function dateTime(value, fallback = '—') {
-    if (!value) return fallback;
-    let date = new Date(value);
-    if (typeof value === 'number') date = new Date(value * 1000);
-    return Number.isNaN(date.getTime()) ? fallback : new Intl.DateTimeFormat('es-ES', {
-      hour: '2-digit', minute: '2-digit', second: '2-digit'
-    }).format(date);
-  }
-  function metric(value) {
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-  }
-  function progress(id, value) {
-    const valid = metric(value);
-    $(id + '-value').textContent = valid === null ? '—' : `${valid}%`;
-    $(id + '-bar').style.width = valid === null ? '0%' : `${Math.max(0, Math.min(100, valid))}%`;
-  }
-  async function api(path, options = {}) {
-    if (!token) throw new Error('No se recibió la sesión de JARVIS. Recarga la página.');
-    const response = await fetch(path, {
-      ...options,
-      headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        'X-Jarvis-Token': token, ...(options.headers || {}) },
+  const nivel = (pct) => (pct >= 90 ? 'critico' : pct >= 75 ? 'aviso' : 'ok');
+  const vacio = (titulo, nota) => `<div class="estado-vacio">${ICONO_VACIO}<b>${esc(titulo)}</b>`
+    + (nota ? `<span>${esc(nota)}</span>` : '') + '</div>';
+
+  async function api(ruta, opciones = {}) {
+    const r = await fetch(ruta, {
+      ...opciones,
+      headers: { ...(opciones.body ? { 'Content-Type': 'application/json' } : {}),
+        'X-Jarvis-Token': token, ...(opciones.headers || {}) },
       cache: 'no-store', credentials: 'same-origin',
     });
-    let data;
-    try { data = await response.json(); } catch { throw new Error(`El cerebro respondió con HTTP ${response.status}.`); }
-    if (!response.ok) throw new Error(data.error || `El cerebro respondió con HTTP ${response.status}.`);
-    return data;
+    let datos;
+    try { datos = await r.json(); } catch { throw new Error(`El cerebro respondió con HTTP ${r.status}.`); }
+    if (!r.ok || datos.ok === false) throw new Error(datos.error || `El cerebro respondió con HTTP ${r.status}.`);
+    return datos;
   }
-  function updateHeading(data) {
-    $('system-status').dataset.state = data.online ? 'online' : 'offline';
-    $('system-status').firstElementChild.nextElementSibling.textContent = data.online ? 'OPERATIVO' : 'DESCONECTADO';
-    $('jarvis-state').textContent = data.online ? 'Operativo' : 'Desconectado';
-    const pending = data.approvals.length;
-    const work = data.active_tasks.filter(task => task.state === 'ejecutando' || task.state === 'requiere aprobación').length;
-    $('capacity-label').textContent = pending ? 'ATENCIÓN REQUERIDA' : work ? 'TRABAJANDO' : 'DISPONIBLE';
-    $('system-summary').textContent = !data.online ? 'No se recibe respuesta del cerebro.' : pending
-      ? `Hay ${pending} ${pending === 1 ? 'acción pendiente de autorización' : 'acciones pendientes de autorización'}.`
-      : work ? `JARVIS está atendiendo ${work} ${work === 1 ? 'trabajo activo' : 'trabajos activos'}.`
-      : 'Cerebro en línea. No hay trabajos de conversación en curso.';
-    const metrics = data.resources || {};
-    progress('cpu', metrics.cpu);
-    progress('ram', metrics.ram);
-    const ramDetail = metrics.ram_used != null && metrics.ram_total != null
-      ? ` · ${metrics.ram_used} de ${metrics.ram_total} GB` : '';
-    $('ram-value').textContent = metric(metrics.ram) == null ? '—' : `${metrics.ram}%`;
-    $('resource-note').textContent = metric(metrics.cpu) == null
-      ? 'CPU y memoria no disponibles en este equipo.'
-      : `Memoria en uso${ramDetail}. La GPU y temperatura no están expuestas por el gestor actual.`;
-    $('active-count').textContent = String(data.active_tasks.length);
-    const active = (data.agents || []).filter(agent => agent.status === 'activo');
-    $('agent-count').textContent = String(active.length);
-    $('voice-state').textContent = data.voice_available ? labelState(data.voice) : 'No disponible';
-    $('discord-state').textContent = data.discord ? 'Configurado' : 'No conectado';
-    $('client-count').textContent = String(data.active_clients);
-    $('brain-context').textContent = [data.voice_available ? 'Voz disponible' : 'Sin voz', data.discord ? 'Discord configurado' : 'Discord desconectado'].join(' · ');
-    const visibleTasks = data.active_tasks.filter(task => task.state !== 'completada');
-    if (visibleTasks.length) {
-      const task = visibleTasks[visibleTasks.length - 1];
-      $('activity-title').textContent = task.name || 'Trabajo de JARVIS';
-      $('activity-description').textContent = task.description || 'Trabajo en ejecución. El porcentaje de avance no está disponible en el gestor actual.';
-      $('current-activity').textContent = `JARVIS está trabajando: ${task.name || 'trabajo activo'}`;
-      $('current-task').hidden = false;
-      const esBuild = String(task.id || '').startsWith('build-');
-      $('current-task').innerHTML = '';
-      const info = document.createElement('span');
-      info.textContent = `${task.id} · ${labelState(task.state)} · Agente: ${task.agent || 'JARVIS'} · Tiempo transcurrido: ${duration(task.started_at)}`;
-      $('current-task').appendChild(info);
-      if (esBuild) {
-        const parar = document.createElement('button');
-        parar.type = 'button';
-        parar.className = 'task-mini';
-        parar.dataset.stopBuild = task.id;
-        parar.textContent = 'Detener';
-        $('current-task').appendChild(parar);
-      }
+  const get = (ruta) => api(ruta);
+  const post = (ruta, cuerpo) => api(ruta, { method: 'POST', body: JSON.stringify(cuerpo || {}) });
+  const borrar = (ruta) => api(ruta, { method: 'DELETE' });
+
+  let avisoTimer = null;
+  function avisar(texto, malo = false) {
+    const caja = $('aviso');
+    if (!caja) return;
+    caja.textContent = String(texto || '');
+    caja.style.borderColor = malo ? 'var(--error)' : 'var(--acento)';
+    caja.hidden = false;
+    clearTimeout(avisoTimer);
+    avisoTimer = setTimeout(() => { caja.hidden = true; }, malo ? 7000 : 4200);
+  }
+
+  /* ───────────────────────── navegación ───────────────────────── */
+  function ir(vista, empujar = true) {
+    const destino = document.querySelector(`.vista[data-vista="${vista}"]`);
+    if (!destino) return;
+    S.vista = vista;
+    document.querySelectorAll('.vista').forEach((v) => v.classList.toggle('activa', v === destino));
+    document.querySelectorAll('.nav-item[data-vista]').forEach((b) => {
+      if (b.dataset.vista === vista) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
+    });
+    if (empujar && location.hash.slice(1) !== vista) history.replaceState(null, '', `#${vista}`);
+    document.getElementById('principal').scrollTop = 0;
+    cargarVista(vista);
+  }
+
+  function cargarVista(vista) {
+    if (vista === 'tareas') return pintarTareas();
+    if (vista === 'agentes') return pintarAgentes();
+    if (vista === 'cambios') return pintarCambios(true);
+    if (vista === 'permisos') return pintarPermisos();
+    if (vista === 'preguntas') return pintarPreguntas();
+    if (vista === 'tests') return pintarTests();
+    if (vista === 'historial') return pintarHistorial();
+    if (vista === 'ia') return pintarIA();
+    if (vista === 'sistema') return pintarSistema();
+    if (vista === 'nueva') return pintarNueva();
+    return undefined;
+  }
+
+  /* ───────────────────────── cabecera ───────────────────────── */
+  function chip(rotulo, valor, extra, opts = {}) {
+    const nivelChip = opts.nivel || (num(extra) == null ? 'no' : nivel(extra));
+    const pista = num(extra) == null ? ''
+      : `<span class="pista"><i style="width:${Math.min(100, Math.max(0, extra))}%"></i></span>`;
+    return `<div class="metrica-chip" data-nivel="${nivelChip}">
+      <span class="rotulo">${esc(rotulo)}</span>
+      <span class="valor">${esc(valor)}</span>${pista}${opts.pie || ''}</div>`;
+  }
+
+  function pintarCabecera() {
+    const e = S.estado;
+    const r = (e && e.recursos) || {};
+    const cpu = r.cpu || {};
+    const ram = r.ram || {};
+    const gpu = r.gpu || {};
+    const red = r.red || {};
+    const discos = Array.isArray(r.discos) ? r.discos : [];
+    const disco = discos.reduce((a, b) => ((a && (b.porcentaje || 0) > (a.porcentaje || 0)) ? b : (a || b)), null);
+
+    $('metricas').innerHTML = [
+      chip('CPU', cpu.porcentaje == null ? 'sin datos' : `${Math.round(cpu.porcentaje)}%`,
+        cpu.porcentaje, { pie: cpu.nucleos ? `<span class="velocidad">${cpu.nucleos} núcleos</span>` : '' }),
+      chip('RAM', ram.porcentaje == null ? 'sin datos' : `${Math.round(ram.porcentaje)}%`,
+        ram.porcentaje,
+        { pie: ram.total_gb ? `<span class="velocidad">${ram.usado_gb}/${ram.total_gb} GB</span>` : '' }),
+      chip('GPU', !gpu.available ? 'no disponible' : (gpu.usage == null ? 'sin lectura' : `${Math.round(gpu.usage)}%`),
+      gpu.available ? gpu.usage : null,
+      { pie: gpu.available ? `<span class="velocidad">${esc(gpu.name || '')}${gpu.vram_total_mb ? ` · VRAM ${Math.round(gpu.vram_used_mb)}/${Math.round(gpu.vram_total_mb)} MB` : ''}</span>`
+        : `<span class="velocidad">${esc(gpu.reason || 'sin sensor')}</span>` }),
+      chip('DISCO', disco && disco.porcentaje != null ? `${Math.round(disco.porcentaje)}%` : 'sin datos',
+        disco ? disco.porcentaje : null,
+        { pie: disco ? `<span class="velocidad">${esc(disco.etiqueta || disco.path || '')}</span>` : '' }),
+      `<div class="metrica-chip" data-nivel="no">
+        <span class="rotulo">RED</span>
+        <span class="velocidad">${red.available
+          ? (red.download_bps == null ? 'midiendo…'
+            : `↓${(red.download_bps / 1048576).toFixed(1)} ↑${(red.upload_bps / 1048576).toFixed(1)} MB/s`)
+          : 'no disponible'}</span>
+        <span class="velocidad">${esc(red.note || red.reason || '')}</span></div>`,
+    ].join('');
+
+    const salud = (e && e.salud) || {};
+    const caja = $('estado-global');
+    const nombre = { online: 'EN LÍNEA', degraded: 'DEGRADADO', error: 'CON FALLOS', unknown: 'SIN DATOS' }[salud.estado] || 'SIN DATOS';
+    caja.dataset.estado = salud.estado || 'unknown';
+    $('estado-global-txt').textContent = nombre;
+    $('marca-sub').textContent = salud.estado === 'online'
+      ? 'Centro de mando · todo en marcha'
+      : `${salud.cuentas ? `${salud.cuentas.degraded || 0} degradados, ` : ''}revisa Sistema`;
+
+    const c = (e && e.contadores) || {};
+    $('notis-contador').hidden = !c.notificaciones_sin_leer;
+    $('notis-contador').textContent = String(c.notificaciones_sin_leer || 0);
+    pintarContadoresNav(c);
+  }
+
+  function pintarContadoresNav(c) {
+    const set = (nombre, valor, tono) => {
+      const nodo = document.querySelector(`.contador[data-contador="${nombre}"]`);
+      if (!nodo) return;
+      nodo.hidden = !valor;
+      nodo.textContent = String(valor || 0);
+      if (tono) nodo.dataset.tono = tono; else delete nodo.dataset.tono;
+    };
+    set('tareas', c.misiones_vivas);
+    set('permisos', c.permisos, c.permisos ? 'alerta' : '');
+    set('preguntas', c.preguntas, c.preguntas ? 'alerta' : '');
+    set('cambios', ((S.estado || {}).cambios || {}).total);
+    const ia = S.ia || {};
+    set('ia', ia.fallos || 0, (ia.fallos || 0) ? 'error' : '');
+    const activos = ((S.ag || {}).agentes || []).filter((a) => a.activo).length;
+    set('agentes', activos);
+  }
+
+  /* ───────────────────────── sidebar: notificaciones y voz ───────────────────────── */
+  function pintarNotis() {
+    const lista_ = ((S.estado || {}).notificaciones) || [];
+    const menu = $('notis-menu');
+    if (!menu) return;
+    if (!S.notisAbierto) { menu.hidden = true; return; }
+    menu.hidden = false;
+    menu.innerHTML = `<header><b>Notificaciones</b>
+        <button type="button" class="btn chico" data-notis-accion="leer-todas">Marcar leídas</button></header>
+      <div class="notis-cuerpo">${lista_.length ? lista_.map((n) => `
+        <article class="notis-item${n.seen ? '' : ' nueva'}" data-id="${esc(n.id)}">
+          <div><b>${esc(n.title)}</b><small>${esc(n.body || '')}</small>
+            <span class="notis-pie">${esc(n.category || '')} · ${relativo(n.created_at)}</span></div>
+          <button type="button" class="btn chico" data-notis-accion="dismiss" data-id="${esc(n.id)}">Descartar</button>
+        </article>`).join('') : vacio('Nada que requiere atención', 'Las decisiones y avisos de JARVIS aparecerán aquí.')}</div>`;
+  }
+
+  function pintarVoz() {
+    const orb = $('orb-voz');
+    const v = S.voz || {};
+    const activo = v.voice_available ? (v.voice || 'inactivo') : 'inactivo';
+    orb.dataset.estado = activo;
+    $('voz-estado').textContent = !v.voice_available ? 'voz no disponible'
+      : ({ idle: 'en espera', listening: 'escuchando', thinking: 'pensando', speaking: 'hablando' }[activo] || activo);
+  }
+
+  /* ───────────────────────── protagonista ───────────────────────── */
+  function estadoVisual(estado) {
+    const mapa = {
+      DRAFT: ['BORRADOR', 'espera'], ANALYZING: ['ANALIZANDO', 'espera'],
+      PLANNING: ['DISEÑANDO', 'espera'], WAITING_PLAN_APPROVAL: ['ESPERANDO TU APROBACIÓN', 'espera'],
+      STARTING_OPENCODE: ['ABRIENDO SESIÓN', 'espera'], RUNNING: ['EJECUTANDO', 'ok'],
+      TESTING: ['EJECUTANDO TESTS', 'ok'], WAITING_PERMISSION: ['ESPERANDO PERMISO', 'espera'],
+      WAITING_USER: ['ESPERANDO DECISIÓN', 'espera'], COMPLETED: ['COMPLETADA', 'fin'],
+      FAILED: ['CON PROBLEMAS', 'parada'], CANCELLED: ['DETENIDA', 'parada'],
+    };
+    return mapa[estado] || [(estado || '—'), 'espera'];
+  }
+
+  function pintarHero() {
+    const a = S.act || {};
+    const hay = a.hay_tarea;
+    $('heroi-titulo').textContent = hay ? (a.titulo || 'Tarea en marcha') : (a.titulo || 'JARVIS está disponible.');
+    $('heroi-sub').textContent = hay ? (a.subtitulo || a.accion || '')
+      : (a.detalle || 'Crea una tarea y JARVIS la analiza antes de tocar nada.');
+    const [texto, tono] = estadoVisual(a.estado);
+    $('heroi-estado').textContent = hay ? texto : 'DISPONIBLE';
+    $('heroi-estado').dataset.estado = hay ? tono : 'espera';
+    const mis = $('heroi-mision');
+    mis.hidden = !a.id;
+    mis.textContent = a.id || '';
+
+    const barra = $('heroi-progreso');
+    barra.hidden = num(a.progreso) == null;
+    if (num(a.progreso) != null) {
+      $('heroi-barra').style.width = `${Math.min(100, Math.max(0, a.progreso))}%`;
+      $('heroi-pct').textContent = `${a.progreso}%`;
+    }
+    $('heroi-base').textContent = a.progreso_base || (hay ? '' : 'Sin tarea: no hay progreso que medir.');
+    $('heroi-agente').textContent = a.agente || (hay ? '—' : 'JARVIS');
+    const fases = Array.isArray(a.pasos) ? a.pasos : [];
+    const actual = fases.find((f) => f.estado === 'EN_CURSO');
+    $('heroi-fase').textContent = actual ? (actual.titulo || '—')
+      : (hay ? (a.accion || estadoVisual(a.estado)[0]) : '—');
+    $('heroi-tiempo').textContent = hay ? dur(a.tiempo) : '—';
+
+    $('heroi-fases').innerHTML = fases.length ? fases.map((f) => `
+      <div class="fase" data-estado="${esc(f.estado)}">
+        <span class="marca" aria-hidden="true">✓</span>
+        <span class="titulo-fase">${esc(f.titulo)}
+          <span class="nota-fase">${esc(f.evidencia || '')}</span></span>
+      </div>`).join('')
+      : `<p class="vacio-mini">Sin plan con pasos: no hay fases que enseñar.</p>`;
+
+    $('heroi-acciones').innerHTML = accionesMision(a);
+  }
+
+  function accionesMision(a) {
+    if (!a.hay_tarea || !a.id) return '';
+    const id = esc(a.id);
+    const botones = [];
+    if (a.estado === 'WAITING_PLAN_APPROVAL') {
+      botones.push(`<button type="button" class="btn ok" data-mision="approve" data-id="${id}">Aprobar plan</button>`);
+      botones.push(`<button type="button" class="btn" data-mision="revise" data-id="${id}">Modificar plan</button>`);
+    }
+    if (['RUNNING', 'TESTING', 'ANALYZING', 'PLANNING', 'STARTING_OPENCODE'].includes(a.estado)) {
+      botones.push(`<button type="button" class="btn" data-mision="pause" data-id="${id}">Pausar</button>`);
+      botones.push(`<button type="button" class="btn peligro" data-mision="cancel" data-id="${id}">Detener</button>`);
+    }
+    if (['FAILED', 'CANCELLED'].includes(a.estado)) {
+      botones.push(`<button type="button" class="btn acento" data-mision="retry" data-id="${id}">Reintentar</button>`);
+    }
+    if (a.estado === 'DRAFT') {
+      botones.push(`<button type="button" class="btn acento" data-mision="analyze" data-id="${id}">Analizar</button>`);
+    }
+    return botones.join('');
+  }
+
+  /* ───────────────────────── plan ───────────────────────── */
+  function pintarPlan() {
+    const a = S.act || {};
+    const plan = a.plan || {};
+    document.querySelectorAll('.pestana[data-plan]').forEach((t) => {
+      t.setAttribute('aria-selected', String(t.dataset.plan === S.tab));
+    });
+    const cuerpo = $('plan-cuerpo');
+    if (!a.hay_tarea) {
+      cuerpo.innerHTML = vacio('No hay tarea', 'Crea una desde «Nueva tarea» y el plan aparecerá aquí.');
+      $('plan-acciones').innerHTML = '';
+      return;
+    }
+    if (S.tab === 'propuesta') {
+      const arquitectura = Array.isArray(plan.arquitectura) ? plan.arquitectura : [];
+      const comps = Array.isArray(plan.componentes) ? plan.componentes : [];
+      const riesgos = Array.isArray(a.riesgos) ? a.riesgos : [];
+      cuerpo.innerHTML = `
+        <p style="margin:0;font-size:13.5px;color:var(--texto)">${esc(plan.objetivo || a.titulo || '')}</p>
+        ${plan.analisis ? `<p class="nota">${esc(plan.analisis)}</p>` : ''}
+        ${arquitectura.length ? `<h3 class="tarjeta-sub">Arquitectura propuesta</h3>
+          <ul class="lista-simple">${arquitectura.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+        ${comps.length ? `<h3 class="tarjeta-sub">Componentes</h3>
+          <ul class="lista-simple">${comps.map((c) => `<li><b>${esc(c.nombre || '')}</b>
+            ${c.ruta ? `<code>${esc(c.ruta)}</code>` : ''}${c.descripcion ? `<br><span class="nota">${esc(c.descripcion)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+        ${riesgos.length ? `<h3 class="tarjeta-sub">Riesgos previstos</h3>
+          <div class="riesgos">${riesgos.map((r) => `
+            <div class="riesgo" data-nivel="${esc((r.nivel || 'medio').toLowerCase())}">
+              <div><b>${esc(r.titulo || '')}</b>
+                ${r.impacto ? `<small>Qué se rompe: ${esc(r.impacto)}</small>` : ''}
+                ${r.mitigacion ? `<small>Cómo se evita: ${esc(r.mitigacion)}</small>` : ''}</div>
+            </div>`).join('')}</div>` : ''}
+        <div class="fila-dato"><span>Prompt enviado a OpenCode</span><strong>${a.prompt_chars || 0} caracteres</strong></div>
+        ${a.sesion ? `<div class="fila-dato"><span>Sesión</span><strong>${esc(a.sesion)}</strong></div>` : ''}`;
     } else {
-      $('activity-title').textContent = pending ? 'JARVIS está esperando autorización.' : 'El cerebro está disponible.';
-      $('activity-description').textContent = pending
-        ? 'Una acción protegida está bloqueada hasta que decidas. Los detalles aparecen a continuación.'
-        : 'El panel no inventa tareas activas. Aquí aparecerán las consultas cuando JARVIS las esté procesando.';
-      $('current-activity').textContent = pending ? 'Esperando tu autorización.' : 'Esperando actividad del cerebro.';
-      $('current-task').hidden = true;
+      const pasos = Array.isArray(a.pasos) ? a.pasos : [];
+      cuerpo.innerHTML = pasos.length ? `<ol class="plan-pasos">${pasos.map((p) => `
+        <li data-estado="${esc(p.estado)}"><div>${esc(p.titulo)}
+          ${p.detalle ? `<span class="nota-fase">${esc(p.detalle)}</span>` : ''}
+          ${Array.isArray(p.archivos) && p.archivos.length
+            ? `<span class="nota-fase">${esc(p.archivos.join(', '))}</span>` : ''}</div></li>`).join('')}</ol>
+        <p class="nota">Un paso solo se marca como hecho si hay un fichero suyo tocado o tests ejecutados.</p>`
+        : vacio('El plan no tiene pasos', 'JARVIS recibirá los pasos cuando OpenCode proponga el diseño.');
     }
-    $('last-updated').textContent = `Última lectura: ${dateTime(Date.now() / 1000)}`;
-    $('fecha').textContent = new Intl.DateTimeFormat('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date()).toUpperCase();
-  }
-  function labelState(value) {
-    return ({ idle: 'En espera', listening: 'Escuchando', thinking: 'Pensando', speaking: 'Hablando',
-      disconnected: 'Desconectada', offline: 'Desconectado', active: 'Activo', ejecutando: 'En ejecución',
-      completada: 'Completada', failed: 'Error', paused: 'En pausa', pending: 'Pendiente' })[value] || value || 'No disponible';
-  }
-  function duration(start) {
-    const seconds = Math.max(0, Math.floor(Date.now() / 1000 - Number(start || Date.now() / 1000)));
-    return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min`;
-  }
-  function escAttr(value) { return esc(value); }
-  function approvalRisk(value) {
-    return ({ critical: 'Crítico', high: 'Alto', sensitive: 'Sensible', medium: 'Medio', low: 'Bajo' })[String(value).toLowerCase()] || 'Pendiente';
-  }
-  function renderApprovals(list) {
-    const section = $('approval-section');
-    section.hidden = list.length === 0;
-    $('approval-count').textContent = String(list.length);
-    $('approvals-list').innerHTML = list.map(item => `<article class="aprobacion-item" aria-labelledby="approval-${escAttr(item.id)}">
-      <h3 id="approval-${escAttr(item.id)}">${esc(item.action)}</h3>
-      <p>${esc(item.description)}</p>
-      <div class="riesgo-linea"><span class="riesgo-chip">Riesgo: ${esc(approvalRisk(item.risk))}</span><span class="riesgo-chip">Solicita: ${esc(item.requester || 'JARVIS')}</span><span class="riesgo-chip">Motivo: ${esc(item.task || 'Confirmación requerida')}</span></div>
-      <p>La operación está detenida hasta que elijas. JARVIS aplica la decisión mediante su Permission Manager actual.</p>
-      <div class="approval-actions"><button type="button" data-approval="${escAttr(item.id)}" data-kind="${escAttr(item.kind)}" data-allow="yes">Aprobar</button><button class="denegar" type="button" data-approval="${escAttr(item.id)}" data-kind="${escAttr(item.kind)}" data-allow="no">Denegar</button></div>
-    </article>`).join('');
-  }
-  function normalizeEvent(event) {
-    if (!event || typeof event !== 'object') return null;
-    const title = String(event.title || event.label || event.text || event.task || event.detail || '').trim();
-    if (!title) return null;
-    const type = String(event.type || '').toLowerCase();
-    const mapped = type.includes('approval') || type.includes('confirmation') ? 'permisos'
-      : type.includes('error') || type.includes('failed') ? 'errores'
-      : type.includes('agent') ? 'agentes'
-      : type === 'assistant_reply' || type === 'user_heard' ? 'conversación'
-      : type === 'status' || type === 'hello' ? 'sistema' : 'tareas';
-    const category = categories.has(event.category) ? event.category : mapped;
-    return { id: String(event.id || event.event_id || `local-${type}-${++uidSinId}`),
-      at: event.at || Date.now() / 1000, category, title: title.slice(0,160),
-      detail: String(event.detail || event.label || title).slice(0,350) };
-  }
-  function renderEvents() {
-    const filtered = state.latestEvents.filter(event => state.activeFilter === 'todos' || event.category === state.activeFilter);
-    $('event-count').textContent = `${filtered.length} ${filtered.length === 1 ? 'evento' : 'eventos'}`;
-    if (!filtered.length) {
-      $('event-list').innerHTML = `<div class="vacio"><span class="vacio-icono" aria-hidden="true">◷</span><strong>${state.latestEvents.length ? 'No hay eventos en este filtro.' : 'La actividad del cerebro aparecerá aquí.'}</strong><p>${state.latestEvents.length ? 'Selecciona «Todo» para consultar la actividad reciente.' : 'Los cambios, consultas y autorizaciones usarán el WebSocket actual de JARVIS.'}</p></div>`;
-      return;
+    const botones = [];
+    if (a.estado === 'WAITING_PLAN_APPROVAL') {
+      botones.push(`<button type="button" class="btn ok" data-mision="approve" data-id="${esc(a.id)}">Aprobar plan</button>`);
+      botones.push(`<button type="button" class="btn" data-mision="revise" data-id="${esc(a.id)}">Modificar plan</button>`);
     }
-    $('event-list').innerHTML = filtered.map(event => `<article class="fila-evento" data-category="${escAttr(event.category)}"><time class="hora-evento">${esc(dateTime(event.at))}</time><span class="marca-evento" aria-hidden="true">${event.category === 'errores' ? '!' : event.category === 'permisos' ? '•' : '✓'}</span><div><strong>${esc(event.title)}</strong><p>${esc(event.detail)}</p></div></article>`).join('');
+    $('plan-acciones').innerHTML = botones.join('');
   }
-  function addEvent(raw) {
-    const item = normalizeEvent(raw);
-    if (!item || state.latestEvents.some(event => event.id === item.id)) return;
-    state.latestEvents.push(item);
-    state.latestEvents.sort((a,b) => eventTimestamp(b.at) - eventTimestamp(a.at));
-    if (state.latestEvents.length > 80) state.latestEvents.length = 80;
-    renderEvents();
+
+  /* ───────────────────────── cambios recientes ───────────────────────── */
+  function pintarCambiosRecientes() {
+    const a = S.act || {};
+    const cambios = Array.isArray(a.cambios) ? a.cambios : [];
+    $('cambios-lista').innerHTML = cambios.length ? cambios.map((c) => `
+      <div class="linea" data-accion="${esc(c.action || 'modified')}">
+        <span class="marca-cambio" aria-hidden="true">${esc(c.mark || '~')}</span>
+        <span class="ruta">${esc(c.path)}</span>
+        <span class="hora">${esc(c.at ? relativo(c.at) : '')}</span>
+      </div>`).join('')
+      : `<p class="vacio-mini">${a.hay_tarea ? 'Aún no hay ficheros modificados.' : 'Sin tarea en marcha.'}</p>`;
+
+    const caja = $('caja-commit');
+    const commit = a.commit || {};
+    caja.hidden = !commit.texto;
+    $('commit-texto').textContent = commit.texto || '';
+    $('btn-commit').dataset.mision = a.id || '';
+    $('btn-commit').dataset.mensaje = commit.texto || '';
+
+    const t = a.tests || {};
+    $('caja-tests').innerHTML = t.ran
+      ? `<span class="ok">${t.passed == null ? '✓' : `${t.passed} correctos`}</span>
+         <span class="ko">${t.failed == null ? '' : `${t.failed} fallos`}</span>
+         <span class="nota" style="margin-left:auto">${esc(t.resumen || 'tests ejecutados')}</span>`
+      : `<span class="nota">Tests: ${a.hay_tarea ? 'todavía no ejecutados en esta misión.' : 'sin misiones.'}</span>`;
   }
-  function renderTasks(list) {
-    $('scheduled-count').textContent = String(list.length);
-    if (!list.length) {
-      $('task-list').innerHTML = '<div class="vacio-pequeno">No hay tareas programadas.</div>';
-      return;
-    }
-    $('task-list').innerHTML = list.slice(0, 8).map(task => {
-      const pausa = task.paused
-        ? `<button type="button" class="task-mini" data-resume="${escAttr(task.id)}">Reanudar</button>`
-        : `<button type="button" class="task-mini" data-pause="${escAttr(task.id)}">Pausar</button>`;
-      const repite = task.repeat ? ` · se repite cada ${Math.round(task.repeat / 60)} min` : '';
-      return `<article class="tarea-item"><div class="tarea-head"><strong>${esc(task.name)}</strong><span class="estado-chip" data-state="pending">${esc(labelState(task.state))}</span></div><p>${esc(task.description || 'Sin descripción.')}</p><div class="tarea-meta"><span>${esc(dateTime(task.run_at))}${esc(repite)}</span></div><div class="tarea-botones"><button type="button" class="task-mini" data-run="${escAttr(task.id)}">Ejecutar ahora</button>${pausa}<button type="button" class="task-cancel" data-cancel="${escAttr(task.id)}">Cancelar</button></div></article>`;
-    }).join('');
+
+  /* ───────────────────────── actividad en tiempo real ───────────────────────── */
+  const CLASE_EVENTO = {
+    'opencode.completed': 'ok', 'opencode.test_finished': 'ok', 'opencode.permission_resolved': 'ok',
+    'opencode.question_answered': 'ok', 'opencode.started': 'ok',
+    'opencode.error': 'error', 'opencode.stopped': 'error',
+    'opencode.permission_requested': 'aviso', 'opencode.question_requested': 'aviso',
+    'opencode.test_started': 'aviso', 'opencode.file_changed': '',
+  };
+  const GLIFO_EVENTO = {
+    'opencode.started': '▶', 'opencode.completed': '✓', 'opencode.error': '!',
+    'opencode.permission_requested': '?', 'opencode.question_requested': '?',
+    'opencode.file_changed': '~', 'opencode.test_started': 'T', 'opencode.test_finished': '✓',
+    'opencode.tool_call': '·', 'opencode.output': '»',
+  };
+
+  function pintarTiempoReal() {
+    const a = S.act || {};
+    const eventos = Array.isArray(a.eventos) ? a.eventos : [];
+    $('tiempo-real').innerHTML = eventos.length ? eventos.map((ev) => {
+      const tipo = String(ev.type || '');
+      const clase = CLASE_EVENTO[tipo] || '';
+      const detalle = ev.detail || ev.text || ev.error || ev.path || tipo;
+      return `<div class="linea-tiempo" data-clase="${clase}">
+        <span class="hora">${esc(relojDe(ev.at))}</span>
+        <span class="glifo" aria-hidden="true">${esc(GLIFO_EVENTO[tipo] || '·')}</span>
+        <span class="cuerpo"><b>${esc(tipo.replace('opencode.', ''))}</b>
+          <span class="detalle">${esc(String(detalle).slice(0, 220))}</span></span></div>`;
+    }).join('') : vacio('Sin actividad todavía', 'Los pasos de OpenCode aparecerán aquí en directo.');
   }
-  function renderRecent(list) {
-    const items = (list || []).slice(0, 8);
-    $('recent-count').textContent = String((list || []).length);
-    state.recent = {};
-    if (!items.length) {
-      $('recent-list').innerHTML = '<div class="vacio-pequeno">Aquí aparecerán los trabajos terminados, para reintentarlos.</div>';
-      return;
-    }
-    $('recent-list').innerHTML = items.map(task => {
-      state.recent[task.id] = task.message || '';
-      const marca = task.failed ? ' · falló' : '';
-      return `<article class="tarea-item"><div class="tarea-head"><strong>${esc(task.name)}</strong><span class="estado-chip" data-state="pending">${esc(labelState(task.failed ? 'failed' : 'completada'))}${esc(marca)}</span></div><div class="tarea-botones"><button type="button" class="task-mini" data-retry="${escAttr(task.id)}">Reintentar</button></div></article>`;
-    }).join('');
-  }
-  function renderAgents(list) {
-    const active = list.filter(agent => agent.status === 'activo');
-    $('agents-total').textContent = `${active.length}/${list.length}`;
-    $('agent-list').innerHTML = list.filter(agent => agent.status === 'activo').length
-      ? active.slice(0,7).map(agent => `<article class="agente-item"><div class="agente-head"><span class="agente-info"><span class="indicador-agente activo" aria-hidden="true"></span><strong>${esc(agent.name)}</strong></span><small>${esc(labelState(agent.status))}</small></div><p class="tarea-meta">${esc((agent.processes || []).slice(0,2).join(', ') || agent.description)}</p></article>`).join('')
-      : '<div class="vacio-pequeno">No se han detectado agentes de escritorio activos.</div>';
-  }
-  function renderChanges(list) {
-    $('changes-total').textContent = String(list.length);
-    $('change-list').innerHTML = list.length ? list.slice(0,7).map(item => `<article class="cambio-item"><strong class="archivo-cambio">${esc(item.path)}</strong><div class="cambio-meta"><span>Git · ${esc(item.action)}</span><span>Cambio local</span></div></article>`).join('')
-      : '<div class="sin-cambios">Git no detecta cambios locales en este proyecto o el estado no está disponible.</div>';
-  }
-  function eventTimestamp(value) {
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-    const numeric = Number(value);
-    if (value && Number.isFinite(numeric) && String(value).trim() !== '') return numeric;
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? 0 : parsed / 1000;
-  }
-  function setSnapshot(data) {
-    state.snapshot = data;
-    updateHeading(data);
-    renderApprovals(data.approvals || []);
-    renderTasks(data.scheduled_tasks || []);
-    renderRecent(data.recent_tasks || []);
-    renderAgents(data.agents || []);
-    renderChanges(data.changes || []);
-    const events = [...(data.audit_events || []), ...(data.events || [])].map(event => {
-      if (event.type === 'error_report') event.category = 'errores';
-      return normalizeEvent(event);
-    }).filter(Boolean);
-    const seen = new Set();
-    state.latestEvents = events.sort((a,b) => eventTimestamp(b.at) - eventTimestamp(a.at)).filter(event => {
-      if (seen.has(event.id)) return false;
-      seen.add(event.id); return true;
-    }).slice(0,80);
-    renderEvents();
-  }
-  async function refresh(quiet = false) {
-    const now = Date.now();
-    if (state.refreshing) { state.refreshAgain = true; return; }
-    if (now - state.lastPoll < 1600) {
-      if (!state.refreshTimer) {
-        state.refreshTimer = setTimeout(() => {
-          state.refreshTimer = null;
-          void refresh(quiet);
-        }, 1600 - (now - state.lastPoll));
-      }
-      return;
-    }
-    state.lastPoll = now;
-    state.refreshing = true;
-    try {
-      const result = await api(`${API}/overview`);
-      if (!state.connected) { state.errors = 0; status('Cerebro conectado', 'online'); }
-      state.connected = true;
-      clearTimeout(state.failureTimer);
-      setSnapshot(result);
-      state.failureTimer = setTimeout(() => {
-        if (Date.now() - state.lastPoll > 10000) status('Sin confirmación reciente del cerebro', 'offline');
-      }, 9000);
-    } catch (error) {
-      state.connected = false;
-      state.errors += 1;
-      status(error.message.includes('autorizada') ? 'Sesión no válida' : 'Cerebro desconectado; reintentando', 'offline');
-      $('system-status').dataset.state = 'offline';
-      $('system-status').lastElementChild.textContent = 'SIN CONEXIÓN';
-      $('jarvis-state').textContent = 'Desconectado';
-      if (!quiet && state.errors === 1) announce(`${error.message} La interfaz seguirá intentando conectar.`);
-    } finally {
-      state.refreshing = false;
-      if (state.refreshAgain) {
-        state.refreshAgain = false;
-        setTimeout(() => { state.lastPoll = 0; void refresh(true); }, 160);
-      }
-    }
-  }
-  function websocketUrl() {
-    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${scheme}//${location.host}/ws?token=${encodeURIComponent(token)}`;
-  }
-  function connect() {
-    clearTimeout(state.reconnect);
-    if (!token) { status('Falta la sesión del cerebro', 'offline'); return; }
-    try { state.ws = new WebSocket(websocketUrl()); }
-    catch { status('No se pudo abrir el enlace en tiempo real', 'offline'); retry(); return; }
-    state.ws.addEventListener('open', () => {
-      state.connected = true;
-      state.errors = 0;
-      status('Cerebro conectado · eventos en directo', 'online');
-      refresh(true);
+
+  /* ───────────────────────── agentes ───────────────────────── */
+  function agentesConEstado() {
+    const lista_ = ((S.ag || {}).agentes) || [];
+    const a = S.act || {};
+    const trabajando = a.hay_tarea && ['RUNNING', 'TESTING', 'ANALYZING', 'PLANNING',
+      'STARTING_OPENCODE'].includes(a.estado);
+    return lista_.map((ag) => {
+      let estado = ag.estado;
+      if (ag.id === 'agent_opencode' && trabajando) estado = 'WORKING';
+      else if (ag.id === 'agent_opencode' && a.hay_tarea
+        && ['WAITING_PERMISSION', 'WAITING_USER'].includes(a.estado)) estado = 'WAITING';
+      else if (ag.activo) estado = 'WORKING';
+      return {
+        ...ag, estado,
+        detalle: ag.id === 'agent_opencode' && a.hay_tarea
+          ? (a.accion || estadoVisual(a.estado)[0]) : (ag.descripcion || ''),
+      };
     });
-    let overviewTimer = null;
-    state.ws.addEventListener('message', event => {
+  }
+
+  function pintarAgentes() {
+    const lista_ = agentesConEstado();
+    const html = lista_.length ? lista_.map((ag) => `
+      <div class="fila-agente" data-estado="${esc(ag.estado)}">
+        <span class="luz" aria-hidden="true"></span>
+        <span><b>${esc(ag.nombre)}</b>
+          <span class="detalle-agent">${esc(ag.detalle || '')}</span></span>
+        <span class="chip">${esc({ WORKING: 'TRABAJANDO', IDLE: 'INACTIVO', WAITING: 'ESPERANDO', DISABLED: 'NO INSTALADO' }[ag.estado] || ag.estado)}</span>
+      </div>`).join('')
+      : vacio('Sin agentes detectados', 'JARVIS lista los programas que encuentra de verdad en el equipo.');
+    $('agentes-lista').innerHTML = html;
+
+    const todos = lista_.length ? lista_.map((ag) => `
+      <article class="tarjeta" data-agente="${esc(ag.id)}" style="gap:8px">
+        <header><h2>${esc(ag.nombre)}</h2>
+          <span class="insignia-estado" data-s="${ag.activo ? 'ok' : 'no'}">${ag.activo ? 'ACTIVO' : 'INACTIVO'}</span></header>
+        <p class="nota">${esc(ag.descripcion || '')}</p>
+        <p class="nota">${esc(ag.ejecutable ? `Ejecutable: ${ag.ejecutable}` : 'Sin ejecutable en este equipo.')}</p>
+        <p class="nota">${esc(ag.nota || '')}</p>
+        <div class="acciones">
+          ${ag.acciones && ag.acciones.start ? `<button type="button" class="btn chico acento" data-agente-start="${esc(ag.id)}">Abrir</button>` : ''}
+          ${ag.acciones && ag.acciones.stop ? `<button type="button" class="btn chico" data-agente-stop="${esc(ag.id)}">Cerrar</button>` : ''}
+        </div>
+      </article>`).join('') : vacio('Sin agentes', 'No se ha detectado ningún programa de agente.');
+    $('ag-lista').innerHTML = todos;
+    pintarGestores();
+  }
+
+  /* El Agent Manager y el Resource Manager: cola, prioridad y límites. Todo lo
+   * que sale de aquí viene del backend; si no está, se dice que no está. */
+  function pintarGestores() {
+    const cont = $('ag-gestores');
+    if (!cont) return;
+    const ag = S.agentesMgr;
+    const rec = S.recursosMgr;
+    if (!ag && !rec) {
+      cont.innerHTML = '';
+      return;
+    }
+    const cola = (ag && ag.cola && ag.cola.resumen) || {};
+    const conc = (ag && ag.concurrencia) || {};
+    const trabajos = (ag && ag.cola && ag.cola && ag.cola.historial) || [];
+    const decisions = (rec && rec.decisiones) || [];
+    const m = (rec && rec.metricas) || {};
+
+    const filaRecurso = (nombre, it) => {
+      if (!it) return '';
+      if (!it.available) return `<div class="fila-agente" data-estado="WAITING">
+        <span class="luz"></span><span><b>${esc(nombre)}</b>
+        <span class="detalle-agent">${esc(it.motivo || 'no disponible')}</span></span></div>`;
+      return `<div class="fila-agente" data-estado="IDLE">
+        <span class="luz"></span><span><b>${esc(nombre)}</b>
+        <span class="detalle-agent">${num(it.valor)}%</span></span></div>`;
+    };
+
+    cont.innerHTML = `
+      <section class="bloque">
+        <h3>Cola de agentes</h3>
+        <p class="nota">Prioridad ${num(conc.maximo_configurado)} de tope;
+          en marcha ahora <b>${num(conc.en_vuelo)}</b>,
+          límite actual <b>${num(conc.limite_efectivo)}</b>.
+          En cola: ${num(cola.en_cola)} · ejecutándose: ${num(cola.ejecutando)}
+          · atascados: ${num(cola.atascado)} · fallidos: ${num(cola.fallo)}.</p>
+        ${trabajos.length ? `<ul class="lista-simple">${trabajos.slice(0, 6).map((t) => `
+          <li><b>${esc(t.id)}</b> · ${esc(t.agent_id)} ·
+            <span class="chip">${esc(t.estado)}</span> ·
+            prioridad ${num(t.prioridad)}
+            ${t.mission_id ? ` · misión ${esc(t.mission_id)}` : ''}
+            ${t.error ? ` · ${esc(t.error)}` : ''}
+            ${t.estado === 'en_cola' || t.estado === 'ejecutando' ? `<button type="button" class="btn mini" data-job-cancelar="${esc(t.id)}">Cancelar</button>` : ''}
+          </li>`).join('')}</ul>` : '<p class="nota">No hay trabajos en cola.</p>'}
+      </section>
+      ${rec ? `<section class="bloque">
+        <h3>Recursos y límites</h3>
+        <p class="nota">Nivel actual: <b>${esc(rec.nivel)}</b>. ${esc(rec.motivo || '')}</p>
+        ${filaRecurso('CPU', m.cpu)}
+        ${filaRecurso('Memoria', m.ram)}
+        ${filaRecurso('Disco', m.disco)}
+        <p class="nota">Concurrencia: ${num(conc.limite_efectivo)}${rec.degradado && rec.degradado.falta
+          ? ` · sin: ${esc(rec.degradado.falta.join(', '))}` : ''}</p>
+        ${decisions.length ? `<ul class="lista-simple">${decisions.slice(0, 4).map((d) => `
+          <li>${esc(d.motivo)} <span class="chip">${esc(d.valor_anterior)} → ${esc(d.valor_nuevo)}</span></li>`).join('')}</ul>` : ''}
+      </section>` : ''}`;
+  }
+
+  /* ───────────────────────── lateral derecho ───────────────────────── */
+  function pintarLateral() {
+    const per = S.per || {};
+    const pendientes = Array.isArray(per.pendientes) ? per.pendientes : [];
+    const incidentes = ((S.estado || {}).incidentes) || [];
+    const atencion = [];
+    pendientes.slice(0, 3).forEach((p) => atencion.push(`
+      <div class="caja alerta">
+        <h3>${p.origen === 'OpenCode' ? 'OpenCode pide permiso' : 'Acción protegida de JARVIS'}</h3>
+        <p>${esc(p.accion || '')}</p>
+        <div class="motivo">${esc(p.detalle || '')}</div>
+        ${p.origen === 'OpenCode' && p.mision ? `<div class="acciones" style="padding-top:2px">
+          <button type="button" class="btn chico peligro" data-permiso="reject" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Denegar</button>
+          <button type="button" class="btn chico ok" data-permiso="once" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Permitir</button>
+          <button type="button" class="btn chico" data-permiso="always" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Siempre</button>
+        </div>` : `<div class="acciones" style="padding-top:2px">
+          <button type="button" class="btn chico" data-ir="permisos">Revisar</button></div>`}
+      </div>`));
+    incidentes.slice(0, 2).forEach((i) => atencion.push(`
+      <div class="caja alerta">
+        <h3>Incidente ${esc(i.severity || '')}</h3>
+        <p>${esc(i.title || '')}</p>
+        <div class="motivo">${esc(i.description || i.impact || '')}</div>
+        <div class="acciones" style="padding-top:2px">
+          <button type="button" class="btn chico ok" data-incidente="resolve" data-id="${esc(i.id)}">Marcar resuelto</button></div>
+      </div>`));
+    const pendientesDeDecision = ((S.estado || {}).contadores || {}).preguntas || 0;
+    if (pendientesDeDecision) {
+      const plural = pendientesDeDecision > 1 ? 's' : '';
+      atencion.push('<div class="caja"><h3>' + pendientesDeDecision + ' pregunta'
+        + plural + ' de OpenCode</h3>'
+        + '<p>OpenCode necesita una decisi&oacute;n tuya para seguir.</p>'
+        + '<div class="acciones" style="padding-top:2px">'
+        + '<button type="button" class="btn chico acento" data-ir="preguntas">Responder</button>'
+        + '</div></div>');
+    }
+    $('atencion-lista').innerHTML = atencion.length ? atencion.join('')
+      : '<p class="vacio-mini">Nada requiere tu atención ahora mismo.</p>';
+
+    const ambitos = Array.isArray(per.ambitos) ? per.ambitos : [];
+    $('lateral-permisos').innerHTML = `
+      <p class="vacio-mini">${(per.total_pendientes || 0)} pendiente(s) ahora mismo.</p>
+      ${ambitos.length ? ambitos.map((a) => `
+        <div class="permiso-linea" data-estado="${esc(a.estado)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/></svg>
+          <span>${esc(a.ambito)}</span>
+          <span class="estado">${esc({ permitido: 'Permitido', preguntar: 'Preguntar siempre', denegado: 'Denegado' }[a.estado] || a.estado)}</span>
+        </div>`).join('')
+        : '<p class="vacio-mini">Sin decisiones de permisos registradas.</p>'}`;
+
+    pintarSistemaLateral();
+    const notis = ((S.estado || {}).notificaciones) || [];
+    $('lateral-historial').innerHTML = notis.length ? notis.slice(0, 6).map((n) => `
+      <div class="linea">
+        <span class="glifo-mini" aria-hidden="true">${n.seen ? '·' : '●'}</span>
+        <span style="min-width:0"><b style="font-weight:600">${esc(n.title)}</b>
+          <span class="detalle-agent">${esc(n.body || '')}</span></span>
+        <span class="hora">${relativo(n.created_at)}</span>
+      </div>`).join('') : '<p class="vacio-mini">Sin historial reciente.</p>';
+  }
+
+  function pintarSistemaLateral() {
+    const r = ((S.estado || {}).recursos) || {};
+    const medidor = (rotulo, pct) => {
+      const valor = num(pct);
+      const off = valor == null ? 138 : Math.round(138 - (Math.min(100, valor) / 100) * 138);
+      return `<div class="medidor" data-nivel="${valor == null ? 'no' : nivel(valor)}"
+        title="${esc(rotulo)}: ${valor == null ? 'no disponible' : `${Math.round(valor)}%`}">
+        <svg viewBox="0 0 48 48" aria-hidden="true"><circle class="fondo" cx="24" cy="24" r="22"/>
+          <circle class="valor-c" cx="24" cy="24" r="22" stroke-dasharray="138" stroke-dashoffset="${off}"/></svg>
+        <b>${valor == null ? '—' : `${Math.round(valor)}%`}</b><span>${esc(rotulo)}</span></div>`;
+    };
+    $('lateral-medidores').innerHTML = [
+      medidor('CPU', r.cpu && r.cpu.porcentaje),
+      medidor('RAM', r.ram && r.ram.porcentaje),
+      medidor('GPU', r.gpu && r.gpu.available ? r.gpu.usage : null),
+      medidor('DISCO', (Array.isArray(r.discos) && r.discos.length)
+        ? Math.max(...r.discos.map((d) => d.porcentaje || 0)) : null),
+    ].join('');
+    const disco = (Array.isArray(r.discos) && r.discos.length)
+      ? r.discos.reduce((a, b) => ((b.porcentaje || 0) > (a.porcentaje || 0) ? b : a)) : null;
+    const carga = (r.carga && r.carga.procesos) || 0;
+    $('lateral-barras').innerHTML = `
+      <div class="barra-recurso" data-nivel="${disco ? nivel(disco.porcentaje) : 'no'}">
+        <div class="rotulo"><span>Almacenamiento${disco ? ` (${esc(disco.etiqueta || disco.path || '')})` : ''}</span>
+          <span>${disco ? `${disco.usado_gb ?? '—'}/${disco.total_gb ?? '—'} GB` : 'no disponible'}</span></div>
+        <span class="pista"><i style="width:${disco && disco.porcentaje != null ? disco.porcentaje : 0}%"></i></span></div>
+      <div class="barra-recurso">
+        <div class="rotulo"><span>Procesos</span><span>${carga || '—'}</span></div>
+        <span class="pista"><i style="width:${carga ? Math.min(100, carga) : 0}%"></i></span></div>`;
+  }
+
+  /* ───────────────────────── vistas: nueva tarea ───────────────────────── */
+  async function pintarNueva() {
+    const misiones = ((S.estado || {}).misiones) || [];
+    const caja = $('idea-historial');
+    caja.hidden = !misiones.length;
+    $('idea-lista').innerHTML = misiones.slice(0, 6).map((m) => `
+      <div class="linea">
+        <span class="marca-cambio" aria-hidden="true">·</span>
+        <span style="min-width:0"><b style="font-weight:600">${esc((m.idea || '').slice(0, 70))}</b>
+          <span class="detalle-agent">${esc(m.id)} · ${esc(estadoVisual(m.status)[0])} · ${relativo(m.created_at)}</span></span>
+      </div>`).join('');
+  }
+
+  /* ───────────────────────── vistas: tareas programadas ───────────────────────── */
+  async function pintarTareas() {
+    const d = await get('/api/cmd/automatizaciones');
+    const lista_ = Array.isArray(d.tareas) ? d.tareas : [];
+    $('ta-lista').innerHTML = lista_.length ? lista_.map((t) => `
+      <div class="linea">
+        <span class="luz" aria-hidden="true" style="background:${t.paused ? 'var(--aviso)' : 'var(--ok)'}"></span>
+        <span style="min-width:0"><b style="font-weight:600">${esc(t.nombre)}</b>
+          <span class="detalle-agent">${esc(t.mensaje || '')}</span>
+          <span class="detalle-agent">${t.estado} · ${t.en ? `en ${dur(t.en)}` : 'ahora'} ${t.repeat ? `· repite ${esc(t.repeat)}` : ''}</span></span>
+        <span class="acciones" style="margin-left:auto;padding-top:0">
+          ${t.paused
+            ? `<button type="button" class="btn chico" data-auto="reanudar" data-id="${esc(t.id)}">Reanudar</button>`
+            : `<button type="button" class="btn chico" data-auto="pausar" data-id="${esc(t.id)}">Pausar</button>`}
+          <button type="button" class="btn chico" data-auto="correr" data-id="${esc(t.id)}">Correr</button>
+          <button type="button" class="btn chico peligro" data-auto="borrar" data-id="${esc(t.id)}">Borrar</button>
+        </span>
+      </div>`).join('') : vacio('Sin tareas programadas', 'Programa una y JARVIS la ejecutará a su hora.');
+  }
+
+  /* ───────────────────────── vistas: agentes ───────────────────────── */
+  /* La lista de agentes del dashboard y la vista completa comparten pintado. */
+
+  /* ───────────────────────── vistas: cambios ───────────────────────── */
+  async function pintarCambios(forzar = false) {
+    const d = S.estado && S.estado.cambios && S.estado.cambios.repo
+      ? S.estado.cambios : await get('/api/cmd/cambios');
+    if (!d.repo) {
+      $('cam-estado').innerHTML = vacio('No hay repositorio Git aquí',
+        d.error || 'Los cambios se guardan solo si la carpeta es un repositorio.');
+      $('cam-checkpoints').innerHTML = '';
+      $('cam-diff').textContent = 'Sin repositorio no hay diff que enseñar.';
+      return;
+    }
+    const cambios = Array.isArray(d.cambios) ? d.cambios : [];
+    $('cam-estado').innerHTML = `
+      <div class="fila-dato"><span>Rama</span><strong>${esc(d.rama || '—')}</strong></div>
+      <div class="fila-dato"><span>Ficheros con cambios</span><strong>${d.total || 0}</strong></div>
+      <div class="fila-dato"><span>Últimos commits</span><strong>${(d.ultimos_commits || []).length}</strong></div>
+      <pre class="codigo" style="max-height:120px">${esc((d.ultimos_commits || []).join('\n') || 'sin commits')}</pre>
+      ${cambios.length ? cambios.map((c) => `
+        <div class="linea">
+          <span class="marca-cambio" aria-hidden="true">${esc(c.marca || '~')}</span>
+          <button type="button" class="ruta" style="text-align:left;cursor:pointer" data-diff="${esc(c.path)}">${esc(c.path)}</button>
+        </div>`).join('') : '<p class="vacio-mini">Árbol limpio: no hay nada modificado.</p>'}`;
+    if (forzar) await pintarDiff(S.diff || (cambios[0] ? cambios[0].path : ''));
+    const cps = await get('/api/cmd/checkpoints');
+    const filas = Array.isArray(cps.checkpoints) ? cps.checkpoints : [];
+    $('cam-checkpoints').innerHTML = filas.length ? filas.map((c) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600">${esc(c.note || 'Checkpoint')}</b>
+          <span class="detalle-agent">${esc(c.id)} · ${c.files || 0} ficheros · ${relativo(c.created_at)}${c.dirty ? ' · con cambios sin confirmar' : ''}</span></span>
+        <span class="acciones" style="margin-left:auto;padding-top:0">
+          <button type="button" class="btn chico" data-cp="comparar" data-id="${esc(c.id)}">Comparar</button>
+          <button type="button" class="btn chico" data-cp="restaurar" data-id="${esc(c.id)}">Restaurar</button>
+          <button type="button" class="btn chico peligro" data-cp="borrar" data-id="${esc(c.id)}">Borrar</button>
+        </span>
+      </div>`).join('') : '<p class="vacio-mini">No hay puntos de retorno guardados.</p>';
+  }
+
+  async function pintarDiff(fichero) {
+    const salida = $('cam-diff');
+    if (!fichero) { salida.textContent = 'Elige un fichero para ver sus diferencias.'; S.diff = ''; return; }
+    S.diff = fichero;
+    salida.textContent = 'Leyendo el diff…';
+    try {
+      const d = await get(`/api/cmd/cambios/diff?fichero=${encodeURIComponent(fichero)}`);
+      salida.innerHTML = (d.diff || d.patch || d.error || 'Sin diferencias.')
+        .split('\n').map((l) => esc(l)
+          .replace(/^(\+[^+]|\+)/, '<span class="mas">$1</span>')
+          .replace(/^(-[^-]|-)/, '<span class="menos">$1</span>')
+          .replace(/^(diff --git|index |--- |\+\+\+ |@@)/, '<span class="fichero">$1</span>')
+          .replace(/^([^+\-@\s].*)$/, '$1')).join('\n');
+    } catch (e) { salida.textContent = e.message; }
+  }
+
+  /* ───────────────────────── vistas: permisos ───────────────────────── */
+  function pintarPermisos() {
+    const per = S.per || {};
+    const pend = Array.isArray(per.pendientes) ? per.pendientes : [];
+    $('per-pendientes').innerHTML = pend.length ? pend.map((p) => `
+      <div class="caja ${p.origen === 'OpenCode' ? 'alerta' : ''}">
+        <h3>${esc(p.accion || '')} <span class="insignia-estado">${esc(p.origen || '')}</span></h3>
+        <p>${esc(p.detalle || p.mensaje || '')}</p>
+        ${p.espera != null ? `<p class="nota">Esperando ${dur(p.espera)}</p>` : ''}
+        ${p.mision ? `<div class="acciones">
+          <button type="button" class="btn chico peligro" data-permiso="reject" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Denegar</button>
+          <button type="button" class="btn chico ok" data-permiso="once" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Permitir una vez</button>
+          <button type="button" class="btn chico" data-permiso="always" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Permitir siempre</button>
+        </div>` : ''}
+      </div>`).join('') : vacio('No hay permisos pendientes', 'JARVIS no hace nada protegido sin tu visto bueno.');
+
+    const amb = Array.isArray(per.ambitos) ? per.ambitos : [];
+    $('per-ambitos').innerHTML = amb.length ? amb.map((a) => `
+      <div class="permiso-linea" data-estado="${esc(a.estado)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/></svg>
+        <span>${esc(a.ambito)}<span class="detalle-agent">${a.usos || 0} vez/veces registrada(s)${a.ultimo ? ` · ${relativo(a.ultimo)}` : ''}</span></span>
+        <span class="estado">${esc({ permitido: 'Permitido', preguntar: 'Preguntar siempre', denegado: 'Denegado' }[a.estado] || a.estado)}</span>
+      </div>`).join('') : '<p class="vacio-mini">Sin ámbitos registrados.</p>';
+
+    const hist = Array.isArray(per.historial) ? per.historial : [];
+    $('per-historial').innerHTML = hist.length ? hist.map((h) => `
+      <div class="linea">
+        <span class="glifo-mini" aria-hidden="true">${h.concedido ? '✓' : '✕'}</span>
+        <span style="min-width:0"><b style="font-weight:600">${esc(h.accion || '')}</b>
+          <span class="detalle-agent">${esc(h.detalle || '')}</span></span>
+        <span class="hora">${relativo(h.at)}</span>
+      </div>`).join('') : '<p class="vacio-mini">La auditoría está vacía.</p>';
+  }
+
+  /* ───────────────────────── vistas: preguntas ───────────────────────── */
+  function pintarPreguntas() {
+    const a = S.act || {};
+    const pendientes = ((S.estado || {}).preguntas_lista) || (S.preguntas || []);
+    const fuente = (a.hay_tarea && S.per && S.preguntas) ? S.preguntas : pendientes;
+    const items = Array.isArray(fuente) ? fuente : [];
+    $('preguntas-lista').innerHTML = items.length ? items.map((q) => {
+      const opciones = Array.isArray(q.opciones) || Array.isArray(q.options)
+        ? (q.opciones || q.options) : [];
+      return `<div class="caja" style="margin-bottom:10px">
+        <h3>${esc(q.title || q.question || 'OpenCode necesita una decisión')}</h3>
+        ${q.description ? `<p>${esc(q.description)}</p>` : ''}
+        ${opciones.length ? opciones.map((o, i) => `
+          <button type="button" class="btn chico" data-respuesta="${esc(o.value ?? o.label)}"
+            data-qid="${esc(q.id)}" data-mision="${esc(q.task_id || a.id || '')}">
+            ${i + 1}. ${esc(o.label || o.value)}</button>`).join('')
+          : `<input class="campo" placeholder="Escribe tu respuesta" maxlength="1000"
+              data-qid="${esc(q.id)}" data-mision="${esc(q.task_id || a.id || '')}">`}
+        <div class="acciones">
+          <button type="button" class="btn chico ok" data-enviar-respuesta data-qid="${esc(q.id)}"
+            data-mision="${esc(q.task_id || a.id || '')}">Enviar</button>
+        </div></div>`;
+    }).join('') : vacio('Ninguna pregunta pendiente', 'Cuando OpenCode necesite decidir algo, aparecerá aquí.');
+  }
+
+  /* ───────────────────────── vistas: tests ───────────────────────── */
+  async function pintarTests() {
+    const d = await get('/api/cmd/pruebas');
+    const cands = Array.isArray(d.candidatos) ? d.candidatos : [];
+    $('tes-deteccion').innerHTML = cands.length ? cands.map((c) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600;font-family:var(--mono)">${esc(c.comando)}</b>
+          <span class="detalle-agent">${esc(c.detalle || c.tipo || '')}</span></span>
+        <button type="button" class="btn chico acento" style="margin-left:auto" data-test-cmd="${esc(c.comando)}">Ejecutar</button>
+      </div>`).join('') : vacio('El proyecto no declara comando de tests',
+      'JARVIS no inventa comandos: solo ofrece los que el proyecto define.');
+    const trabajos = Array.isArray(d.trabajos) ? d.trabajos : [];
+    $('tes-trabajos').innerHTML = trabajos.length ? trabajos.map((t) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600;font-family:var(--mono)">${esc(t.comando)}</b>
+          <span class="detalle-agent">${esc(t.estado)}${t.duracion ? ` · ${dur(t.duracion)}` : ''}${t.resumen ? ` · ${esc(t.resumen)}` : ''}${t.error ? ` · ${esc(t.error)}` : ''}</span></span>
+        <button type="button" class="btn chico" style="margin-left:auto" data-test-ver="${esc(t.id)}">Salida</button>
+      </div>`).join('') : '<p class="vacio-mini">Aún no se ha ejecutado nada.</p>';
+  }
+
+  async function verTrabajo(id) {
+    const d = await get(`/api/cmd/pruebas/${encodeURIComponent(id)}`);
+    const t = d.trabajo || d;
+    $('tes-salida-caja').hidden = false;
+    $('tes-salida').textContent = t.output || t.salida || t.error || JSON.stringify(t, null, 2);
+  }
+
+  /* ───────────────────────── vistas: historial ───────────────────────── */
+  async function pintarHistorial() {
+    const e = S.estado || {};
+    const au = e.ausente || {};
+    $('hist-ausente').innerHTML = au.texto
+      ? `<p style="margin:0">${esc(au.texto)}</p>
+         <p class="nota">Ventana: ${au.minutos || 0} min · ${au.completadas || 0} completadas · ${au.fallidas || 0} fallidas · ${au.pendientes || 0} pendientes.</p>`
+      : '<p class="vacio-mini">Sin novedades mientras estabas ausente.</p>';
+
+    const misiones = Array.isArray(e.misiones) ? e.misiones : [];
+    $('hist-misiones').innerHTML = misiones.length ? misiones.map((m) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600">${esc((m.idea || '').slice(0, 60))}</b>
+          <span class="detalle-agent">${esc(estadoVisual(m.status)[0])} · ${dur(m.elapsed)} · ${m.changes || 0} cambios</span></span>
+        <span class="insignia-estado" data-s="${m.status === 'COMPLETED' ? 'ok' : m.status === 'FAILED' ? 'error' : 'aviso'}">${esc(m.status)}</span>
+      </div>`).join('') : '<p class="vacio-mini">Sin misiones registradas.</p>';
+
+    const dec = await get('/api/cmd/decisiones?limite=20');
+    const filas = Array.isArray(dec.decisiones) ? dec.decisiones : [];
+    $('hist-decisiones').innerHTML = filas.length ? filas.map((d) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600">${esc(d.chosen || '')}</b>
+          <span class="detalle-agent">${esc(d.question || '')}${d.reason ? ` · ${esc(d.reason)}` : ''}</span></span>
+        <span class="hora">${relativo(d.created_at)}</span>
+      </div>`).join('') : '<p class="vacio-mini">Sin decisiones registradas.</p>';
+
+    const aud = await get('/api/cmd/auditoria?limite=25');
+    const ent = Array.isArray(aud.entradas) ? aud.entradas : [];
+    $('hist-auditoria').innerHTML = ent.length ? ent.map((a) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600">${esc(a.accion || '')}</b>
+          <span class="detalle-agent">${esc(a.detalle || '')}</span></span>
+        <span class="insignia-estado" data-s="${a.resultado === 'success' ? 'ok' : a.resultado === 'denied' ? 'error' : 'aviso'}">${esc(a.resultado || '')}</span>
+        <span class="hora">${relativo(a.at)}</span>
+      </div>`).join('') : '<p class="vacio-mini">Auditoría vacía.</p>';
+  }
+
+  
+/* ───────────────────────── vistas: IA ───────────────────────── */
+  const ESTADOS_IA = {
+    CONNECTED: ['Conectado', 'ok'], RATE_LIMITED: ['Sin cuota', 'aviso'],
+    AUTH_ERROR: ['Clave no valida', 'error'], ERROR: ['Error', 'error'],
+    TIMEOUT: ['Se paso el plazo', 'aviso'], DISCONNECTED: ['Sin conexion', 'aviso'],
+    SIN_CLAVE: ['Sin clave', 'aviso'], APAGADO: ['Apagado', 'aviso'],
+    SIN_DATOS: ['Sin datos', ''],
+  };
+
+  async function pintarIA() {
+    let d;
+    try { d = await get('/api/cmd/ia'); }
+    catch (e) { $('ia-estado').innerHTML = vacio('No se pudo leer', e.message); return; }
+    const salud = d.salud || [];
+    const uso = d.uso || {};
+    const groq = salud.find((p) => p.id === 'groq') || {};
+    const global = ESTADOS_IA[d.estado_global] || ['Desconocido', ''];
+
+    $('ia-estado').innerHTML = [
+      `<article class="tarjeta tarjeta-estado">
+        <span class="rotulo-m">ESTADO DE LOS MODELOS</span>
+        <span class="cifra" style="color:var(--${global[1] === 'ok' ? 'ok' : global[1] === 'error' ? 'error' : 'aviso'})">${esc(global[0])}</span>
+        <span class="nota">${esc(contarConectados(salud))}</span>
+      </article>`,
+      `<article class="tarjeta tarjeta-estado">
+        <span class="rotulo-m">EN MARCHA AHORA</span>
+        <span class="cifra">${d.en_vuelo || 0}</span>
+        <span class="nota">peticiones abiertas</span>
+      </article>`,
+      `<article class="tarjeta tarjeta-estado">
+        <span class="rotulo-m">PETICIONES (24 h)</span>
+        <span class="cifra">${uso.peticiones || 0}</span>
+        <span class="nota">${uso.fallos || 0} con error · ${uso.ok || 0} bien</span>
+      </article>`,
+      `<article class="tarjeta tarjeta-estado">
+        <span class="rotulo-m">TOKENS (24 h)</span>
+        <span class="cifra">${uso.total_tokens == null ? '—' : uso.total_tokens}</span>
+        <span class="nota">coste: ${esc(uso.coste || 'unknown')}</span>
+      </article>`,
+      `<article class="tarjeta tarjeta-estado">
+        <span class="rotulo-m">TIEMPO MEDIO</span>
+        <span class="cifra">${uso.media_ms == null ? '—' : `${Math.round(uso.media_ms)} ms`}</span>
+        <span class="nota">ultima: ${uso.ultimo ? relativo(uso.ultimo.at) : 'sin peticiones'}</span>
+      </article>`,
+    ].join('');
+
+    $('ia-ventana').textContent = `ultimas 24 horas · proveedor Groq: ${groq.estado || 'SIN DATOS'}`;
+
+    const asignados = d.asignados || [];
+    $('ia-asignados').innerHTML = asignados.map((a) => {
+      if (a.provider === 'opencode') {
+        return `<div class="selector-modelo"><span class="etq">${esc(a.tarea)}</span>
+          <span class="cap">OpenCode · agente de programacion</span></div>`;
+      }
+      const opciones = (d.modelos || []).filter((m) => m.provider === 'groq');
+      const elegido = a.model || '';
+      return `<div class="selector-modelo">
+        <span class="etq">${esc(a.tarea)}</span>
+        <select data-modelo-tarea="${esc(a.tarea)}" aria-label="Modelo para ${esc(a.tarea)}">
+          ${opciones.map((m) => `<option value="${esc(m.model)}"${m.model === elegido ? ' selected' : ''}>${esc(m.display_name || m.model)}</option>`).join('')}
+        </select>
+        <span class="cap">${a.context_window ? `${Math.round(a.context_window / 1000)}k ctx` : 'ctx s/d'}${a.supports_tools === true ? ' · tools' : a.supports_tools === false ? ' · sin tools' : ' · tools ?'}</span>
+      </div>`;
+    }).join('');
+    const sel = $('ia-fallback');
+    if (sel) sel.checked = d.fallback !== false;
+
+    $('ia-proveedores').innerHTML = salud.map((p) => {
+      const info = ESTADOS_IA[p.estado] || [p.estado, ''];
+      return `<div class="fila-estado" data-estado="${esc(p.estado)}">
+        <span class="luz" aria-hidden="true"></span>
+        <span><b>${esc(p.id)}</b>
+          <span class="detalle-agent">${p.tiene_clave ? 'clave puesta' : 'sin clave'} · ${p.peticiones || 0} peticiones · ${p.fallos || 0} fallos${p.ultimo_uso ? ` · ultimo uso ${relativo(p.ultimo_uso.at)}` : ''}${p.ultimo_error ? ` · ultimo error: ${esc(p.ultimo_error.tipo || '')}` : ''}</span></span>
+        <span class="chip-estado">${esc(info[0])}</span>
+      </div>`;
+    }).join('');
+
+    $('ia-metricas').innerHTML = [
+      metricaIA('ENTRADA', uso.input_tokens, 'tokens de entrada'),
+      metricaIA('SALIDA', uso.output_tokens, 'tokens de salida'),
+      metricaIA('REINTENTOS', (uso.por_proveedor && Object.values(uso.por_proveedor).reduce((a, b) => a + (b.fallos || 0), 0)) || 0, 'peticiones con fallo'),
+      metricaIA('MAS RAPIDO', uso.min_ms, 'ms · minimo real'),
+      metricaIA('MAS LENTO', uso.max_ms, 'ms · maximo real'),
+      metricaIA('ERRORES', Object.keys(uso.errores || {}).length, Object.entries(uso.errores || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || 'sin errores'),
+    ].join('');
+
+    const pet = await get('/api/cmd/ia/peticiones?limite=20');
+    const filas = pet.peticiones || [];
+    $('ia-peticiones').innerHTML = filas.length ? filas.slice().reverse().map((f) => `
+      <div class="linea">
+        <span class="glifo-mini" aria-hidden="true">${f.ok ? '✓' : '✕'}</span>
+        <span style="min-width:0"><b style="font-weight:600">${esc(f.provider || '?')} · ${esc(f.model || '—')}</b>
+          <span class="detalle-agent">${esc(f.task || '')}${f.streaming ? ' · streaming' : ''}${f.error_kind ? ` · ${esc(f.error_kind)}` : ''}${f.retries ? ` · ${f.retries} reintentos` : ''}</span></span>
+        <span class="hora">${f.total_tokens == null ? '—' : `${f.total_tokens} tok`} · ${Math.round(f.latency_ms || 0)} ms</span>
+      </div>`).join('') : vacio('Sin peticiones registradas', 'En cuanto JARVIS hable con un modelo, aquí saldrán.');
+  }
+
+  function contarConectados(salud) {
+    const ok = salud.filter((p) => p.estado === 'CONNECTED').length;
+    const conClave = salud.filter((p) => p.tiene_clave).length;
+    return `${ok} de ${conClave} proveedores con clave contestando`;
+  }
+
+  function metricaIA(rotulo, valor, pie) {
+    return `<div class="metrica-ia"><span class="rotulo-m">${esc(rotulo)}</span>
+      <span class="cifra">${valor == null ? '—' : valor}</span>
+      <span class="pie">${esc(pie || '')}</span></div>`;
+  }
+
+/* ───────────────────────── vistas: sistema ───────────────────────── */
+  function pintarSistema() {
+    const e = S.estado || {};
+    const r = e.recursos || {};
+    const temp = r.temperatura || {};
+    $('sis-recursos').innerHTML = `
+      <div class="fila-dato"><span>CPU</span><strong>${r.cpu ? `${Math.round(r.cpu.porcentaje)}% · ${r.cpu.nucleos} núcleos` : 'no disponible'}</strong></div>
+      <div class="fila-dato"><span>RAM</span><strong>${r.ram ? `${Math.round(r.ram.porcentaje)}% · ${r.ram.usado_gb}/${r.ram.total_gb} GB` : 'no disponible'}</strong></div>
+      <div class="fila-dato"><span>GPU</span><strong>${r.gpu && r.gpu.available ? `${esc(r.gpu.name || '')} ${r.gpu.usage != null ? `${Math.round(r.gpu.usage)}%` : ''}${r.gpu.vram_total_mb ? ` · VRAM ${Math.round(r.gpu.vram_used_mb)}/${Math.round(r.gpu.vram_total_mb)} MB` : ''}${r.gpu.temperature != null ? ` · ${Math.round(r.gpu.temperature)}°C` : ''}` : `no disponible (${r.gpu && r.gpu.reason ? r.gpu.reason : 'sin sensor'})`}</strong></div>
+      <div class="fila-dato"><span>Red</span><strong>${r.red && r.red.available ? (r.red.download_bps == null ? `midiendo (${esc(r.red.note || '')})` : `↓${(r.red.download_bps / 1048576).toFixed(1)} MB/s en ${r.red.since_seconds} s`) : `no disponible (${esc(r.red && r.red.reason ? r.red.reason : '')})`}</strong></div>
+      <div class="fila-dato"><span>Temperatura CPU</span><strong>${temp.available ? `${temp.valor}°C` : `no disponible (${esc(temp.reason || '')})`}</strong></div>
+      ${(r.discos || []).map((d) => `<div class="fila-dato"><span>Disco ${esc(d.etiqueta || '')}</span>
+        <strong>${d.porcentaje != null ? `${Math.round(d.porcentaje)}% · ${d.usado_gb}/${d.total_gb} GB` : 'no disponible'}</strong></div>`).join('')}`;
+
+    const salud = e.salud || {};
+    $('sis-salud').innerHTML = (salud.subsistemas || []).map((s) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600">${esc(s.nombre)}</b>
+          <span class="detalle-agent">${esc(s.detalle || '')}</span></span>
+        <span class="insignia-estado" data-s="${s.estado === 'healthy' ? 'ok' : s.estado === 'degraded' ? 'aviso' : s.estado === 'down' ? 'error' : 'no'}">${esc(s.estado)}</span>
+      </div>`).join('') || vacio('Sin datos de salud', 'El backend aún no ha podido comprobar los subsistemas.');
+
+    const inc = Array.isArray(e.incidentes) ? e.incidentes : [];
+    $('sis-incidentes').innerHTML = inc.length ? inc.map((i) => `
+      <div class="linea">
+        <span style="min-width:0"><b style="font-weight:600">${esc(i.title)}</b>
+          <span class="detalle-agent">${esc(i.description || '')} · ${i.occurrences || 1} vez/veces · ${relativo(i.created_at)}</span></span>
+        <button type="button" class="btn chico ok" style="margin-left:auto" data-incidente="resolve" data-id="${esc(i.id)}">Resolver</button>
+      </div>`).join('') : '<p class="vacio-mini">Sin incidentes abiertos.</p>';
+  }
+
+  /* ───────────────────────── refresco ───────────────────────── */
+  async function refrescar(forzar = false) {
+    if (S.cargando) { S.repetir = true; return; }
+    S.cargando = true;
+    try {
+      const tareas = [get('/api/cmd/estado' + (forzar ? '?forzar=1' : ''))];
+      tareas.push(get('/api/cmd/actividad'));
+      tareas.push(get('/api/cmd/permisos'));
+      tareas.push(get('/api/cmd/agentes'));
+      tareas.push(get('/api/cmd/ia').catch(() => ({ ok: false })));
+      // Agent Manager y Resource Manager. Si el servidor todavía no los tiene
+      // (o fallan), se sigue pintando todo lo demás: un panel que no arranca
+      // por un extra es peor que un panel sin el extra.
+      tareas.push(get('/api/cmd/agentes/estado').catch(() => ({ ok: false })));
+      tareas.push(get('/api/cmd/recursos/decisiones').catch(() => ({ ok: false })));
+      const [estado, act, per, ag, ia, agMgr, recMgr] = await Promise.all(tareas);
+      S.estado = estado; S.act = act; S.per = per; S.ag = ag;
+      S.ia = ia && ia.ok ? (ia.uso || {}) : {};
+      S.agentesMgr = agMgr && agMgr.ok ? agMgr : null;
+      S.recursosMgr = recMgr && recMgr.ok ? recMgr : null;
+      const c = estado.contadores || {};
+      S.preguntas = await preguntasPendientes();
+      S.ultimo = Date.now();
+      pintarCabecera();
+      pintarHero();
+      pintarPlan();
+      pintarCambiosRecientes();
+      pintarTiempoReal();
+      pintarAgentes();
+      pintarLateral();
+      pintarNotis();
+      if (c.preguntas) pintarPreguntas();
+      if (S.vista === 'sistema') pintarSistema();
+      if (S.vista === 'nueva') pintarNueva();
+    } catch (e) {
+      if (S.errores === 0) { avisar(`${e.message} La pantalla seguirá reintentando.`, true); console.error('[live]', e); }
+      S.errores += 1;
+    } finally {
+      S.cargando = false;
+      if (S.repetir) { S.repetir = false; setTimeout(() => refrescar(), 300); }
+    }
+  }
+
+  async function preguntasPendientes() {
+    try {
+      const d = await get('/api/cmd/preguntas');
+      return Array.isArray(d.preguntas) ? d.preguntas : [];
+    } catch { return []; }
+  }
+
+  function hayTrabajo() {
+    const a = S.act || {};
+    const c = (S.estado || {}).contadores || {};
+    return a.hay_tarea && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(a.estado);
+  }
+
+  function ritmo() {
+    clearTimeout(S.pulso);
+    const activo = hayTrabajo() || ((S.estado || {}).contadores || {}).permisos;
+    S.pulso = setTimeout(() => refrescar(), activo ? 4000 : 12000);
+  }
+
+  /* ───────────────────────── WebSocket ───────────────────────── */
+  function urlWs() {
+    const esquema = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${esquema}//${location.host}/ws?token=${encodeURIComponent(token)}`;
+  }
+
+  function conectar() {
+    clearTimeout(S.reintento);
+    if (!token) { avisar('No se recibió la sesión de JARVIS. Recarga la página.', true); return; }
+    try { S.ws = new WebSocket(urlWs()); }
+    catch { avisar('No se pudo abrir el enlace en tiempo real.', true); return; }
+    S.ws.addEventListener('open', () => { S.conectado = true; S.errores = 0; refrescar(true); });
+    let t = null;
+    S.ws.addEventListener('message', (ev) => {
+      let m = null;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.type === 'assistant_reply' || m.type === 'user_heard') {
+        const texto = m.message || m.text || m.reply || '';
+        if (texto) {
+          const r = $('respuesta');
+          r.textContent = String(texto).slice(0, 1200);
+          r.hidden = false;
+        }
+      }
+      const tipo = String(m.type || '');
+      if (/^(opencode\.|live_task|confirmation_|heal_|agent_|action_status|selfheal_)/.test(tipo)) {
+        clearTimeout(t);
+        t = setTimeout(() => refrescar(), 250);
+      }
+    });
+    S.ws.addEventListener('close', () => {
+      S.conectado = false;
+      S.reintento = setTimeout(conectar, 3000);
+    });
+    S.ws.addEventListener('error', () => { try { S.ws.close(); } catch { /* ya cerrado */ } });
+  }
+
+  /* ───────────────────────── acciones ───────────────────────── */
+  async function conBoton(boton, trabajo) {
+    if (!boton) return trabajo();
+    boton.disabled = true;
+    const previo = boton.textContent;
+    boton.textContent = '…';
+    try { return await trabajo(); }
+    finally { if (boton.isConnected) { boton.disabled = false; boton.textContent = previo; } }
+  }
+
+  async function accionMision(accion, id, boton, extra = {}) {
+    await conBoton(boton, async () => {
+      const rutas = {
+        approve: ['aprobar', 'Plan aprobado. OpenCode puede trabajar.'],
+        revise: ['revisar', 'Plan enviado a revisión.'],
+        cancel: ['cancelar', 'Misión detenida.'],
+        pause: ['pausar', 'Turno de OpenCode interrumpido.'],
+        retry: ['reintentar', 'Misión relanzada.'],
+        analyze: ['analizar', 'JARVIS está analizando el proyecto.'],
+      };
+      const [ruta, okMsg] = rutas[accion] || [null, null];
+      if (!ruta) return;
+      const cuerpo = accion === 'revise' ? { note: extra.note || 'Revisa el plan y ajusta lo que propongas.' }
+        : accion === 'cancel' ? { motivo: extra.motivo || '' } : {};
+      const d = await post(`/api/dev/tasks/${encodeURIComponent(id)}/${ruta}`, cuerpo);
+      avisar(d.message || okMsg);
+      await refrescar(true);
+    }).catch((e) => avisar(e.message, true));
+  }
+
+  async function accionPermiso(decision, id, mision, boton) {
+    await conBoton(boton, async () => {
+      if (!mision) throw new Error('Ese permiso no viene de una misión de OpenCode.');
+      const d = await post(`/api/dev/tasks/${encodeURIComponent(mision)}/permissions/${encodeURIComponent(id)}`, { decision });
+      avisar(d.message || `Permiso enviado: ${decision}.`);
+      await refrescar(true);
+    }).catch((e) => avisar(e.message, true));
+  }
+
+  async function enviarRespuesta(mision, qid, valor) {
+    if (!mision) { avisar('No se sabe a qué misión pertenece la pregunta.', true); return; }
+    await post(`/api/dev/tasks/${encodeURIComponent(mision)}/questions/${encodeURIComponent(qid)}`, { value: valor })
+      .then((d) => { avisar(d.message || 'Respuesta enviada a OpenCode.'); })
+      .then(() => refrescar(true))
+      .catch((e) => avisar(e.message, true));
+  }
+
+  /* ───────────────────────── eventos de interfaz ───────────────────────── */
+  function conectarInterfaz() {
+    document.addEventListener('click', async (ev) => {
+      const nav = ev.target.closest('.nav-item[data-vista]');
+      if (nav) { ir(nav.dataset.vista); return; }
+      const irA = ev.target.closest('[data-ir]');
+      if (irA) { ir(irA.dataset.ir); return; }
+
+      if (ev.target.closest('#btn-notis')) {
+        S.notisAbierto = !S.notisAbierto; pintarNotis(); return;
+      }
+      const notisAccion = ev.target.closest('[data-notis-accion]');
+      if (notisAccion) {
+        if (notisAccion.dataset.notisAccion === 'leer-todas') {
+          const pend = ((S.estado || {}).notificaciones || []).filter((n) => !n.seen);
+          for (const n of pend) { try { await post(`/api/cmd/notificaciones/${encodeURIComponent(n.id)}`, { accion: 'read' }); } catch { /* se reintenta al refrescar */ } }
+          avisar('Notificaciones marcadas como leídas.');
+        } else {
+          await post(`/api/cmd/notificaciones/${encodeURIComponent(notisAccion.dataset.id)}`, { accion: 'dismiss' })
+            .then(() => avisar('Notificación descartada.')).catch((e) => avisar(e.message, true));
+        }
+        await refrescar(true);
+        return;
+      }
+
+      const tab = ev.target.closest('.pestana[data-plan]');
+      if (tab) { S.tab = tab.dataset.plan; pintarPlan(); return; }
+
+      const mision = ev.target.closest('[data-mision]');
+      if (mision) {
+        const accion = mision.dataset.mision;
+        const id = mision.dataset.id || (S.act || {}).id;
+        if (accion === 'revise') {
+          const nota = window.prompt('¿Qué debe cambiar del plan?', 'Ajusta el plan a lo que he pedido.');
+          if (nota === null) return;
+          await accionMision('revise', id, mision, { note: nota });
+        } else if (accion === 'cancel') {
+          if (!window.confirm('¿Detener la misión? OpenCode dejará de trabajar en ella.')) return;
+          await accionMision('cancel', id, mision);
+        } else await accionMision(accion, id, mision);
+        return;
+      }
+
+      const permiso = ev.target.closest('[data-permiso]');
+      if (permiso) {
+        const d = permiso.dataset.permiso;
+        if (d === 'always' && !window.confirm('¿Permitir esto siempre, también en futuras misiones?')) return;
+        if (d === 'reject' && !window.confirm('¿Denegar? OpenCode no podrá continuar esa acción.')) return;
+        await accionPermiso(d, permiso.dataset.id, permiso.dataset.mision, permiso);
+        return;
+      }
+
+      const resp = ev.target.closest('[data-respuesta]');
+      if (resp) { await enviarRespuesta(resp.dataset.mision, resp.dataset.qid, resp.dataset.respuesta); return; }
+      if (ev.target.closest('[data-enviar-respuesta]')) {
+        const b = ev.target.closest('[data-enviar-respuesta]');
+        const input = document.querySelector(`[data-qid="${CSS.escape(b.dataset.qid)}"]`);
+        await enviarRespuesta(b.dataset.mision, b.dataset.qid, input ? input.value : '');
+        return;
+      }
+
+      const inc = ev.target.closest('[data-incidente]');
+      if (inc) {
+        await post(`/api/cmd/incidentes/${encodeURIComponent(inc.dataset.id)}`, { accion: 'resolve' })
+          .then(() => avisar('Incidente marcado como resuelto.'))
+          .catch((e) => avisar(e.message, true));
+        await refrescar(true);
+        return;
+      }
+
+      if (ev.target.closest('#idea-crear')) {
+        const idea = $('idea').value.trim();
+        if (!idea) { avisar('Escribe qué quieres que haga JARVIS.', true); return; }
+        const cuerpo = { idea, analizar: true };
+        if ($('idea-workspace').value.trim()) cuerpo.project_path = $('idea-workspace').value.trim();
+        if ($('idea-modelo').value.trim()) cuerpo.model = $('idea-modelo').value.trim();
+        await conBoton($('idea-crear'), async () => {
+          const d = await post('/api/dev/tasks', cuerpo);
+          avisar(d.message || 'Tarea creada. JARVIS la analiza antes de tocar nada.');
+          $('idea').value = '';
+          ir('dashboard');
+          await refrescar(true);
+        }).catch((e) => avisar(e.message, true));
+        return;
+      }
+      if (ev.target.closest('#idea-limpiar')) { $('idea').value = ''; $('idea-workspace').value = ''; $('idea-modelo').value = ''; return; }
+      if (ev.target.closest('#idea-hablar')) {
+        $('command-input').focus();
+        avisar('Escribe la orden en la barra inferior y pulsa Enviar.');
+        return;
+      }
+
+      if (ev.target.closest('#ta-crear')) {
+        const nombre = $('ta-nombre').value.trim();
+        const mensaje = $('ta-mensaje').value.trim();
+        const cuando = $('ta-cuando').value.trim();
+        if (!nombre || !mensaje || !cuando) { avisar('Nombre, orden y cuándo son obligatorios.', true); return; }
+        await post('/api/cmd/automatizaciones', { nombre, mensaje, cuando })
+          .then(() => avisar('Tarea programada.'))
+          .catch((e) => avisar(e.message, true));
+        $('ta-nombre').value = ''; $('ta-mensaje').value = ''; $('ta-cuando').value = '';
+        await pintarTareas();
+        return;
+      }
+      const auto = ev.target.closest('[data-auto]');
+      if (auto) {
+        const { auto: accion, id } = auto.dataset;
+        if (accion === 'borrar' && !window.confirm('¿Borrar esta tarea programada?')) return;
+        await post(`/api/cmd/automatizaciones/${encodeURIComponent(id)}/${accion}`, {})
+          .then(() => avisar(`Tarea ${accion === 'correr' ? 'ejecutada' : accion + 'ada'}.`))
+          .catch((e) => avisar(e.message, true));
+        await pintarTareas();
+        return;
+      }
+
+      const abrir = ev.target.closest('[data-agente-start]');
+      if (abrir) {
+        await conBoton(abrir, () => post(`/api/cmd/agentes/${encodeURIComponent(abrir.dataset.agenteStart)}/start`, {}))
+          .then((d) => avisar(d.message || 'Programa abierto.'))
+          .catch((e) => avisar(e.message, true));
+        await refrescar(true);
+        return;
+      }
+
+      // Cerrar un programa de agente: pide confirmación porque si tiene
+      // cambios sin guardar, se pierden.
+      const cerrar = ev.target.closest('[data-agente-stop]');
+      if (cerrar) {
+        if (!window.confirm('¿Cerrar ese programa? Si tiene cambios sin guardar, se pierden.')) return;
+        await conBoton(cerrar, () => post(`/api/cmd/agentes/${encodeURIComponent(cerrar.dataset.agenteStop)}/stop`, {}))
+          .then((d) => avisar(d.message || d.detalle || 'Programa cerrado.'))
+          .catch((e) => avisar(e.message, true));
+        await refrescar(true);
+        return;
+      }
+
+      const cancelarJob = ev.target.closest('[data-job-cancelar]');
+      if (cancelarJob) {
+        if (!window.confirm('¿Cancelar ese trabajo?')) return;
+        await conBoton(cancelarJob, () => post(`/api/cmd/agentes/trabajo/${encodeURIComponent(cancelarJob.dataset.jobCancelar)}/cancelar`, { motivo: 'cancelado desde el panel' }))
+          .then((d) => avisar(d.ok ? 'Trabajo cancelado.' : (d.error || 'No se pudo cancelar.')))
+          .catch((e) => avisar(e.message, true));
+        await refrescar(true);
+        return;
+      }
+
+      const diff = ev.target.closest('[data-diff]');
+      if (diff) { await pintarDiff(diff.dataset.diff); return; }
+      if (ev.target.closest('#cam-refrescar')) { await pintarCambios(true); avisar('Estado de Git actualizado.'); return; }
+      if (ev.target.closest('#cam-checkpoint')) {
+        await post('/api/cmd/checkpoints', { nota: `Punto de retorno manual · ${new Date().toLocaleString('es-ES')}` })
+          .then((d) => avisar(d.message || 'Checkpoint guardado.'))
+          .catch((e) => avisar(e.message, true));
+        await pintarCambios();
+        return;
+      }
+      if (ev.target.closest('#cam-commit')) {
+        const mensaje = $('cam-mensaje').value.trim() || 'Cambios confirmados desde JARVIS Live';
+        await post('/api/cmd/cambios/commit', { mensaje })
+          .then((d) => avisar(d.message || 'Commit confirmado.'))
+          .catch((e) => avisar(e.message, true));
+        await refrescar(true);
+        await pintarCambios(true);
+        return;
+      }
+      if (ev.target.closest('#btn-commit')) {
+        const b = ev.target.closest('#btn-commit');
+        if (!window.confirm('¿Confirmar estos cambios en Git con el mensaje propuesto?')) return;
+        await post('/api/cmd/cambios/commit', { mensaje: b.dataset.mensaje })
+          .then((d) => avisar(d.message || 'Commit confirmado.'))
+          .catch((e) => avisar(e.message, true));
+        await refrescar(true);
+        return;
+      }
+      const cp = ev.target.closest('[data-cp]');
+      if (cp) {
+        const { cp: accion, id } = cp.dataset;
+        if (accion === 'restaurar' && !window.confirm('¿Restaurar los ficheros de este checkpoint? Los cambios actuales se perderán.')) return;
+        if (accion === 'borrar' && !window.confirm('¿Borrar este punto de retorno?')) return;
+        try {
+          if (accion === 'comparar') {
+            const d = await get(`/api/cmd/checkpoints/${encodeURIComponent(id)}`);
+            $('cam-diff').innerHTML = (d.parche || d.resumen || 'Sin parche.')
+              .split('\n').map((l) => esc(l)
+                .replace(/^(\+)/, '<span class="mas">$1</span>')
+                .replace(/^(-)/, '<span class="menos">$1</span>')).join('\n');
+            avisar('Comparación cargada.');
+          } else if (accion === 'restaurar') {
+            await post(`/api/cmd/checkpoints/${encodeURIComponent(id)}/restaurar`, {});
+            avisar('Checkpoint restaurado.');
+            await refrescar(true);
+          } else {
+            await borrar(`/api/cmd/checkpoints/${encodeURIComponent(id)}`);
+            avisar('Checkpoint borrado.');
+          }
+        } catch (e) { avisar(e.message, true); }
+        await pintarCambios();
+        return;
+      }
+
+      const test = ev.target.closest('[data-test-cmd]');
+      if (test) {
+        await conBoton(test, () => post('/api/cmd/pruebas', { comando: test.dataset.testCmd }))
+          .then((d) => { avisar(d.message || 'Tests lanzados.'); return verTrabajo(d.id || d.job_id); })
+          .catch((e) => avisar(e.message, true));
+        await pintarTests();
+        return;
+      }
+      const ver = ev.target.closest('[data-test-ver]');
+      if (ver) { await verTrabajo(ver.dataset.testVer).catch((e) => avisar(e.message, true)); return; }
+
+      if (ev.target.closest('#hist-briefing')) {
+        await post('/api/cmd/briefing', { minutos: 60, hablar: false })
+          .then((d) => { $('hist-ausente').innerHTML = `<p style="margin:0">${esc(d.texto || '')}</p>`; avisar('Resumen generado.'); })
+          .catch((e) => avisar(e.message, true));
+        return;
+      }
+      if (ev.target.closest('#hist-briefing-voz')) {
+        await post('/api/cmd/briefing', { minutos: 60, hablar: true })
+          .then(() => avisar('Contando el resumen en voz alta.'))
+          .catch((e) => avisar(e.message, true));
+        return;
+      }
+
+
+      if (ev.target.closest('#ia-guardar')) {
+        const cuerpo = { fallback: $('ia-fallback').checked };
+        document.querySelectorAll('select[data-modelo-tarea]').forEach((sel) => {
+          cuerpo[sel.dataset.modeloTarea] = sel.value;
+        });
+        await conBoton($('ia-guardar'), async () => {
+          await post('/api/cmd/ia/configurar', cuerpo);
+          avisar('Modelos guardados. Se nota en la siguiente peticion.');
+          await pintarIA();
+        }).catch((e) => avisar(e.message, true));
+        return;
+      }
+      if (ev.target.closest('#ia-probar')) {
+        const salida = $('ia-salida');
+        salida.hidden = false;
+        salida.textContent = 'Probando conexion con Groq…';
+        await conBoton($('ia-probar'), async () => {
+          const d = await post('/api/cmd/ia/probar', { provider: 'groq' });
+          salida.textContent = `${d.estado}: ${d.detalle || d.error || ''}${d.modelo ? `\nmodelo: ${d.modelo}` : ''}`;
+          avisar(`Groq: ${d.estado}`);
+          await pintarIA();
+        }).catch((e) => { salida.textContent = e.message; avisar(e.message, true); });
+        return;
+      }
+      if (ev.target.closest('#ia-catalogo')) {
+        await conBoton($('ia-catalogo'), async () => {
+          const d = await get('/api/cmd/ia/modelos?consultar=1');
+          const salida = $('ia-salida');
+          salida.hidden = false;
+          salida.textContent = (d.modelos || []).map((m) => [
+            m.id, `ctx ${m.context_window || 's/d'}`, `tools ${m.supports_tools}`,
+            `razonamiento ${m.supports_reasoning}`, `fuente ${m.fuente}`,
+          ].join(' · ')).join('\n') || 'El proveedor no devolvio catalogo.';
+          avisar(`Catalogo del proveedor: ${(d.modelos || []).length} modelos.`);
+        }).catch((e) => avisar(e.message, true));
+        return;
+      }
+
+      const sis = ev.target.closest('[id^="sis-"]');
+      if (sis) {
+        const mapa = {
+          'sis-diag': ['/api/cmd/diagnostico', { texto: 'Diagnóstico general del sistema' }],
+          'sis-optimizar': ['/api/cmd/sistema/optimizar', {}],
+          'sis-disco': ['/api/cmd/sistema/disco', {}],
+          'sis-oc': ['/api/cmd/opencode/servidor', { texto: 'reiniciar' }],
+        };
+        const entrada = mapa[sis.id];
+        if (!entrada) return;
+        if (sis.id !== 'sis-diag' && !window.confirm('Esta acción pide permiso antes de ejecutarse. ¿Continuar?')) return;
+        await conBoton(sis, () => post(entrada[0], entrada[1]))
+          .then((d) => {
+            const caja = $('sis-salida');
+            caja.hidden = false;
+            caja.textContent = d.texto || d.salida || d.mensaje || JSON.stringify(d, null, 2);
+            avisar(d.mensaje || 'Hecho.');
+          })
+          .catch((e) => avisar(e.message, true));
+        await refrescar(true);
+      }
+    });
+
+    document.querySelectorAll('.pestana[data-plan]').forEach((t) => t.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); S.tab = e.key === 'ArrowRight' ? 'ejecucion' : 'propuesta'; pintarPlan(); }
+    }));
+
+    $('command-bar').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const texto = $('command-input').value.trim();
+      if (!texto) return;
+      $('command-input').value = '';
       try {
-        const message = JSON.parse(event.data);
-        if (message.type === 'live_event' && message.event) addEvent(message.event);
-        else if (message.live_event) addEvent(message.live_event);
-        if (['live_task_start', 'live_task_end', 'task_step', 'confirmation_request',
-          'confirmation_resolved', 'heal_approval_request', 'action_status', 'agent_state',
-          'agent_update', 'selfheal_update'].includes(message.type)) {
-          clearTimeout(overviewTimer);
-          overviewTimer = setTimeout(() => void refresh(true), 200);
-        }
-        else if (['confirmation_request','heal_approval_request','action_status','task_step','assistant_reply','user_heard','selfheal_update'].includes(message.type)) {
-          if (message.type === 'confirmation_request') refresh(true);
-          const generic = message.type === 'task_step'
-            ? { ...message, title: message.label, detail: message.task || message.label, category: 'tareas' }
-            : message.type === 'confirmation_request'
-              ? { ...message, title: message.description, detail: 'La acción necesita autorización.', category: 'permisos' }
-              : message.type === 'heal_approval_request'
-                ? { ...message, title: message.error, detail: message.plan || 'Aprobación solicitada.', category: 'permisos' }
-                : message;
-          if (!message.live_event) addEvent(generic);
-        }
-      } catch { /* Mensaje de otro canal: el dashboard no altera su protocolo. */ }
+        const d = await post('/api/cmd/orden', { texto });
+        $('respuesta').textContent = d.respuesta || d.texto || d.mensaje || 'Orden enviada a JARVIS.';
+        $('respuesta').hidden = false;
+        avisar(d.mensaje || 'Orden enviada.');
+      } catch (err) { avisar(err.message, true); }
+      await refrescar(true);
     });
-    state.ws.addEventListener('close', () => {
-      state.connected = false;
-      status('Enlace en tiempo real interrumpido; reintentando', 'offline');
-      void refresh(true);
-      retry();
+
+    $('command-micro').addEventListener('click', () => {
+      avisar('JARVIS ya te escucha por el micrófono: habla con normalidad.');
+      try { window.dispatchEvent(new CustomEvent('jarvis:voz')); } catch { /* el bus de voz es opcional */ }
     });
-    state.ws.addEventListener('error', () => {
-      state.connected = false;
-      status('Sin enlace en tiempo real; reintentando', 'offline');
-      try { state.ws.close(); } catch { /* Cerrado ya */ }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+        e.preventDefault(); $('command-input').focus();
+      }
     });
+    window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (v && v !== S.vista) ir(v, false); });
   }
-  function retry() {
-    clearTimeout(state.reconnect);
-    state.reconnect = setTimeout(connect, 2800);
+
+  /* ───────────────────────── arranque ───────────────────────── */
+  async function voz() {
+    try { S.voz = await get('/api/live/overview'); pintarVoz(); }
+    catch { S.voz = { voice_available: false }; pintarVoz(); }
   }
-  function sendChat(text) {
-    if (!state.ws || state.ws.readyState !== 1) {
-      announce('Sin enlace en tiempo real. Espera a que conecte e inténtalo de nuevo.');
-      return false;
-    }
-    state.ws.send(JSON.stringify({ type: 'user_message', message: text, input_mode: 'text' }));
-    return true;
+
+  function arrancar() {
+    const v = location.hash.slice(1);
+    if (v) ir(v, false); else ir('dashboard', false);
+    conectarInterfaz();
+    conectar();
+    refrescar(true).then(() => {
+      voz();
+      clearInterval(S.tic);
+      S.tic = setInterval(() => { if (!document.hidden) refrescar(); }, 15000);
+    });
+    S.tic2 = setInterval(ritmo, 15000);
+    S.reloj = setInterval(() => { $('reloj').textContent = new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }).format(new Date()); }, 1000);
+    $('reloj').textContent = new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }).format(new Date());
   }
-  async function postAction(action) {
-    const button = action.button;
-    const oldText = button.textContent;
-    button.disabled = true;
-    button.textContent = 'Aplicando decisión…';
-    try {
-      const result = await api(`${API}/actions`, { method: 'POST', body: JSON.stringify(action.body) });
-      announce(result.message || (action.body.approved ? 'Autorización registrada en JARVIS.' : 'Denegación registrada en JARVIS.'));
-      await refresh(true);
-    } catch (error) {
-      announce(`${error.message} Recarga el panel si la acción dejó de estar pendiente.`);
-      await refresh(true);
-    } finally {
-      if (button.isConnected) { button.disabled = false; button.textContent = oldText; }
-    }
-  }
-  document.addEventListener('click', event => {
-    const approval = event.target.closest('[data-approval]');
-    if (approval) {
-      const id = approval.dataset.approval;
-      const kind = approval.dataset.kind;
-      const allowed = approval.dataset.allow === 'yes';
-      if (!window.confirm(`${allowed ? '¿Aprobar' : 'Denegar'} la acción solicitada por JARVIS?\n\n${allowed ? 'El Permission Manager registrará tu decisión.' : 'La acción quedará denegada y no continuará.'}`)) return;
-      const button = event.target;
-      void postAction({ button: approval, body: { kind: kind === 'selfheal' ? 'approve_selfheal' : 'approve_confirmation', target_id: id, approved: allowed } });
-      return;
-    }
-    const cancel = event.target.closest('[data-cancel]');
-    if (cancel) {
-      if (!window.confirm('¿Cancelar esta tarea programada? No se podrán deshacer los cambios si el planificador ya la inició.')) return;
-      void postAction({ button: cancel, body: { kind: 'cancel_scheduled_task', target_id: cancel.dataset.cancel } });
-      return;
-    }
-    const run = event.target.closest('[data-run]');
-    if (run) {
-      void postAction({ button: run, body: { kind: 'run_scheduled_task', target_id: run.dataset.run } });
-      return;
-    }
-    const pause = event.target.closest('[data-pause]');
-    if (pause) {
-      void postAction({ button: pause, body: { kind: 'pause_scheduled_task', target_id: pause.dataset.pause } });
-      return;
-    }
-    const resume = event.target.closest('[data-resume]');
-    if (resume) {
-      void postAction({ button: resume, body: { kind: 'resume_scheduled_task', target_id: resume.dataset.resume } });
-      return;
-    }
-    const stop = event.target.closest('[data-stop-build]');
-    if (stop) {
-      if (!window.confirm('¿Detener este proyecto? Lo ya escrito se queda como está.')) return;
-      void postAction({ button: stop, body: { kind: 'cancel_build', target_id: stop.dataset.stopBuild } });
-      return;
-    }
-    const retryBtn = event.target.closest('[data-retry]');
-    if (retryBtn) {
-      const texto = (state.recent || {})[retryBtn.dataset.retry] || '';
-      if (!texto) { announce('Ese trabajo ya no guarda su mensaje para reintentarlo.'); return; }
-      if (sendChat(texto)) announce('Reintento enviado a JARVIS.');
-      return;
-    }
-    const filter = event.target.closest('[data-filter]');
-    if (filter) {
-      document.querySelectorAll('.filtro').forEach(button => {
-        const active = button === filter;
-        button.classList.toggle('seleccionado', active);
-        button.setAttribute('aria-pressed', String(active));
-      });
-      state.activeFilter = filter.dataset.filter;
-      renderEvents();
-    }
-  });
-  window.addEventListener('online', () => { status('Red disponible; verificando el cerebro…', 'pending'); void refresh(true); });
-  window.addEventListener('offline', () => status('Sin conexión de red; JARVIS continúa trabajando', 'offline'));
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refresh(true); });
-  $('task-clear').addEventListener('click', () => {
-    $('task-name').value = ''; $('task-message').value = ''; $('task-when').value = '';
-  });
-  $('task-form').addEventListener('submit', event => {
-    event.preventDefault();
-    const btn = $('task-submit');
-    const body = { kind: 'schedule_task', name: $('task-name').value.trim(),
-      message: $('task-message').value.trim(), schedule: $('task-when').value.trim() };
-    if (!body.message || !body.schedule) {
-      announce('Escribe la orden y el cuándo (18:30, en 30m o cada 1h).');
-      return;
-    }
-    void postAction({ button: btn, body });
-  });
-  document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && document.activeElement instanceof HTMLElement) document.activeElement.blur();
-  });
-  refresh();
-  connect();
-  state.pollTimer = setInterval(() => { void refresh(true); }, 15000);
-  state.durationTimer = setInterval(() => {
-    if (state.snapshot) {
-      const task = state.snapshot.active_tasks?.filter(item => item.state !== 'completada').at(-1);
-      if (task) $('current-task').textContent = `${task.id} · ${labelState(task.state)} · Agente: ${task.agent || 'JARVIS'} · Tiempo transcurrido: ${duration(task.started_at)}`;
-    }
-  }, 15000);
-  window.addEventListener('beforeunload', () => {
-    clearTimeout(state.reconnect);
-    clearTimeout(state.failureTimer);
-    clearTimeout(state.refreshTimer);
-    clearInterval(state.pollTimer);
-    clearInterval(state.durationTimer);
-    clearInterval(announce.timer);
-    try { state.ws?.close(); } catch { /* Sin conexión viva */ }
-  }, { once: true });
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', arrancar);
+  else arrancar();
 })();

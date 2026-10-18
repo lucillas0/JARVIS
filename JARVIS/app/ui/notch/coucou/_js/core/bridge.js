@@ -334,7 +334,13 @@ async function recapHistoryDeJarvis(since) {
     const vacio = { turns: [], decisions: [] };
     try {
         const dias = Math.max(1, Math.ceil((Date.now() / 1000 - since) / 86400));
-        const r = await fetch("http://127.0.0.1:8000/api/recap?dias=" + dias);
+        // /api/recap pide token desde que el cerebro protege todas sus rutas
+        // (lo da el preload). Sin el se devuelve el vacio de abajo, sin romper.
+        const t = (window.jarvisNotchNet && window.jarvisNotchNet.token)
+            ? (await window.jarvisNotchNet.token()) : "";
+        const r = await fetch("http://127.0.0.1:8000/api/recap?dias=" + dias, {
+            headers: t ? { "X-Jarvis-Token": t } : {},
+        });
         const d = await r.json();
         if (!d || !d.ok)
             return vacio;

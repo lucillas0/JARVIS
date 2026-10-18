@@ -3,103 +3,404 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#0a0d12">
-  <meta name="description" content="Centro de operaciones en tiempo real de JARVIS">
-  <title>JARVIS Live · Centro de operaciones</title>
+  <meta name="theme-color" content="#070a11">
+  <meta name="description" content="Centro de mando de JARVIS: tareas, agentes, permisos, cambios y control en tiempo real">
+  <title>JARVIS Live · Centro de mando</title>
   <link rel="stylesheet" href="/live/live.css">
   <script defer src="/live/live.js"></script>
 </head>
 <body>
-  <a class="saltar" href="#contenido">Saltar al panel de operaciones</a>
-  <div class="marco">
-    <header class="barra">
-      <a class="marca" href="/live" aria-label="JARVIS Live — centro de operaciones">
-        <span class="sello" aria-hidden="true">J</span>
-        <span><strong translate="no">JARVIS</strong><small>Live <span class="marca-punto" aria-hidden="true"></span></small></span>
+  <a class="oculto-visual" href="#principal">Saltar al contenido principal</a>
+
+  <header class="cabecera">
+    <a class="marca" href="/live">
+      <span class="emblema" aria-hidden="true">J</span>
+      <span class="texto"><b>JARVIS<span class="insignia">LIVE</span></b><small id="marca-sub">Centro de mando</small></span>
+    </a>
+    <div class="tira-metricas" id="metricas" aria-label="Recursos del equipo"></div>
+    <div class="cabecera-derecha">
+      <span class="estado-global" id="estado-global" data-estado="online" role="status" aria-live="polite">
+        <span class="luz" aria-hidden="true"></span><span id="estado-global-txt">ONLINE</span>
+      </span>
+      <span class="reloj" id="reloj">--:--</span>
+      <button type="button" class="icono-btn" id="btn-notis" aria-label="Notificaciones">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        <span class="punto" id="notis-contador" hidden>0</span>
+      </button>
+      <a class="icono-btn" href="/config" aria-label="Configuración">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1"/></svg>
       </a>
-      <nav aria-label="Navegación principal" class="nav-principal">
-        <a class="nav-activo" href="#contenido" aria-current="page">Operaciones</a>
-        <a href="/ui">Asistente</a>
-        <a href="/board">Pizarra</a>
-      </nav>
-      <div class="enlace" id="connection" role="status" aria-live="polite">
-        <span class="enlace-punto" id="connection-dot"></span><span id="connection-label">Conectando con el cerebro…</span>
+    </div>
+    <div class="notis-menu" id="notis-menu" hidden aria-label="Notificaciones"></div>
+  </header>
+
+  <nav class="nav" id="nav" aria-label="Secciones">
+    <div class="nav-lista" id="nav-lista">
+      <button type="button" class="nav-item" data-vista="dashboard" aria-current="page">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+        <span>Dashboard</span></button>
+      <button type="button" class="nav-item" data-vista="nueva">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+        <span>Nueva tarea</span></button>
+      <button type="button" class="nav-item" data-vista="tareas">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M8 11h8M8 15h5"/></svg>
+        <span>Tareas</span><span class="contador" data-contador="tareas" hidden>0</span></button>
+      <button type="button" class="nav-item" data-vista="agentes">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/></svg>
+        <span>Agentes</span><span class="contador" data-contador="agentes" hidden>0</span></button>
+      <button type="button" class="nav-item" data-vista="cambios">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <span>Cambios</span><span class="contador" data-contador="cambios" hidden>0</span></button>
+      <button type="button" class="nav-item" data-vista="permisos">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3"/></svg>
+        <span>Permisos</span><span class="contador" data-contador="permisos" hidden>0</span></button>
+      <button type="button" class="nav-item" data-vista="preguntas">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.2 9a2.8 2.8 0 1 1 3.6 2.7c-.6.2-.8.7-.8 1.3v.5"/><path d="M12 17h.01"/></svg>
+        <span>Preguntas</span><span class="contador" data-contador="preguntas" hidden>0</span></button>
+      <button type="button" class="nav-item" data-vista="tests">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span>Tests</span></button>
+      <button type="button" class="nav-item" data-vista="historial">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+        <span>Historial</span></button>
+      <button type="button" class="nav-item" data-vista="ia">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+        <span>IA</span><span class="contador" data-contador="ia" hidden>0</span></button>
+      <button type="button" class="nav-item" data-vista="sistema">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></svg>
+        <span>Sistema</span></button>
+      <a class="nav-item" href="/ui"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg><span>Asistente</span></a>
+    </div>
+    <div class="nav-pie">
+      <div class="orb-voz" id="orb-voz" data-estado="inactivo" role="status" aria-live="polite">
+        <span class="esfera" aria-hidden="true">J</span>
+        <span class="datos"><b>JARVIS</b><small id="voz-estado">inactivo</small>
+          <span class="forma" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b></span></span>
       </div>
-    </header>
+      <a class="nav-item" href="/config" style="margin-top:8px">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M4 12h2M18 12h2M12 4v2M12 18v2"/></svg>
+        <span>Configuración</span></a>
+    </div>
+  </nav>
 
-    <main id="contenido">
-      <section class="cabecera" aria-labelledby="titulo">
-        <div><p class="fecha" id="fecha">CENTRO DE OPERACIONES</p><h1 id="titulo">JARVIS <span>Live</span></h1><p class="subtitulo" id="current-activity">Esperando actividad del cerebro.</p></div>
-        <div class="estado-chip" id="system-status" data-state="loading"><span aria-hidden="true" class="estado-luz"></span><span>Verificando sistemas</span></div>
-      </section>
-
-      <section class="resumen" aria-label="Estado de JARVIS y recursos del equipo">
-        <article class="estado-panel">
-          <div class="encabezado-panel"><div><p class="kicker">ESTADO DEL SISTEMA</p><h2>Todo a la vista.</h2></div><span class="latido" id="jarvis-mark" aria-hidden="true">J</span></div>
-          <p class="estado-principal"><span class="punto-estado" aria-hidden="true"></span><strong id="jarvis-state">Conectando</strong><span id="capacity-label" class="capacidad">—</span></p>
-          <p class="descripcion-sistema" id="system-summary">Conectando con el cerebro y sus sistemas actuales.</p>
-          <div class="metrica-fila">
-            <div class="metrica"><div class="metrica-datos"><span>CPU</span><strong id="cpu-value">—</strong></div><div class="pista"><span id="cpu-bar"></span></div></div>
-            <div class="metrica"><div class="metrica-datos"><span>Memoria</span><strong id="ram-value">—</strong></div><div class="pista"><span id="ram-bar"></span></div></div>
+  <main class="principal" id="principal">
+    <!-- ───────── Dashboard ───────── -->
+    <section class="vista activa" data-vista="dashboard" aria-labelledby="v-dashboard">
+      <div class="heroi" id="heroi">
+        <div>
+          <div class="cabecera-tarea">
+            <span class="icono-tarea" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M9.5 3a4 4 0 0 0 0 18h1.8a3.5 3.5 0 0 0 0-7H9.5"/><path d="M14.5 7a3 3 0 0 1 0 6H13"/><path d="M8 6.5v-2M8 19.5v2"/></svg>
+            </span>
+            <div style="min-width:0">
+              <h2 id="heroi-titulo">JARVIS está disponible.</h2>
+              <p class="sub" id="heroi-sub">No hay ninguna tarea en marcha.</p>
+            </div>
           </div>
-          <p class="nota-recursos" id="resource-note">Las métricas aparecen cuando el gestor del sistema las ofrece.</p>
-        </article>
-
-        <article class="live-panel">
-          <div class="encabezado-panel"><div><p class="kicker">AHORA MISMO</p><h2>En tiempo real</h2></div><span class="etiqueta-live"><span aria-hidden="true"></span>EN DIRECTO</span></div>
-          <p class="ahora-titulo" id="activity-title">El cerebro está disponible.</p>
-          <p class="ahora-texto" id="activity-description">La conversación, los pasos de trabajo y los permisos aparecerán aquí, sin recargar la página.</p>
-          <div class="marcadores"><span><strong id="active-count">0</strong> trabajos activos</span><span class="separador" aria-hidden="true"></span><span><strong id="agent-count">0</strong> agentes activos</span></div>
-          <div class="trabajo-resumen" id="current-task" hidden></div>
-        </article>
-
-        <article class="operador-panel">
-          <div class="operador-cabecera"><span class="avatar-operador" aria-hidden="true">J</span><div><h2>El cerebro</h2><p id="brain-context">Voz · Discord</p></div></div>
-          <div class="indicador"><span class="indicador-punto"></span><span>JARVIS sigue trabajando aunque cierres esta página.</span></div>
-          <div class="canales"><div><span>VOZ</span><strong id="voice-state">Comprobando…</strong></div><div><span>DISCORD</span><strong id="discord-state">Comprobando…</strong></div><div><span>CONEXIONES</span><strong id="client-count">—</strong></div></div>
-        </article>
-      </section>
-
-      <section class="aprobaciones" id="approval-section" aria-labelledby="approval-heading" hidden>
-        <div class="titulo-seccion aprobacion-titulo"><div><p class="kicker">ACCIÓN BLOQUEADA</p><h2 id="approval-heading">Aprobaciones pendientes</h2></div><span class="contador-riesgo" id="approval-count">0</span></div>
-        <div class="aprobacion-lista" id="approvals-list"></div>
-      </section>
-
-      <section class="cuerpo" aria-label="Actividad, tareas y cambios">
-        <article class="timeline-panel">
-          <div class="titulo-seccion"><div><p class="kicker">SECUENCIA DEL CEREBRO</p><h2>JARVIS Live</h2></div><span class="event-count" id="event-count">0 eventos</span></div>
-          <div class="filtros" role="group" aria-label="Filtrar actividad">
-            <button type="button" class="filtro seleccionado" data-filter="todos" aria-pressed="true">Todo</button>
-            <button type="button" class="filtro" data-filter="tareas" aria-pressed="false">Tareas</button>
-            <button type="button" class="filtro" data-filter="cambios" aria-pressed="false">Cambios</button>
-            <button type="button" class="filtro" data-filter="permisos" aria-pressed="false">Permisos</button>
-            <button type="button" class="filtro" data-filter="errores" aria-pressed="false">Errores</button>
-            <button type="button" class="filtro" data-filter="agentes" aria-pressed="false">Agentes</button>
-            <button type="button" class="filtro" data-filter="sistema" aria-pressed="false">Sistema</button>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:12px">
+            <span class="etiqueta-estado" id="heroi-estado" data-estado="espera">DISPONIBLE</span>
+            <span class="insignia-estado" id="heroi-mision" hidden></span>
           </div>
-          <div class="timeline" id="event-list" role="log" aria-label="Actividad reciente de JARVIS" aria-live="polite" aria-relevant="additions text">
-            <div class="vacio" id="events-empty"><span aria-hidden="true" class="vacio-icono">◷</span><strong>La actividad del cerebro aparecerá aquí.</strong><p>El historial existente y los nuevos eventos se conectan al mismo WebSocket de JARVIS.</p></div>
+          <div class="progreso" id="heroi-progreso" hidden>
+            <span class="pista"><i id="heroi-barra"></i></span>
+            <span class="pct" id="heroi-pct">—</span>
           </div>
-        </article>
+          <p class="base-progreso" id="heroi-base"></p>
+          <div class="heroi-datos">
+            <div><span>AGENTE</span><strong id="heroi-agente">—</strong></div>
+            <div><span>FASE</span><strong id="heroi-fase">—</strong></div>
+            <div><span>TIEMPO TRANSCURRIDO</span><strong id="heroi-tiempo">—</strong></div>
+          </div>
+          <div class="acciones" id="heroi-acciones"></div>
+        </div>
+        <div>
+          <h3 class="dev-titulo" style="margin:0 0 8px">Fases de la tarea</h3>
+          <div class="fases" id="heroi-fases"></div>
+        </div>
+      </div>
 
-        <aside class="lateral">
-          <section class="tarjeta-lateral" aria-labelledby="tasks-heading"><div class="titulo-seccion"><div><p class="kicker">PLANIFICADOR ACTUAL</p><h2 id="tasks-heading">Próximas tareas</h2></div><span id="scheduled-count" class="cantidad-lateral">0</span></div><div id="task-list" class="lista-tareas"><div class="vacio-pequeno">No hay tareas programadas.</div></div>
-          <form class="tarea-form" id="task-form" aria-label="Programar una tarea nueva">
-            <strong>Programar tarea</strong>
-            <label>Nombre<input type="text" id="task-name" maxlength="60" placeholder="Aviso de…" autocomplete="off"></label>
-            <label>Orden para JARVIS<textarea id="task-message" rows="2" maxlength="500" placeholder="Qué debe hacer…"></textarea></label>
-            <label>Cuándo<input type="text" id="task-when" maxlength="40" placeholder="18:30 · en 30m · cada 1h" autocomplete="off"></label>
-            <button type="submit" id="task-submit">Programar</button>
-            <button type="button" class="task-cancel" id="task-clear">Limpiar</button>
-          </form></section>
-          <section class="tarjeta-lateral" aria-labelledby="recent-heading"><div class="titulo-seccion"><div><p class="kicker">SESIÓN ACTUAL</p><h2 id="recent-heading">Recientes</h2></div><span id="recent-count" class="cantidad-lateral">0</span></div><div id="recent-list" class="lista-tareas"><div class="vacio-pequeno">Aquí aparecerán los trabajos terminados, para reintentarlos.</div></div><p class="nota-recursos">Solo de esta sesión: al reiniciar se vacía.</p></section>
-          <section class="tarjeta-lateral" aria-labelledby="agents-heading"><div class="titulo-seccion"><div><p class="kicker">DETECCIÓN EXISTENTE</p><h2 id="agents-heading">Agentes</h2></div><span id="agents-total" class="cantidad-lateral">0</span></div><div id="agent-list" class="lista-agentes"></div><p class="nota-recursos">Estado detectado por procesos. No implica conocer la tarea de cada editor.</p></section>
-          <section class="tarjeta-lateral" aria-labelledby="changes-heading"><div class="titulo-seccion"><div><p class="kicker">GIT EN ESTE PROYECTO</p><h2 id="changes-heading">Cambios locales</h2></div><span id="changes-total" class="cantidad-lateral">0</span></div><div id="change-list" class="lista-cambios"></div><p class="nota-recursos">Solo se muestran las modificaciones que Git detecta; JARVIS no crea otro historial.</p></section>
-        </aside>
+      <div class="rejilla-dos">
+        <section class="tarjeta" aria-labelledby="v-plan">
+          <header>
+            <h2 id="v-plan">Plan de la tarea</h2>
+            <div class="pestanas" role="tablist" aria-label="Plan">
+              <button type="button" class="pestana" role="tab" aria-selected="true" data-plan="propuesta">Propuesta de JARVIS</button>
+              <button type="button" class="pestana" role="tab" aria-selected="false" data-plan="ejecucion">Plan de ejecución</button>
+            </div>
+          </header>
+          <div id="plan-cuerpo"></div>
+          <div class="acciones" id="plan-acciones"></div>
+        </section>
+
+        <section class="tarjeta" aria-labelledby="v-cambios">
+          <header>
+            <h2 id="v-cambios">Cambios recientes</h2>
+            <button type="button" class="btn chico" data-ir="cambios">Ver todos</button>
+          </header>
+          <div id="cambios-lista"></div>
+          <div class="caja-commit" id="caja-commit" hidden>
+            <span class="etq">COMMIT SUGERIDO</span>
+            <code id="commit-texto"></code>
+            <div class="acciones" style="margin-top:8px;padding-top:0">
+              <button type="button" class="btn chico" id="btn-commit">Confirmar</button>
+              <button type="button" class="btn chico" data-ir="cambios">Ver diff</button>
+            </div>
+          </div>
+          <div class="caja-tests" id="caja-tests"></div>
+        </section>
+      </div>
+
+      <div class="rejilla-dos">
+        <section class="tarjeta" aria-labelledby="v-tiempo-real">
+          <header>
+            <h2 id="v-tiempo-real">Actividad en tiempo real</h2>
+            <button type="button" class="btn chico" data-ir="historial">Ver todos</button>
+          </header>
+          <div id="tiempo-real"></div>
+        </section>
+        <section class="tarjeta" aria-labelledby="v-agentes">
+          <header>
+            <h2 id="v-agentes">Agentes</h2>
+            <button type="button" class="btn chico" data-ir="agentes">Ver todos</button>
+          </header>
+          <div id="agentes-lista"></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ───────── Nueva tarea ───────── -->
+    <section class="vista" data-vista="nueva" aria-labelledby="v-nueva">
+      <div class="titulo-vista">
+        <h1 id="v-nueva">Nueva tarea</h1>
+        <p>Dice qué quieres. JARVIS analiza el proyecto de verdad, enseña el plan y los riesgos, y no toca nada hasta que lo apruebes.</p>
+      </div>
+      <section class="tarjeta">
+        <label class="oculto-visual" for="idea">¿Qué quieres que haga JARVIS?</label>
+        <textarea class="campo" id="idea" rows="4" maxlength="4000"
+          placeholder="Quiero que diseñes un sistema de backups automáticos para mis proyectos."></textarea>
+        <div class="fila-campos">
+          <label class="fila-dato" style="flex:1"><span>Workspace</span>
+            <input class="campo" id="idea-workspace" placeholder="carpeta donde trabajar (opcional)" maxlength="400"></label>
+          <label class="fila-dato" style="flex:1"><span>Modelo</span>
+            <input class="campo" id="idea-modelo" placeholder="modelo de OpenCode (opcional)" maxlength="120"></label>
+        </div>
+        <div class="acciones">
+          <button type="button" class="btn acento" id="idea-crear">Crear tarea</button>
+          <button type="button" class="btn" id="idea-hablar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>
+            Hablar</button>
+          <button type="button" class="btn" id="idea-limpiar">Limpiar</button>
+        </div>
       </section>
-    </main>
-    <footer><span>JARVIS continúa activo cuando cierras esta ventana.</span><a href="/health">Estado del cerebro</a><span id="last-updated">A la espera del primer estado.</span></footer>
-  </div>
-  <div class="notificacion" id="notice" role="status" aria-live="polite" hidden></div>
+      <section class="tarjeta" id="idea-historial" hidden>
+        <header><h2>Tareas recientes</h2></header>
+        <div id="idea-lista"></div>
+      </section>
+    </section>
+
+    <!-- ───────── Tareas programadas ───────── -->
+    <section class="vista" data-vista="tareas" aria-labelledby="v-tareas">
+      <div class="titulo-vista"><h1 id="v-tareas">Tareas programadas</h1>
+        <p>El planificador que ya usa JARVIS. Programar, pausar, adelantar o borrar.</p></div>
+      <div class="rejilla-dos">
+        <section class="tarjeta">
+          <header><h2>Nueva tarea programada</h2></header>
+          <div class="fila-campos">
+            <input class="campo" id="ta-nombre" placeholder="Nombre" maxlength="80" aria-label="Nombre de la tarea">
+            <input class="campo" id="ta-cuando" placeholder="18:30 · en 30m · cada 1h" maxlength="60" aria-label="Cuándo">
+          </div>
+          <textarea class="campo" id="ta-mensaje" rows="2" placeholder="Qué debe hacer JARVIS" maxlength="1000" aria-label="Orden"></textarea>
+          <div class="acciones"><button type="button" class="btn acento" id="ta-crear">Programar</button></div>
+        </section>
+        <section class="tarjeta"><header><h2>Cola</h2></header><div id="ta-lista"></div></section>
+      </div>
+    </section>
+
+    <!-- ───────── Agentes ───────── -->
+    <section class="vista" data-vista="agentes" aria-labelledby="v-ag">
+      <div class="titulo-vista"><h1 id="v-ag">Agentes</h1>
+        <p>Lo que JARVIS detecta de verdad en el equipo. Si un programa no está instalado, no se puede abrir.</p></div>
+      <section class="tarjeta"><div id="ag-lista" class="rejilla-tres"></div></section>
+      <section class="tarjeta"><div id="ag-gestores"></div></section>
+    </section>
+
+    <!-- ───────── Cambios ───────── -->
+    <section class="vista" data-vista="cambios" aria-labelledby="v-cam">
+      <div class="titulo-vista"><h1 id="v-cam">Cambios</h1>
+        <p>Git de verdad: lo que hay modificado, el diff, los commits y los puntos de retorno.</p></div>
+      <div class="rejilla-dos">
+        <section class="tarjeta">
+          <header><h2>Repositorio</h2><button type="button" class="btn chico" id="cam-refrescar">Actualizar</button></header>
+          <div id="cam-estado"></div>
+          <div class="acciones">
+            <button type="button" class="btn" id="cam-checkpoint">Guardar checkpoint</button>
+          </div>
+        </section>
+        <section class="tarjeta">
+          <header><h2>Commit</h2></header>
+          <input class="campo" id="cam-mensaje" placeholder="Mensaje del commit" maxlength="200" aria-label="Mensaje del commit">
+          <div class="acciones"><button type="button" class="btn ok" id="cam-commit">Confirmar cambios</button></div>
+          <p class="nota">Te pide permiso antes de hacerlo.</p>
+        </section>
+      </div>
+      <section class="tarjeta"><header><h2>Diferencias</h2></header><pre class="codigo diff" id="cam-diff">Elige un fichero para ver sus diferencias.</pre></section>
+      <section class="tarjeta"><header><h2>Checkpoints</h2></header><div id="cam-checkpoints"></div></section>
+    </section>
+
+    <!-- ───────── Permisos ───────── -->
+    <section class="vista" data-vista="permisos" aria-labelledby="v-per">
+      <div class="titulo-vista"><h1 id="v-per">Permisos</h1>
+        <p>Lo pendiente de decidir, lo concedido y lo denegado. JARVIS nunca concede nada solo.</p></div>
+      <section class="tarjeta"><header><h2>Pendientes</h2></header><div id="per-pendientes"></div></section>
+      <div class="rejilla-dos">
+        <section class="tarjeta"><header><h2>Ámbitos</h2></header><div id="per-ambitos"></div></section>
+        <section class="tarjeta"><header><h2>Historial de decisiones</h2></header><div id="per-historial"></div></section>
+      </div>
+    </section>
+
+    <!-- ───────── Preguntas ───────── -->
+    <section class="vista" data-vista="preguntas" aria-labelledby="v-preg">
+      <div class="titulo-vista"><h1 id="v-preg">Preguntas</h1>
+        <p>Lo que OpenCode necesita decidir para seguir. Se responde aquí o por Discord.</p></div>
+      <section class="tarjeta"><div id="preguntas-lista"></div></section>
+    </section>
+
+    <!-- ───────── Tests ───────── -->
+    <section class="vista" data-vista="tests" aria-labelledby="v-tes">
+      <div class="titulo-vista"><h1 id="v-tes">Tests</h1>
+        <p>Los comandos que declara el proyecto y su salida real. Nada de resultados inventados.</p></div>
+      <div class="rejilla-dos">
+        <section class="tarjeta">
+          <header><h2>Comandos detectados</h2>
+            <button type="button" class="btn chico acento" id="tes-ejecutar">Ejecutar</button></header>
+          <div id="tes-deteccion"></div>
+        </section>
+        <section class="tarjeta"><header><h2>Ejecuciones</h2></header><div id="tes-trabajos"></div></section>
+      </div>
+      <section class="tarjeta" id="tes-salida-caja" hidden>
+        <header><h2>Salida</h2></header>
+        <pre class="codigo" id="tes-salida"></pre>
+      </section>
+    </section>
+
+    <!-- ───────── Historial ───────── -->
+    <section class="vista" data-vista="historial" aria-labelledby="v-hist">
+      <div class="titulo-vista"><h1 id="v-hist">Historial</h1>
+        <p>Misiones, eventos, decisiones y mientras estabas ausente.</p></div>
+      <section class="tarjeta" id="ausente-caja">
+        <header><h2>Mientras estabas ausente</h2>
+          <button type="button" class="btn chico" id="hist-briefing">Resumir</button>
+          <button type="button" class="btn chico" id="hist-briefing-voz">Contármelo</button></header>
+        <div id="hist-ausente"></div>
+      </section>
+      <div class="rejilla-dos">
+        <section class="tarjeta"><header><h2>Misiones</h2></header><div id="hist-misiones"></div></section>
+        <section class="tarjeta"><header><h2>Decisiones</h2></header><div id="hist-decisiones"></div></section>
+      </div>
+      <section class="tarjeta"><header><h2>Auditoría</h2></header><div id="hist-auditoria"></div></section>
+    </section>
+
+    <!-- ───────── IA / Modelos ───────── -->
+    <section class="vista" data-vista="ia" aria-labelledby="v-ia">
+      <div class="titulo-vista"><h1 id="v-ia">IA · Modelos</h1>
+        <p>Qué proveedores hay, cuál está usando JARVIS y qué ha costado de verdad.
+           Las cifras salen de las peticiones reales; lo que no se ha medido no se enseña.</p></div>
+
+      <div class="rejilla-tres" id="ia-estado"></div>
+
+      <div class="rejilla-dos">
+        <section class="tarjeta">
+          <header><h2>Modelo por tarea</h2>
+            <button type="button" class="btn chico" id="ia-catalogo">Ver catálogo del proveedor</button></header>
+          <div id="ia-asignados"></div>
+          <div class="acciones">
+            <label class="interruptor"><input type="checkbox" id="ia-fallback" checked>
+              <span>Permitir cambio de proveedor si uno falla</span></label>
+            <button type="button" class="btn acento" id="ia-guardar">Guardar</button>
+          </div>
+          <p class="nota">La programación no se decide aquí: la lleva OpenCode.</p>
+        </section>
+
+        <section class="tarjeta">
+          <header><h2>Proveedores</h2>
+            <button type="button" class="btn chico acento" id="ia-probar">Probar conexión</button></header>
+          <div id="ia-proveedores"></div>
+          <pre class="codigo" id="ia-salida" hidden></pre>
+        </section>
+      </div>
+
+      <section class="tarjeta">
+        <header><h2>Uso real</h2><span class="nota" id="ia-ventana"></span></header>
+        <div class="rejilla-tres" id="ia-metricas"></div>
+      </section>
+
+      <section class="tarjeta">
+        <header><h2>Últimas peticiones</h2></header>
+        <div id="ia-peticiones"></div>
+      </section>
+    </section>
+
+    <!-- ───────── Sistema ───────── -->
+    <section class="vista" data-vista="sistema" aria-labelledby="v-sis">
+      <div class="titulo-vista"><h1 id="v-sis">Sistema</h1>
+        <p>Lo que el equipo puede medir de sí mismo, y las herramientas de mantenimiento de JARVIS.</p></div>
+      <div class="rejilla-dos">
+        <section class="tarjeta"><header><h2>Recursos</h2></header><div id="sis-recursos"></div></section>
+        <section class="tarjeta"><header><h2>Salud de los subsistemas</h2></header><div id="sis-salud"></div></section>
+      </div>
+      <section class="tarjeta">
+        <header><h2>Mantenimiento</h2></header>
+        <div class="acciones">
+          <button type="button" class="btn" id="sis-diag">Diagnóstico</button>
+          <button type="button" class="btn" id="sis-optimizar">Optimizar</button>
+          <button type="button" class="btn peligro" id="sis-disco">Limpiar disco</button>
+          <button type="button" class="btn" id="sis-oc">Reiniciar OpenCode</button>
+        </div>
+        <p class="nota">Optimizar, limpiar disco y reiniciar servicios te piden permiso antes de actuar.</p>
+        <pre class="codigo" id="sis-salida" hidden></pre>
+      </section>
+      <section class="tarjeta"><header><h2>Incidentes</h2></header><div id="sis-incidentes"></div></section>
+    </section>
+  </main>
+
+  <aside class="lateral" id="lateral" aria-label="Paneles laterales">
+    <section class="caja" id="caja-atencion">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>Atención</h2>
+      <div id="atencion-lista"></div>
+    </section>
+
+    <section class="caja">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3"/></svg>Permisos
+        <button type="button" class="ver-todo" data-ir="permisos">Gestionar</button></h2>
+      <div id="lateral-permisos"></div>
+    </section>
+
+    <section class="caja">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/></svg>Sistema
+        <button type="button" class="ver-todo" data-ir="sistema">Ver detalles</button></h2>
+      <div class="medidores" id="lateral-medidores"></div>
+      <div id="lateral-barras"></div>
+    </section>
+
+    <section class="caja">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>Historial reciente
+        <button type="button" class="ver-todo" data-ir="historial">Ver todos</button></h2>
+      <div id="lateral-historial"></div>
+    </section>
+  </aside>
+
+  <p class="respuesta" id="respuesta" hidden></p>
+
+  <form class="command-bar" id="command-bar" aria-label="Orden para JARVIS">
+    <label class="oculto-visual" for="command-input">¿Qué quieres que haga JARVIS?</label>
+    <input id="command-input" maxlength="2000" autocomplete="off"
+      placeholder="¿Qué quieres que haga JARVIS? Ej.: «continúa la tarea», «muéstrame los cambios»">
+    <button type="button" class="btn" id="command-micro" aria-label="Hablar con JARVIS">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>
+    </button>
+    <button type="submit" class="btn accionar">Enviar</button>
+  </form>
+
+  <div class="aviso-flotante" id="aviso" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

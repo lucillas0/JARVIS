@@ -380,7 +380,11 @@ async function recapHistoryDeJarvis(since: number): Promise<RecapHistory> {
   const vacio: RecapHistory = { turns: [], decisions: [] } as RecapHistory;
   try {
     const dias = Math.max(1, Math.ceil((Date.now() / 1000 - since) / 86400));
-    const r = await fetch("http://127.0.0.1:8000/api/recap?dias=" + dias);
+    const t = (window as any).jarvisNotchNet && (window as any).jarvisNotchNet.token
+      ? await (window as any).jarvisNotchNet.token() : "";
+    const r = await fetch("http://127.0.0.1:8000/api/recap?dias=" + dias, {
+      headers: t ? { "X-Jarvis-Token": t } : {},
+    });
     const d: any = await r.json();
     if (!d || !d.ok) return vacio;
     const ahora = Math.floor(Date.now() / 1000);

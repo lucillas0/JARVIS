@@ -151,7 +151,15 @@ const consulta = { ultima: {}, tarea: null };
 
 async function miraApps() {
   try {
-    const r = await fetch("http://127.0.0.1:8000/api/apps", { cache: "no-store" });
+    // /api/apps pide token desde que el cerebro protege todas sus rutas. Lo da
+    // el preload (window.jarvisNotchNet); sin el se sale por el catch de abajo,
+    // que es lo que pasaba antes de que existiera la proteccion.
+    const t = (window.jarvisNotchNet && window.jarvisNotchNet.token)
+      ? (await window.jarvisNotchNet.token()) : '';
+    const r = await fetch("http://127.0.0.1:8000/api/apps", {
+      cache: "no-store",
+      headers: t ? { "X-Jarvis-Token": t } : {},
+    });
     const d = await r.json();
     if (!d || !d.ok || !d.apps) return;
     ensure();

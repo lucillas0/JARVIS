@@ -22,7 +22,14 @@ function boot() {
   // Los ajustes de /config mandan: si el señor tiene animaciones activas, el
   // orbe se construye entero. Solo se salta si las apagó (anims.enabled).
   try {
-    fetch('http://127.0.0.1:8000/api/config')
+    // /api/config pide token desde que el cerebro protege todas sus rutas. El
+    // preload lo tiene (window.jarvisNet); si no estuviera, la peticion sale
+    // igual y el .catch de abajo deja el orbe en su animacion por defecto.
+    const _hdr = (window.jarvisNet && window.jarvisNet.token)
+      ? window.jarvisNet.token().then((t) => (t ? { 'X-Jarvis-Token': t } : {}))
+      : Promise.resolve({});
+    _hdr
+      .then((h) => fetch('http://127.0.0.1:8000/api/config', { headers: h }))
       .then((r) => r.json())
       .then((j) => {
         const a = (j.config && j.config.anims) || {};

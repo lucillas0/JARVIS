@@ -714,6 +714,18 @@
     requestAnimationFrame(wait);
   }
 
+  // El token del cerebro para las llamadas HTTP. /api/* pide token desde que el
+  // cerebro protege todas sus rutas, y el preload lo tiene (window.jarvisNet).
+  // Sin el, el servidor contesta 401 y aqui se sigue con los valores por
+  // defecto, sin romper la interfaz.
+  function cabecerasCerebro() {
+    if (window.jarvisNet && window.jarvisNet.token) {
+      return window.jarvisNet.token().then((t) => (t ? { 'X-Jarvis-Token': t } : {}))
+        .catch(() => ({}));
+    }
+    return Promise.resolve({});
+  }
+
   // Los ajustes de /config mandan sobre el ajuste de Windows: el señor ha
   // pedido estas animaciones expresamente, así que si las tiene activas se
   // reproducen enteras. Solo se saltan si las apagó en JARVIS (anims.enabled).
@@ -721,7 +733,8 @@
   function animPrefs() {
     if (animCache) return { enabled: animCache.enabled };
     animCache = { enabled: true };
-    fetch('http://127.0.0.1:8000/api/config')
+    cabecerasCerebro()
+      .then((h) => fetch('http://127.0.0.1:8000/api/config', { headers: h }))
       .then((r) => r.json())
       .then((j) => {
         const a = (j.config && j.config.anims) || {};
@@ -2236,7 +2249,8 @@
   }
   async function jarvisTheme() {
     try {
-      const j = await (await fetch('http://127.0.0.1:8000/api/config')).json();
+      const j = await (await fetch('http://127.0.0.1:8000/api/config',
+        { headers: await cabecerasCerebro() })).json();
       const c = j.config; if (!c) return;
       const T = c.theme || {}, M = c.messages || {}, O = c.orb || {}, A = c.anims || {};
       let st = document.getElementById('jarvis-theme');

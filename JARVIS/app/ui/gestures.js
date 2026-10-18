@@ -88,7 +88,8 @@
   // primero es barato y evita disparar la escalera del navegador a ciegas.
   async function estadoCerebro() {
     try {
-      const r = await fetch('http://127.0.0.1:8000/api/camara/estado');
+      const r = await fetch('http://127.0.0.1:8000/api/camara/estado',
+        { headers: await cabecerasCerebro() });
       const j = await r.json();
       return j && j.ok ? j.estado : null;
     } catch (e) {
@@ -97,11 +98,41 @@
     }
   }
 
+  // El token lo da el preload (window.jarvisNet). El cerebro lo exige ya en
+  // /api/camara/*: la camara del señor no se abre porque lo pida cualquiera de
+  // la LAN. Si el token no esta (no es Electron), se sigue intentando: el
+  // 401 se ve en el log y no se rompe la interfaz.
+  async function cabecerasCerebro() {
+    try {
+      if (window.jarvisNet && window.jarvisNet.token) {
+        const t = await window.jarvisNet.token();
+        return t ? { 'X-Jarvis-Token': t } : {};
+      }
+    } catch (e) { /* sin token: que lo decida el servidor */ }
+    return {};
+  }
+
   // Fuente alternativa: las fotos las saca el CEREBRO con OpenCV (por
   // DirectShow). En equipos sin Media Foundation el navegador no abre la
   // cámara, pero por esta vía sí. Se intenta primero esta; si el cerebro no
   // contesta, se cae a la cámara del navegador como antes.
   const MJPEG_CEREBRO = 'http://127.0.0.1:8000/api/camara/mjpeg';
+
+  // Este stream va en un <img>/fetch simple: ahi no caben cabeceras, asi que el
+  // token va en la query, que el cerebro acepta justamente para las descargas y
+  // para esto. Se resuelve al empezar, no en cada foto.
+  let _tokenCerebro = '';
+  async function urlMjpeg() {
+    if (!_tokenCerebro) {
+      try {
+        if (window.jarvisNet && window.jarvisNet.token) {
+          _tokenCerebro = (await window.jarvisNet.token()) || '';
+        }
+      } catch (e) { /* sin token: lo dira el servidor */ }
+    }
+    return _tokenCerebro ? MJPEG_CEREBRO + '?token=' + encodeURIComponent(_tokenCerebro)
+      : MJPEG_CEREBRO;
+  }
 
   // El bucle de sondeo se puede cancelar. Antes era un 'while (true)' sin
   // salida: seguía pidiendo fotos para siempre aunque el tracker se apagara, y
@@ -184,7 +215,7 @@
     };
 
     const consumirMJPEG = async () => {
-      const response = await fetch(MJPEG_CEREBRO, {
+      const response = await fetch(await urlMjpeg(), {
         cache: 'no-store', credentials: 'omit', signal: control.abort.signal,
       });
       if (!response.ok || !response.body) {
