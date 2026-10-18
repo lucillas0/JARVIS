@@ -661,20 +661,6 @@ def opencode_build_handler(params: dict) -> dict:
 def opencode_jobs_handler(params: dict) -> dict:
     """Tool: estado de los proyectos en marcha."""
     return opencode_jobs()
-    """Pregunta rápida al agente (sin editar nada): devuelve texto."""
-    if not os.path.isfile(OC_CMD):
-        return ""
-    try:
-        r = subprocess.run(
-            [OC_CMD, "run", "-m", OC_MODEL, "--format", "json",
-             "--dir", _brain_dir(), question],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, env=_keys_env(),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return (r.stdout or "")[-1500:]
-    except Exception as e:
-        log.debug("opencode ask: %s", e)
-        return ""
 
 
 def opencode_ask(question: str, timeout: int = 180) -> str:

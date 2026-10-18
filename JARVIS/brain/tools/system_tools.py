@@ -77,15 +77,14 @@ _APP_ALIASES = {
     "consola": ["cmd", "windowsterminal", "wt"],
     "prompt": ["cmd"],
     "word": ["winword", "word"],
-    "hoja de calculo": ["excel", "winword"],
-    "presentacion": ["powerpoint", "winword"],
+    "hoja de calculo": ["excel"],
+    "presentacion": ["powerpoint"],
     "correo": ["outlook", "thunderbird"],
     "correo electronico": ["outlook", "thunderbird"],
     "musica": ["spotify"],
     "navegador": ["firefox", "googlechrome", "brave"],
     "firefox": ["firefox"],
     "brave": ["brave"],
-    "edge": ["msedge", "edge"],
     "captura de pantalla": ["snippingtool", "screencl sketch"],
     "virtualbox": ["virtualbox", "oraclevmvirtualbox", "vbox"],
     "vbox": ["virtualbox", "oraclevmvirtualbox", "vbox"],
@@ -93,11 +92,13 @@ _APP_ALIASES = {
     "google": ["googlechrome", "chrome"],
     "chrome": ["googlechrome", "chrome"],
     "gmail": ["gmail", "googlechrome"],
-    "word": ["winword", "word"],
-    "excel": ["excel", "winword"],
-    "powerpoint": ["powerpoint", "winword"],
+    # "word" y "paint" ya estaban definidos arriba en este mismo diccionario.
+    # Repetidos aquí no sumaban nada: en un dict la segunda definición pisa a
+    # la primera sin avisar, así que solo seUqía leer un sitio distinto al
+    # que de verdad se usa.
+    "excel": ["excel"],
+    "powerpoint": ["powerpoint"],
     "notepad": ["notepad"],
-    "paint": ["paint", "mspaint"],
     "calc": ["calc"],
     "calculator": ["calculator", "calc"],
     "explorer": ["explorer"],
@@ -106,9 +107,11 @@ _APP_ALIASES = {
     "cmd": ["cmd"],
     "vscode": ["code", "visualstudiocode"],
     "code": ["code", "visualstudiocode"],
-    "firefox": ["firefox"],
-    "brave": ["brave"],
-    "edge": ["msedge", "microsoftedge"],
+    # "edge" estaba escrito dos veces: la de arriba ponía ["msedge", "edge"] y
+    # la de abajo ["msedge", "microsoftedge"]. En un diccionario la segunda
+    # pisa a la primera sin avisar, así que el alias "edge" se perdía en
+    # silencio. Ahora hay una sola, con los dos nombres dentro.
+    "edge": ["msedge", "edge", "microsoftedge"],
     "discord": ["discord"],
     "telegram": ["telegram"],
     "steam": ["steam"],

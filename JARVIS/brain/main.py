@@ -1379,6 +1379,13 @@ def _virustotal_rapido(cleaned: str) -> str:
             f"VirusTotal. Informe: {r.get('link','')}")
 
 
+# Techo de la LECTURA de una investigación (no cuenta la búsqueda). Antes no
+# había ninguno y el bucle de páginas podía con seis intentos de 15 s: minuto y
+# medio sin decir nada. Con red lenta o con la IP del contenedor bloqueada,
+# era lo normal y no un caso raro.
+PLAZO_INVESTIGACION_S = 25.0
+
+
 def _research(topic: str, deep: bool = False, quick: bool = False) -> str:
     """Investiga en internet y devuelve un resumen BREVE. Si ve que la
     información se queda corta, se ofrece a profundizar en vez de alargar
@@ -1426,16 +1433,24 @@ def _research(topic: str, deep: bool = False, quick: bool = False) -> str:
                 "Pruebe con otras palabras o dígame el enlace.")
     cuantos = 3 if deep else 1
     trozos, fuentes = [], []
-    # No se rinde con el primer enlace: muchos sitios bloquean la lectura, así
-    # que va probando hasta reunir texto suficiente (o quedarse sin resultados).
+    # Techo de lectura. Sin esto, una pregunta podía quedarse hasta seis
+    # páginas × 15 segundos = 90 s callados cuando los sitios bloquean la
+    # lectura, que es justo lo que pasa con la salida a internet de un
+    # contenedor. Se sigue probando más de un enlace (muchos sitios bloquean
+    # la lectura), pero no indefinidamente: pasado el plazo se usa lo que haya.
+    _fin = time.monotonic() + PLAZO_INVESTIGACION_S
     for r in results[:6]:
         if len(trozos) >= cuantos:
+            break
+        if time.monotonic() > _fin:
+            log.debug("investigación: plazo de lectura agotado con %d fuente(s)",
+                      len(fuentes))
             break
         u = r.get("url") or ""
         if not u.startswith("http"):
             continue
         try:
-            txt = (web_fetch_handler({"url": u, "timeout": 15}).get("content") or "").strip()
+            txt = (web_fetch_handler({"url": u, "timeout": 8}).get("content") or "").strip()
         except Exception:
             txt = ""
         if len(txt) > 400:
@@ -1446,7 +1461,9 @@ def _research(topic: str, deep: bool = False, quick: bool = False) -> str:
         try:
             from tools.web_tools import _search_wiki
             for r in _search_wiki(topic)[:3]:
-                txt = (web_fetch_handler({"url": r["url"], "timeout": 15}).get("content") or "").strip()
+                if time.monotonic() > _fin:
+                    break
+                txt = (web_fetch_handler({"url": r["url"], "timeout": 8}).get("content") or "").strip()
                 if len(txt) > 400:
                     trozos.append(txt[:3000])
                     fuentes.append(r["url"])
@@ -1454,7 +1471,7 @@ def _research(topic: str, deep: bool = False, quick: bool = False) -> str:
         except Exception as e:
             log.debug("research wiki: %s", e)
     if not trozos:
-        return (f"Sí,{topic} sale en varios sitios, señor, pero las páginas no me "
+        return (f"Sí, {topic} sale en varios sitios, señor, pero las páginas no me "
                 "dejan leerlas. Le doy la dirección principal: "
                 f"{results[0].get('url','')}")
     cuerpo = "\n\n---\n\n".join(trozos)[:9000 if deep else 5000]
@@ -1469,7 +1486,7 @@ def _research(topic: str, deep: bool = False, quick: bool = False) -> str:
         resumen = (r2.get("reply") or "").strip()
     except Exception:
         resumen = cuerpo[:400]
-    head = "Profundizando" if deep else "He investigated"
+    head = "Profundizando" if deep else "He investigado"
     salida = f"{head} «{topic}», señor. En corto: {resumen}"
     if not deep:
         brain._pending_deep = {"topic": topic, "urls": fuentes or [r.get("url", "") for r in results[:3]]}
@@ -1718,7 +1735,7 @@ def _run_system_scan(cleaned: str) -> str:
                 "state": "done"})
     fallos = res.get("problems", 0)
     if not fallos:
-        return (f"He investigated el equipo entero, señor: {res.get('total', 0)} "
+        return (f"He revisado el equipo entero, señor: {res.get('total', 0)} "
                 "comprobaciones y nada fuera de orden. Su sistema está sano.")
     det = [f"{f['area']}: {f['detail']}" for f in res.get("findings", [])
            if f.get("ok") is False]
@@ -2422,6 +2439,33 @@ def _respuesta_si_vacia(text: str) -> str:
             "¿Me lo repite con otra forma?")
 
 
+def _guardar_historia(user_text: str, reply: str) -> None:
+    """Guarda el turno en el historial, y si no puede, NO se rompe nada.
+
+    Antes el `db.add_message()` iba suelto. Si la base no escribía, la
+    excepción subía por `handle_user_message` y se llevaba por delante la
+    respuesta: el señor no veía nada y, según por dónde hubiera entrado el
+    mensaje, el WebSocket, Discord, WhatsApp, la voz o las tareas
+    programadas quedaban caídos.
+
+    Es exactamente lo que pasa en Docker cuando se llena el volumen o el
+    disco falla, y en un portátil casi nunca: por eso no se notaba. Perder el
+    historial de una frase es molestia; perder la conversación entera es que
+    JARVIS parezca muerto.
+
+    Aparte: el mensaje del señor se guarda ANTES que la respuesta. Si el
+    proceso se muere justo después, queda registrado lo que se preguntó.
+    """
+    try:
+        db.add_message("user", user_text)
+    except Exception as exc:  # noqa: BLE001
+        log.error("no pude guardar tu mensaje en el historial: %s", exc)
+    try:
+        db.add_message("assistant", reply)
+    except Exception as exc:  # noqa: BLE001
+        log.error("no pude guardar mi respuesta en el historial: %s", exc)
+
+
 def handle_user_message(text: str, input_mode: str = "text", ws: Optional[WebSocket] = None,
                         broadcast: bool = True) -> str:
     """Procesa un mensaje (texto o voz) y devuelve la respuesta a hablar/mostrar.
@@ -2440,8 +2484,7 @@ def handle_user_message(text: str, input_mode: str = "text", ws: Optional[WebSoc
         log.debug("respuesta de desarrollo: %s", _e)
         directa = None
     if directa:
-        db.add_message("user", text)
-        db.add_message("assistant", directa)
+        _guardar_historia(text, directa)
         if broadcast:
             brain.emit({"type": "assistant_reply", "text": directa})
         return directa
@@ -2459,8 +2502,7 @@ def handle_user_message(text: str, input_mode: str = "text", ws: Optional[WebSoc
     # nada y parece que JARVIS ignora la pregunta. Antes pasaba.
     if not (reply or "").strip():
         reply = _respuesta_si_vacia(text)
-    db.add_message("user", text)
-    db.add_message("assistant", reply)
+    _guardar_historia(text, reply)
     # La respuesta sale ANTES de indexar memoria semántica (los embeddings tardan
     # varios segundos y no deben retrasar lo que el usuario ve).
     # Se emite SIEMPRE, también por voz: antes, con voz puesta, la condicion
@@ -4986,9 +5028,15 @@ async def _process_user_message(message: str, input_mode: str = "text", speak: b
         try:
             result["reply"] = await asyncio.to_thread(
                 handle_user_message, message, input_mode, None, not bool(request_id))
-        except Exception:
+        except Exception as exc:
             log.exception("_process_user_message")
-            result["reply"] = ""
+            # Antes se dejaba en "" y el señor se quedaba mirando una
+            # conversación sin respuesta. `handle_user_message` ya tiene su
+            # propio aviso; esto es el último foso, para lo que se escape.
+            # No se enseña el texto crudo de la excepción al usuario.
+            log.error("la conversación reventó por una razón inesperada: %s", exc)
+            result["reply"] = ("He tropezado contestando, señor. Lo he "
+                               "anotado para arreglarlo; vuelva a probarlo.")
         finally:
             done.set()
 

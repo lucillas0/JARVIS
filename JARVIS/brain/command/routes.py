@@ -47,6 +47,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+# `Optional` se usa en las anotaciones de los modelos de Pydantic de este
+# fichero. Con `from __future__ import annotations` las anotaciones llegan como
+# texto y Pydantic las resuelve contra el namespace del módulo: si el nombre no
+# está importado, el modelo no se puede construir y el endpoint devuelve un
+# 500 al señor. No estaba importado, y PUT /memoria/recuerdos/{id} estaba roto.
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse

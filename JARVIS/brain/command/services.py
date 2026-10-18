@@ -336,6 +336,10 @@ def historial(dias: int = 7) -> dict:
 
 
 def decisiones(mission_id: str = "", limite: int = 40) -> dict:
+    # OJO: `store` no estaba importado. Esta función reventaba con NameError y
+    # /api/cmd/decisiones devolvía 500. El import va dentro, como el resto de
+    # las funciones de este fichero, para no crear un ciclo con store.
+    from . import store
     return {"ok": True, "decisiones": store.listar_decisiones(limite, mission_id)}
 
 

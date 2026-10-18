@@ -26,6 +26,10 @@ SUITES = [
     ("Reconstruccion", Path("test_reconstruccion.py")),
     ("Cierre de huecos", Path("test_gap_closure.py")),
     ("Audio", Path("test_audio.py")),
+    ("Conversacion de investigacion", Path("test_conversacion_investigacion.py")),
+    ("Endpoints vivos", Path("test_endpoints_vivos.py")),
+    ("Fuzz de conversacion", Path("test_fuzz_conversacion.py")),
+    ("Plazo de investigacion", Path("test_plazo_investigacion.py")),
 ]
 
 # Cada suite cierra con su frase ("... VERIFICADO", "... VERIFICADA", "... PROTEGIDA").

@@ -120,7 +120,12 @@ def _coincide(texto: str, pregunta: dict) -> tuple[bool, object]:
         opciones = pregunta.get("options") or []
         if 0 <= indice < len(opciones):
             return True, opciones[indice]["value"]
-    m = _numero.match(limpio)
+    # OJO: la expresión se llama `_lock_numero`, no `_numero`. Estaba escrito al
+    # revés, así que contestar con un número ("2", "1)", "3.") lanzaba un
+    # NameError. Como quien llama lo envuelve en un try/except, el efecto era
+    # peor que un fallo visible: la respuesta se descartaba en silencio, el
+    # permiso se quedaba pendiente para siempre y JARVIS no contestaba nada.
+    m = _lock_numero.match(limpio)
     if m:
         indice = int(m.group(1)) - 1
         opciones = pregunta.get("options") or []

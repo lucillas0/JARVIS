@@ -117,6 +117,19 @@ def _leer() -> list[dict]:
         except Exception as e:
             log.debug("runningvms: %s", e)
         if not base:
+            # OJO: aquí se guardaba la caché SIN actualizar su fecha. Con
+            # VirtualBox roto o ausente, eso significa que el siguiente
+            # mensaje volvía a pagar los dos `VBoxManage` enteros (hasta
+            # 20 s + 15 s) para volver a obtener la misma lista vacía, una y
+            # otra vez. Medido: 40 de los 44 segundos de una respuesta se
+            # iban aquí, en CADA mensaje, no solo en el primero.
+            #
+            # Ahora el fallo también se cachea, con la vigencia normal: si
+            # alguien arranca VirtualBox o enciende una máquina, reaparece sin
+            # tener que esperar. (`global` ya está declarado arriba de la
+            # función; aquí repetirlo es un SyntaxError.)
+            _cache = []
+            _cache_t = time.time()
             return _cache
         vistos = set()
         lista = []
@@ -152,7 +165,11 @@ def _rol(nombre: str) -> str:
 
 
 def listar(forzar: bool = False) -> list[dict]:
-    if not forzar and _cache and (time.time() - _cache_t) < _VIGENCIA:
+    # Se decide por la FECHA, no por si la lista tiene algo dentro. Antes se
+    # miraba `_cache` (una lista vacía es falsa), así que cuando no había
+    # máquinas —o cuando VBoxManage fallaba— la condición nunca se cumplía y
+    # cada mensaje que llegaba al modelo repetía la llamada entera.
+    if not forzar and _cache_t and (time.time() - _cache_t) < _VIGENCIA:
         return _cache
     if _cache:
         _refrescar()          # lista vieja: se sirve ya y se actualiza detrás

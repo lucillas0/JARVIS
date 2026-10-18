@@ -513,12 +513,26 @@ def add_llm_usage(fila: dict) -> None:
 
 
 def list_llm_usage(desde: float = 0.0, limite: int = 50) -> list[dict]:
-    """Peticiones mas recientes que `desde` (epoch), las mas nuevas al final."""
+    """Peticiones mas recientes que `desde` (epoch), las mas nuevas al final.
+
+    `ok` y `streaming` se guardan como 0/1 porque SQLite no tiene booleanos, y
+    se devuelven como True/False de verdad. No es cosmetico: la misma lista se
+    devuelve desde memoria, donde SI son booleanos, y sin esta conversion la
+    misma fila con dos procedencias distintas daba dos tipos distintos. Lo que
+    acababa viendo quien consultaba la API era "streaming": 0 en vez de false,
+    y cualquier `x is True` decia que no.
+    """
     conn = get_conn()
     filas = conn.execute(
         "SELECT * FROM llm_usage WHERE at >= ? ORDER BY at DESC LIMIT ?",
         (float(desde or 0), int(limite)),
     ).fetchall()
-    salida = [_fila(f) for f in filas]
+    salida = []
+    for f in filas:
+        item = dict(f)
+        for col in ("ok", "streaming"):
+            if col in item:
+                item[col] = bool(item[col])
+        salida.append(item)
     salida.reverse()
     return salida

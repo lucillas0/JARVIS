@@ -1186,9 +1186,18 @@ CAPACIDADES = {
                     "borrar": "/api/cmd/checkpoints/{cp_id}"},
     "Pruebas": {"ver": "/api/cmd/pruebas", "correr": "/api/cmd/pruebas",
                 "seguir": "/api/cmd/pruebas/{job_id}"},
-    "Conocimiento": {"ver": "/api/cmd/conocimiento", "buscar": "/api/cmd/conocimiento/buscar",
+    # OJO: esta clave estaba escrita dos veces en este mismo diccionario. La
+    # segunda pisa a la primera en silencio, asi que las cuatro rutas de aqui
+    # (ver/buscar/indexar/olvidar) no se estaban comprobando nunca y la matriz
+    # daba verde sobre un hueco. Va todo junto.
+    "Conocimiento": {"ver": "/api/cmd/conocimiento",
+                     "buscar": "/api/cmd/conocimiento/buscar",
                      "indexar": "/api/cmd/conocimiento/indexar",
-                     "olvidar": "/api/cmd/conocimiento/olvidar"},
+                     "olvidar": "/api/cmd/conocimiento/olvidar",
+                     "documentos": "/api/cmd/conocimiento/documentos",
+                     "por_categoria": "/api/cmd/conocimiento/categoria/{categoria}",
+                     "reclasificar": "/api/cmd/conocimiento/reclasificar",
+                     "indexar_documentos": "/api/cmd/conocimiento/indexar-documentos"},
     "Memoria": {"ver": "/api/cmd/memoria", "api": "/api/memory",
                 "buscar": "/api/memory/search", "borrar": "/api/memory/{memory_id}",
                 "vaciar": "/api/memory/clear"},
@@ -1228,10 +1237,6 @@ CAPACIDADES = {
                   "archivar": "/api/cmd/memoria/recuerdos/{rec_id}/archivar",
                   "olvidar": "/api/cmd/memoria/recuerdos/{rec_id}/olvidar",
                   "resumen": "/api/cmd/memoria/recuerdos-resumen"},
-    "Conocimiento": {"documentos": "/api/cmd/conocimiento/documentos",
-                     "por_categoria": "/api/cmd/conocimiento/categoria/{categoria}",
-                     "reclasificar": "/api/cmd/conocimiento/reclasificar",
-                     "indexar": "/api/cmd/conocimiento/indexar-documentos"},
     "Autorizaciones": {"ver": "/api/cmd/autorizaciones",
                        "conceder": "/api/cmd/autorizaciones",
                        "activas": "/api/cmd/autorizaciones/activas",

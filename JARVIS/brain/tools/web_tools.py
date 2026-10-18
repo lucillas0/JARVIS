@@ -174,15 +174,34 @@ def web_fetch_handler(params: dict) -> dict:
     return {"url": url, "content": _html_to_text(html)[:8000]}
 
 
+# Techo de una búsqueda web. Antes no existía: la única espera era la de los
+# reintentos, 13 segundos fijos, y a eso se le suman los intentos de los otros
+# dos motores. Ahora hay un número, y el bucle se para al llegar.
+PLAZO_BUSQUEDA_S = 12.0
+
+
 def _search_lite(query: str) -> list[dict]:
     """DuckDuckGo Lite (aguanta bots). Devuelve [{title, url}]. Reintenta
-    ante 403/202 (rate-limit intermitente de DDG)."""
+    ante 403/202 (rate-limit intermitente de DDG).
+
+    OJO con las esperas entre reintentos: antes eran 0 + 4 + 9 segundos, y
+    eso son 13 segundos de silencio ANTES de saber que no hay red. Medido: sin
+    salida a internet, este bucle tardaba 13,0 s exactos. En un contenedor, que
+    suele salir por una IP que DuckDuckGo trata peor, es justo el caso normal:
+    el señor ve a JARVIS parado y lo que cuenta es que se ha quedado colgado.
+    Ahora los intentos caben dentro de PLAZO_BUSQUEDA_S.
+    """
     import re
     import time as _t
     html = ""
-    for wait in (0, 4, 9):
+    fin = _t.monotonic() + PLAZO_BUSQUEDA_S
+    for wait in (0, 1.5, 3.0):
         if wait:
+            if _t.monotonic() + wait > fin:
+                break
             _t.sleep(wait)
+        if _t.monotonic() > fin:
+            break
         try:
             html = _simple_fetch("https://lite.duckduckgo.com/lite/?q=" + quote(query))
             if len(html) > 8000:
