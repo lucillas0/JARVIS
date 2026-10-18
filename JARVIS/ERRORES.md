@@ -207,6 +207,53 @@ todo en uno:
 
 ---
 
+## El mensaje de error que estás viendo
+
+Este salió de una conversación real del usuario:
+
+> *"Mis disculpas, señor. He intentado con groq y los tres han fallado; esto no
+> es que no tenga modelos, es que no he podido hablar con ellos. Mire el
+> registro del servidor y ya lo veré."*
+
+Tenía **tres** defectos, y los tres se ven solo cuando lo lees en casa:
+
+1. Decía **"los tres"** con la palabra escrita a mano, mientras la lista de
+   proveedores es dinámica. Con una sola clave puesta la frase era falsa de
+   arriba abajo: "he intentado con groq **y los tres** han fallado".
+2. **`groq-light` y `groq` son el mismo servicio** con distinto modelo, y
+   salían listados como dos proveedores distintos.
+3. **No decía por qué.** Ese es el grave. Cada proveedor escribía su motivo en
+   el log a una línea de distancia y luego guardaba **solo el nombre**:
+
+   ```python
+   reply = fn()
+   if reply: ...
+   fallos.append(name)          # ← el motivo se queda en el log y se tira
+   ```
+
+   Por eso lo único que podía decir era "mire el registro del servidor", que
+   no es un diagnóstico: es devolverle el problema al que acaba de preguntar.
+
+Ahora el router guarda el motivo de cada proveedor, lo traduce a algo
+accionable (sin sacar nunca la clave) y lo dice:
+
+> *"Mis disculpas, señor. Groq, Gemini y OpenRouter fallaron y no he podido
+> obtener respuesta. Groq: sin cuota (límite de la API), esperando 30 s;
+> Gemini: la clave no es válida o está caducada. Revise las claves en /setup."*
+
+Sin motivo conocido **no inventa uno**: dice que lo está en el registro.
+
+### Y debajo había un fallo más serio
+
+`respond()` solo se caía al camino viejo (`_respond_legacy`) si el AI Gateway
+**lanzaba una excepción**. Si el gateway devolvía `{"ok": false}` —que es
+exactamente lo que hace cuando los proveedores fallan o se acaba el reloj—
+se lo devolvía al usuario tal cual y **la red de seguridad no se probaba
+nunca**. Un fallo del gateway dejaba a JARVIS sin poder hablar aunque el
+camino antiguo hubiera contestado.
+
+---
+
 ## Otros
 
 - **La respuesta de una investigación salía en inglés**: `He investigated

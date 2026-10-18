@@ -32,6 +32,7 @@ SUITES = [
     ("Plazo de investigacion", Path("test_plazo_investigacion.py")),
     ("Rutas cross-platform", Path("test_rutas_crossplatform.py")),
     ("Tiempos de respuesta", Path("test_tiempos_respuesta.py")),
+    ("Fallo de modelos", Path("test_fallo_modelos.py")),
 ]
 
 # Cada suite cierra con su frase ("... VERIFICADO", "... VERIFICADA", "... PROTEGIDA").

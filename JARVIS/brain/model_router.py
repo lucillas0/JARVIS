@@ -73,6 +73,55 @@ class ModelRouter:
         self._gemini = None
         self._openrouter = None
         self._provider = "groq"
+        # Por qué falló cada proveedor en el último intento.
+        #
+        # Antes no existía: cada _chat_X devolvía None al fallar y el router
+        # anotaba solo el NOMBRE ("groq"). El motivo estaba a una línea de
+        # distancia, en el log, y se tiraba. Por eso el mensaje final solo
+        # podía decir "todos fallaron, mire el registro", que no es un
+        # diagnóstico: es devolver el problema al que pregunta.
+        self._errores: dict[str, str] = {}
+
+    def _fallo(self, nombre: str, exc: Exception | str) -> None:
+        texto = str(exc)
+        self._errores[nombre] = texto[:200]
+        log.warning("%s falló: %s", nombre, texto)
+
+    # Traduce el fallo del proveedor a algo que el señor pueda arreglar. El
+    # detalle técnico se queda en el log; aquí solo se dice la causa, porque
+    # "mire el registro" no es una respuesta: es devolverle el problema a quien
+    # ha preguntado. Y la clave de la API nunca sale de aquí.
+    _MOTIVOS = {
+        "auth_error": "la clave no es válida o está caducada",
+        "rate_limited": "se ha acabado la cuota o hay demasiado tráfico",
+        "not_found": "el modelo configurado no existe o ya no está disponible",
+        "unavailable": "su servicio está caído o no se le puede alcanzar",
+        "malformed": "el modelo ha devuelto algo que no se puede usar",
+        "timeout": "ha tardado demasiado y se ha cortado",
+    }
+
+    def _motivo(self, exc) -> str:
+        tipo = getattr(exc, "tipo", "") or ""
+        if tipo in self._MOTIVOS:
+            return self._MOTIVOS[tipo]
+        estado = getattr(exc, "estado", None)
+        if estado in (401, 403):
+            return self._MOTIVOS["auth_error"]
+        if estado == 429:
+            return self._MOTIVOS["rate_limited"]
+        if estado == 404:
+            return self._MOTIVOS["not_found"]
+        if estado in (500, 502, 503, 504):
+            return self._MOTIVOS["unavailable"]
+        texto = str(exc).lower()
+        if "api key" in texto or "unauthorized" in texto or "forbidden" in texto:
+            return self._MOTIVOS["auth_error"]
+        if "connection" in texto or "resolve" in texto or "network" in texto \
+                or "dns" in texto or "unreachable" in texto:
+            return "no se le puede alcanzar desde aquí"
+        if "rate" in texto or "quota" in texto or "limit" in texto:
+            return self._MOTIVOS["rate_limited"]
+        return "ha fallado sin motivo claro"
 
     # ---------- clientes (init perezoso, cada proveedor independiente) ----------
     def groq(self):
@@ -163,6 +212,8 @@ class ModelRouter:
                 _GROQ_COOLDOWN = time.time() + espera
                 log.warning("Groq sin cuota: %d s de espera (intento %d).",
                             espera, _GROQ_PENALTY)
+                self._fallo("Groq", f"sin cuota (límite de la API), "
+                                    f"esperando {espera} s")
                 return None
             # El prompt no cabe (p. ej. historial con un volcado grande): se
             # reintenta UNA vez con el sistema y los dos ultimos intercambios.
@@ -179,6 +230,7 @@ class ModelRouter:
                     return r.get("texto")
                 except AIError as e2:
                     log.warning("Groq encogido fallo: %s", e2)
+                    self._fallo("Groq", f"la pregunta no cabe ni encogida: {e2}")
                     return None
             # gpt-oss intenta function-calling nativo y Groq lo rechaza con 400
             # ("Tool choice is none, but model called a tool"). Las herramientas
@@ -188,11 +240,14 @@ class ModelRouter:
             if e.estado == 400 and "tool" in str(e).lower():
                 log.warning("Groq: el modelo insiste en llamar a una "
                             "herramienta; se pasa al siguiente proveedor.")
+                self._fallo("Groq", "el modelo pidió usar una herramienta y "
+                                    "este camino no se las pasa")
                 return None
             # Un fallo que no es de cuota no demuestra nada sobre el limite,
             # asi que no se penaliza: se prueba normal.
             _GROQ_COOLDOWN = 0.0
             log.warning("Groq fallo: %s", e)
+            self._fallo("Groq", self._motivo(e))
             return None
         log.info("Groq OK en %.2fs", time.time() - start)
         # Si va bien se olvida el castigo anterior: un 429 viejo no debe seguir
@@ -226,7 +281,7 @@ class ModelRouter:
             log.info("Gemini OK en %.2fs", time.time() - start)
             return response.text
         except Exception as e:
-            log.warning("Gemini falló: %s", e)
+            self._fallo("Gemini", e)
             return None
 
     def _chat_openrouter(self, messages: list[dict], vision: Optional[str] = None) -> Optional[str]:
@@ -242,7 +297,7 @@ class ModelRouter:
             log.info("OpenRouter OK en %.2fs", time.time() - start)
             return completion.choices[0].message.content
         except Exception as e:
-            log.warning("OpenRouter falló: %s", e)
+            self._fallo("OpenRouter", e)
             return None
 
     def _chat_ollama(self, messages: list[dict]) -> Optional[str]:
@@ -281,7 +336,24 @@ class ModelRouter:
                 messages, tarea, vision=vision, segundos=segundos,
                 stream=bool(stream) and Config.LLM_STREAM_ENABLED)
             if resultado.get("provider") != "opencode":
-                return resultado
+                # Un resultado SIN texto no es una respuesta: es un fallo. Y un
+                # fallo del gateway no debe ser el final del camino, porque el
+                # camino viejo existe justo para cuando el gateway falla.
+                #
+                # Antes solo se caía a `_respond_legacy` si el gateway LANZABA
+                # una excepción. Si el gateway devolvía {"ok": false} —que es
+                # lo que hace cuando los proveedores fallan o se acaba el
+                # tiempo— se devolvía tal cual y la red de seguridad no se
+                # probaba nunca. Un fallo del gateway (streaming, registro,
+                # reloj) dejó a JARVIS sin poder hablar aunque el camino
+                # antiguo hubiera contestado.
+                if (resultado.get("ok") is False
+                        or not str(resultado.get("reply") or "").strip()):
+                    log.warning("el AI Gateway no devolvio texto (%s); "
+                                "se prueba el camino viejo.",
+                                resultado.get("provider"))
+                else:
+                    return resultado
         except Exception as exc:  # noqa: BLE001 - el gateway no puede romper la voz
             log.warning("el AI Gateway no respondio (%s); se usa el camino viejo.",
                         exc)
@@ -407,17 +479,82 @@ class ModelRouter:
         # El mensaje dice que FALLO, no que no hay modelos. Antes decia "sin
         # modelos disponibles" tambien cuando las claves estaban bien y lo
         # que faltaba era un host que no contestaba, que es lo que confundia.
-        return {"reply": "Mis disculpas, señor. He intentado con "
-                        + ", ".join(probados)
-                        + " y los tres han fallado; esto no es que no tenga "
-                          "modelos, es que no he podido hablar con ellos. "
-                          "Mire el registro del servidor y ya lo veré.",
+        return {"reply": _mensaje_sin_modelos(probados, self._errores, red),
                 "provider": "none", "fallback": True,
-                "fallos": fallos, "red": red}
+                "fallos": fallos, "red": red,
+                "errores": dict(self._errores)}
 
 
 _internet_cache = {"t": 0.0, "v": False}
 _INTERNET_TTL = 10.0
+
+
+# "groq-light" y "groq" son el MISMO servicio con distinto modelo. En la lista
+# de probados salían los dos como si fueran dos proveedores distintos, y el
+# mensaje decía "los tres han fallado" con la palabra "tres" escrita a mano:
+# con una sola clave puesta la frase era falsa de arriba abajo.
+_PROVEEDOR_DE = {
+    "groq-light": "Groq", "groq": "Groq",
+    "gemini": "Gemini", "openrouter": "OpenRouter", "ollama": "Ollama",
+}
+
+
+def _mensaje_sin_modelos(probados: list, errores: dict, hay_red: bool) -> str:
+    """Dice qué se intentó y POR QUÉ falló, no solo que falló.
+
+    Se agrupan por servicio (Groq y groq-light son el mismo) y se cuenta con
+    la lista real, no con un número escrito de memoria. El motivo sale de lo
+    que registró el router: sin eso, lo único que se podía decir era "mire el
+    registro del servidor", que no es un diagnóstico sino devolverle el
+    problema al que ha preguntado.
+    """
+    nombres: list[str] = []
+    for clave in probados:
+        nombre = _PROVEEDOR_DE.get(clave, clave)
+        if nombre not in nombres:
+            nombres.append(nombre)
+
+    if not nombres:
+        return ("No he podido hablar con ningún modelo, señor. "
+                "El detalle está en el registro del servidor.")
+
+    # Un motivo por servicio: si se probaron dos modelos del mismo, vale el
+    # último que falló.
+    detalles = []
+    for nombre in nombres:
+        motivo = errores.get(nombre)
+        if motivo:
+            detalles.append(f"{nombre}: {motivo}")
+
+    # "Groq, Gemini y OpenRouter": los nombres propios no llevan artículo, y la
+    # enumeración lleva "y" antes del último. Con una frase así no hay que
+    # contar nada de palabra, que es donde antes se mentía ("los tres" con una
+    # sola clave puesta).
+    def _lista(items: list) -> str:
+        if len(items) == 1:
+            return items[0]
+        return ", ".join(items[:-1]) + " y " + items[-1]
+
+    cabeza = (f"Mis disculpas, señor. {_lista(nombres)} "
+              f"{'falló' if len(nombres) == 1 else 'fallaron'} "
+              f"y no he podido obtener respuesta.")
+
+    if detalles:
+        cuerpo = cabeza + " " + "; ".join(detalles) + "."
+    elif not hay_red:
+        cuerpo = cabeza + " Además, desde aquí no hay salida a internet."
+    else:
+        cuerpo = cabeza + " El detalle está en el registro del servidor."
+
+    # Una pista accionable, y solo una: la causa más común y la más fácil de
+    # arreglar por su cuenta.
+    if any("clave" in d for d in detalles):
+        cuerpo += " Revise las claves en /setup."
+    elif any("cuota" in d or "tráfico" in d for d in detalles):
+        cuerpo += " Puede esperar un rato o revisar su cuota."
+    elif any("alcanzar" in d for d in detalles):
+        cuerpo += " Compruebe la conexión del servidor."
+    return cuerpo
 
 # Cualquier respuesta HTTP vale como "hay internet", included el error. Lo que
 # dice que no hay red es que no se pueda ni resolver el nombre ni conectar.
