@@ -10,14 +10,37 @@ import subprocess
 
 log = logging.getLogger("tools.syshealth")
 
+# Para no avisar de "no hay PowerShell" una vez por cada consulta.
+_AVISO_PS = False
+
 
 def _ps(script: str, timeout: int = 60) -> str:
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
-                        "-ExecutionPolicy", "Bypass", "-Command", script],
-                       capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=timeout,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return (r.stdout or "").strip()
+    """Ejecuta un trozo de PowerShell y devuelve lo que imprima.
+
+    En Linux —y Docker lo es— no hay `powershell` en el PATH: la llamada
+    lanzaba FileNotFoundError y la reventa subía hasta el conversational. Aquí
+    se devuelve "" y se avisa una vez por sesión: quien llama recibe una cadena
+    vacía, que es lo que ya recibía cuando la consulta de PowerShell fallaba,
+    y decide igual. Lo contrario es que "cómo va el equipo" fuera un error en
+    el contenedor y no lo fuera en el portátil.
+    """
+    global _AVISO_PS
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                            "-ExecutionPolicy", "Bypass", "-Command", script],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return (r.stdout or "").strip()
+    except FileNotFoundError:
+        if not _AVISO_PS:
+            _AVISO_PS = True
+            log.info("PowerShell no está en este sistema (normal en Docker): "
+                     "las consultas de Windows devolvieron vacío.")
+        return ""
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.debug("consulta de PowerShell: %s", exc)
+        return ""
 
 
 def health_overview_handler(params: dict) -> dict:
@@ -116,24 +139,65 @@ def win_updates_handler(params: dict) -> dict:
 
 
 def perf_advisor_handler(params: dict) -> dict:
-    """Rendimiento + consejos accionables (reglas sobre CPU/RAM/disco/procesos)."""
-    cpu = _ps("(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average")
-    ram = _ps("$o=Get-CimInstance Win32_OperatingSystem; [math]::Round(100*($o.TotalVisibleMemorySize-$o.FreePhysicalMemory)/$o.TotalVisibleMemorySize,0)")
-    top = _ps("Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Name,CPU | ForEach-Object { \"$($_.Name):$([math]::Round($_.CPU,0))s\" }")
-    startup = _ps("try { (Get-CimInstance Win32_StartupCommand | Measure-Object).Count } catch { '?' }")
-    disks = _ps("Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name + ':' + [math]::Round(100*$_.Used/($_.Used+$_.Free),0) + '%' }")
+    """Rendimiento + consejos accionables (reglas sobre CPU/RAM/disco/procesos).
+
+    OJO: esto eran CINCO llamadas a `_ps()`, es decir cinco arranques de
+    PowerShell. Cada uno cuesta unos 450 ms solo en arrancar, así que la
+    respuesta se iba en 2,4 segundos para leer cinco números. Ahora va todo en
+    un único proceso y se leen por clave. De 2,4 s a menos de medio segundo.
+    """
+    # Todo en un powershell. Cada dato sale con su nombre delante ("CPU=42") y
+    # se separa por líneas: así el orden da igual y no hay que depender de
+    # cuántas cosas devuelva cada consulta.
+    guion = (
+        "$cpu=(Get-CimInstance Win32_Processor | "
+        "Measure-Object -Property LoadPercentage -Average).Average;"
+        "$o=Get-CimInstance Win32_OperatingSystem;"
+        "$ram=[math]::Round(100*($o.TotalVisibleMemorySize-$o.FreePhysicalMemory)"
+        "/$o.TotalVisibleMemorySize,0);"
+        "$top=(Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 "
+        "Name,CPU | ForEach-Object { $_.Name + ':' + [math]::Round($_.CPU,0) + 's' }) "
+        "-join ' | ';"
+        "try { $st=(Get-CimInstance Win32_StartupCommand | Measure-Object).Count } "
+        "catch { $st='?' };"
+        "$disks=(Get-PSDrive -PSProvider FileSystem | ForEach-Object { "
+        "$_.Name + ':' + [math]::Round(100*$_.Used/($_.Used+$_.Free),0) + '%' }) "
+        "-join ' | ';"
+        "'CPU=' + $cpu;"
+        "'RAM=' + $ram;"
+        "'TOP=' + $top;"
+        "'STARTUP=' + $st;"
+        "'DISKS=' + $disks"
+    )
+    salida = _ps(guion)
+    valores = {}
+    for linea in salida.splitlines():
+        if "=" in linea:
+            clave, _, valor = linea.partition("=")
+            valores[clave.strip().upper()] = valor.strip()
+
+    cpu = valores.get("CPU", "")
+    ram = valores.get("RAM", "")
+    top = valores.get("TOP", "")
+    startup = valores.get("STARTUP", "")
+    disks = valores.get("DISKS", "")
+
     tips = []
-    try:
-        for d in disks.splitlines():
-            name, pct = d.split(":")
+    for d in disks.split("|"):
+        d = d.strip()
+        if ":" not in d:
+            continue
+        try:
+            name, _, pct = d.rpartition(":")
             if int(pct.rstrip("%")) >= 90:
-                tips.append(f"Disco {name}: al {pct}: libera espacio o el sistema se arrastra.")
-    except Exception:
-        pass
+                tips.append(f"Disco {name}: al {pct}: libera espacio o el "
+                            f"sistema se arrastra.")
+        except (ValueError, TypeError):
+            continue
     try:
         if int(str(ram).strip()) >= 85:
             tips.append("RAM por encima del 85%: cierra pestañas/apps pesadas.")
-    except Exception:
+    except (ValueError, TypeError):
         pass
     return {"cpu_avg": cpu, "ram_pct": ram, "top_cpu": top,
             "startup_items": startup, "disks": disks, "tips": tips}

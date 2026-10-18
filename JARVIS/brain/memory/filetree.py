@@ -150,11 +150,16 @@ def search(query: str, limit: int = 8) -> list:
     return out
 
 
-def find_fast(query: str, limit: int = 6, budget_sec: float = 8.0) -> list:
+def find_fast(query: str, limit: int = 6, budget_sec: float = 4.0) -> list:
     """Busca en disco ahora mismo, sin esperar al índice.
 
     Primero el índice (instantáneo) y, si no acierta, recorre las carpetas
     personales con presupuesto de tiempo para responder enseguida.
+
+    El presupuesto bajó de 8 a 4 segundos. Ocho segundos de silencio después de
+    "busca el fichero X" es una eternidad para quien está delante, y el índice
+    ya se ha consultado antes de llegar aquí: si en 4 segundos no aparece, no
+    va a aparecer.
     """
     hits = search(query, limit=limit)
     if hits:
@@ -169,10 +174,23 @@ def find_fast(query: str, limit: int = 6, budget_sec: float = 8.0) -> list:
     low_q = q.lower()
     low_b = base.lower()
     has_ext = "." in base
-    roots = [os.path.expanduser("~") + "\\Desktop",
-             os.path.expanduser("~") + "\\Documents",
-             os.path.expanduser("~") + "\\Downloads",
-             os.path.expanduser("~") + "\\OneDrive"]
+    # OJO: estas rutas estaban escritas con una barra invertida pegada al
+    # final del nombre. En Linux eso da "/root\Desktop", una sola palabra con
+    # una barra dentro que no existe: `isdir` say No, la carpeta se descartaba
+    # y "busca el fichero que tengo en el escritorio" dentro de Docker no
+    # encontraba NADA, sin decir nada. Ahora se arman con `os.path.join`, que
+    # pone el separador que toca, y se añaden las de Linux.
+    home = os.path.expanduser("~")
+    roots = [os.path.join(home, d) for d in
+             ("Desktop", "Documents", "Downloads", "OneDrive")]
+    if os.name != "nt":
+        # En Linux las carpetas personales suelen venir por XDG, no con
+        # nombre en inglés dentro de /root.
+        for var in ("XDG_DESKTOP_DIR", "XDG_DOCUMENTS_DIR", "XDG_DOWNLOAD_DIR"):
+            valor = os.environ.get(var, "")
+            if valor:
+                roots.append(valor)
+        roots += [os.path.join(home, d) for d in ("Escritorio", "Documentos", "Descargas")]
     for d in list(get_roots()):
         if os.path.isdir(d) and d not in roots:
             roots.append(d)

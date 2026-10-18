@@ -9,6 +9,8 @@
 > python test_fuzz_conversacion.py            # 790 mensajes, todo externo fallando
 > python test_endpoints_vivos.py              # que las rutas funciona, no que existan
 > python test_plazo_investigacion.py          # cuánto se puede llegar a tardar
+> python test_tiempos_respuesta.py            # que ningún mensaje tarde medio segundo
+> python test_rutas_crossplatform.py          # que funcione en Windows y en Docker
 > ```
 
 ---
@@ -138,6 +140,70 @@ la lista tiene algo dentro:
 En Docker `VBoxManage` no existe y falla enseguida, así que ahí el coste era
 menor — pero el defecto era el mismo, y en cualquier equipo con VirtualBox
 roto era demoledor.
+
+---
+
+## En Docker, la búsqueda de ficheros no encontraba nada
+
+`filetree.find_fast()` armaba sus carpetas personales pegando una barra
+invertida al final del nombre:
+
+```python
+roots = [os.path.expanduser("~") + "\\Desktop",     # C:\Users\Lucas\Desktop  ✓
+         os.path.expanduser("~") + "\\Documents",   # /root\Desktop            ✗
+         ...]
+```
+
+En Windows correcto. En Linux, `/root\Desktop` es **una sola palabra con una
+barra dentro**: no existe, `isdir()` dice que no, la carpeta se descarta sin
+decir nada y "busca el fichero que tengo en el escritorio" dentro del
+contenedor no encontraba jamás lo que fuera.
+
+Sin error, sin aviso, sin log. Solo que JARVIS decía que no lo encontraba
+cuando **nunca lo había buscado**.
+
+Ahora se arman con `os.path.join`, y en Linux se añaden las carpetas XDG y las
+de nombre castellano (`Escritorio`, `Documentos`, `Descargas`), que es como se
+llaman en un escritorio en español. El presupuesto de búsqueda bajó de 8 a 4
+segundos: ocho de silencio después de "busca el fichero X" es una eternidad.
+
+---
+
+## El resto de los retardos eran caché fría
+
+Un barrido de tiempos sobre 21 mensajes encuentra cosas por encima del medio
+segundo. Al perfilar cada uno por separado:
+
+| Mensaje | En el barrido | Calentado |
+|---|---|---|
+| "cuéntame un chiste" | 3,0 s | 0,018 s |
+| "resume mi día" | 2,8 s | 0,014 s |
+| "cuánto gas queda" | 1,0 s | 0,016 s |
+| "cómo va el equipo" | 3,4 s | 2,5 s |
+
+Los tres primeros eran la primera vez que se tocaba cada camino. **No eran
+bugs**, y solo se vio al medir en vez de mirar tiempos sueltos: una prueba que
+mide una sola vez está midiendo el arranque, no el mensaje.
+
+---
+
+## "Cómo va el equipo" no contestaba en Docker
+
+Dos cosas en el mismo sitio.
+
+**Una que reventaba.** `syshealth_tools._ps()` llama a `powershell`, que no
+existe en Linux — y Docker es Linux. La llamada lanzaba `FileNotFoundError`
+**sin que nadie lo capturara**, así que subía hasta el conversacional. En el
+portátil "cómo va el equipo" contestaba y dentro del contenedor era un error.
+
+**Y una que tardaba.** `perf_advisor_handler` lanzaba **cinco** procesos de
+PowerShell para leer cinco números, y cada arranque cuesta ~450 ms. Ahora va
+todo en uno:
+
+| | Antes | Después |
+|---|---|---|
+| Mensaje más lento (calentado) | 2.394 ms | **337 ms** |
+| Procesos de PowerShell por respuesta | 5 | 1 |
 
 ---
 
