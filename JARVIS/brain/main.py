@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from config import Config, BRAIN_DIR, DATA_DIR
 from memory import sqlite_store as db
+import context_engine
 from memory.semantic import semantic_memory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -86,6 +87,7 @@ class Brain:
         self.tools = None
         self.proactive = None
         self.voice = None
+        self.dev = None
         self.screen_watcher = None
         self._screen_b64 = None
         self._proactive_thread: Optional[threading.Thread] = None
@@ -100,6 +102,17 @@ class Brain:
         # Ultimas tareas terminadas, para reintentarlas desde Live. Solo
         # memoria de sesion: al reiniciar se vacia, y es honesto decirlo.
         self._live_done = deque(maxlen=20)
+        # Suscriptores del bus: el centro de mando se engancha aqui para
+        # convertir eventos reales en notificaciones e incidentes. No es un
+        # bus nuevo: es el mismo que ya usan Live, Discord y la voz.
+        self._suscriptores_eventos: list = []
+
+    def _notificar_suscriptores(self, msg: dict) -> None:
+        for fn in list(self._suscriptores_eventos):
+            try:
+                fn(msg)
+            except Exception as e:  # noqa: BLE001 - un suscriptor roto no corta el bus
+                log.debug("suscriptor de evento falló: %s", e)
 
     # ---------------- emisor de eventos a la app ----------------
     def record_live_event(self, msg: dict) -> dict | None:
@@ -199,6 +212,7 @@ class Brain:
         """Thread-safe broadcast y registro limitado para JARVIS Live."""
         if not isinstance(msg, dict):
             return
+        self._notificar_suscriptores(msg)
         event = self.record_live_event(msg)
         outgoing = {**msg, "live_event": event} if event else msg
         self._broadcast_to_loop(outgoing)
@@ -431,6 +445,10 @@ def _prompt_de_servidor(tools_desc: str) -> str:
         "- Desarrollar proyectos: si el señor pide crear, desarrollar o\n"
         "  programar algo (una web, una app, un script), USA opencode_build.\n"
         "  Nunca escribas el codigo tu en el chat: el avance se ve en paneles.\n"
+        "- Cambiar JARVIS o un proyecto que ya existe: USA opencode_task_create\n"
+        "  con la idea tal cual la dice el señor. JARVIS analiza el proyecto,\n"
+        "  preve los riesgos y enseña el plan; el señor lo aprueba en\n"
+        "  JARVIS Live (/live) y entonces se lo encarga a OpenCode.\n"
         "- Tu puesto de mando: http://127.0.0.1:8000/config\n"
         "- Recordar conversaciones largas y consultar lo indexado.\n\n"
         "SIGUE EL HILO (OBLIGATORIO):\n"
@@ -504,6 +522,10 @@ def _prompt_de_escritorio_real(tools_desc: str) -> str:
         "- Desarrollar proyectos: si el señor pide crear, desarrollar o\n"
         "  programar algo (una web, una app, un script), USA opencode_build.\n"
         "  Nunca escribas el codigo tu en el chat: el avance se ve en paneles.\n"
+        "- Cambiar JARVIS o un proyecto que ya existe: USA opencode_task_create\n"
+        "  con la idea tal cual la dice el señor. JARVIS analiza el proyecto,\n"
+        "  preve los riesgos y enseña el plan; el señor lo aprueba en\n"
+        "  JARVIS Live (/live) y entonces se lo encarga a OpenCode.\n"
         "- Abrir su puesto de mando: la página de configuración vive en\n"
         "  http://127.0.0.1:8000/config (pestañas: identidad, voz, orbe,\n"
         "  movimiento, automatizaciones, claves y sistema). Si le pide abrir\n"
@@ -665,6 +687,16 @@ def _init_services() -> None:
     from vision.capture import ScreenWatcher
 
     brain.router = ModelRouter()
+    # AI Gateway: el mismo router, ahora con el gateway delante. El gateway es
+    # quien elige modelo, reintenta, avisa al bus (llm.*) y guarda las metricas;
+    # el bus es Brain.emit, el de siempre. Si algo falla al arrancar, JARVIS
+    # sigue contestando por el camino viejo.
+    try:
+        from ai_gateway import gateway as _ai_gateway
+
+        _ai_gateway.iniciar(brain.router)
+    except Exception as e:
+        log.warning("el AI Gateway no se pudo iniciar: %s", e)
     brain.risk = RiskEngine(emit=brain.emit,
                             confirmation_timeout=Config.CONFIRMATION_TIMEOUT_SECONDS)
     brain.tools = ToolManager(brain.risk)
@@ -675,6 +707,27 @@ def _init_services() -> None:
         _oc.set_progress_emit(brain.emit)
     except Exception as e:
         log.debug("opencode progress: %s", e)
+    # Orquestador de desarrollo con OpenCode: idea -> plan -> riesgos ->
+    # aprobacion -> ejecucion, con permisos y preguntas en JARVIS Live.
+    try:
+        from orchestrator.manager import get_manager as _get_dev_manager
+        brain.dev = _get_dev_manager(brain.emit)
+        # Las tareas que quedaron a medias al apagar se explican al señor y
+        # se ofrecen para continuar, pero no se relanzan solas: eso duplicaría
+        # cambios que OpenCode puede haber dejado a medias.
+        threading.Thread(target=brain.dev.recuperar, daemon=True,
+                         name="dev-recuperacion").start()
+    except Exception as e:
+        log.debug("orquestador de desarrollo: %s", e)
+    # Centro de mando: traduce los eventos del bus en notificaciones e
+    # incidentes, y trae los fallos que ya guarda el autocorrector.
+    try:
+        from command import notify as _notify
+        _notify.instalar(brain)
+        threading.Thread(target=_notify.incidentes_del_autocorrector, daemon=True,
+                         name="cmd-incidentes").start()
+    except Exception as e:
+        log.debug("centro de mando: %s", e)
     brain.proactive = ProactiveEngine(
         emit=brain.emit,
         run_tool=lambda name, params: _run_tool_sync(name, params),
@@ -2377,6 +2430,21 @@ def handle_user_message(text: str, input_mode: str = "text", ws: Optional[WebSoc
     respuesta por su propio canal, p. ej. el puente de WhatsApp).
     """
     brain._conversation_count += 1
+    # Si OpenCode está esperando una decisión (permiso o pregunta), el mensaje
+    # puede ser la respuesta. Solo se acepta si encaja con una opción o si el
+    # señor lo pide con "responde:"; si no, sigue su camino normal.
+    try:
+        from orchestrator import inbox as _dev_inbox
+        directa = _dev_inbox.responder_desde_chat(text)
+    except Exception as _e:
+        log.debug("respuesta de desarrollo: %s", _e)
+        directa = None
+    if directa:
+        db.add_message("user", text)
+        db.add_message("assistant", directa)
+        if broadcast:
+            brain.emit({"type": "assistant_reply", "text": directa})
+        return directa
     try:
         reply = _handle(text, input_mode)
     except Exception as e:
@@ -3892,16 +3960,16 @@ def _handle(text: str, input_mode: str) -> str:
 
     # --- Apuntes de los cursos: si la pregunta va de un tema de sus
     # asignaturas, se le dan los pasajes reales para que responda con lo suyo
-    # y no con lo que se invente. ---
+    # y no con lo que se invente. Los recoge aqui y los pasa al Context Engine
+    # como pieza con nombre, en vez de pegarlos al prompt a pelo. ---
+    _ctx_apuntes = ""
     if _inyectar_apuntes(cleaned):
         try:
             from integrations import campus_apuntes as _ap_ctx
             _tema_ctx = _tema_de_la_pregunta(_sin_tildes(cleaned)) or cleaned
-            _ctx = _ap_ctx.contexto_para_modelo(_tema_ctx, limite=5)
-            if not _ctx:
-                _ctx = _ap_ctx.contexto_para_modelo(cleaned, limite=5)
-            if _ctx:
-                prompt_for_model = _ctx + "\n\n" + prompt_for_model
+            _ctx_apuntes = _ap_ctx.contexto_para_modelo(_tema_ctx, limite=5)
+            if not _ctx_apuntes:
+                _ctx_apuntes = _ap_ctx.contexto_para_modelo(cleaned, limite=5)
         except Exception as e:
             log.debug("contexto de apuntes: %s", e)
 
@@ -3920,52 +3988,27 @@ def _handle(text: str, input_mode: str) -> str:
     _ctx_n = 10 if _voice_mode else (7 if _fast else min(Config.CONTEXT_WINDOW_MESSAGES, 8))
     recent = db.get_recent_messages(_ctx_n)
 
-    _needs_recall = bool(_ancla_del_hilo(cleaned)) or _inyectar_apuntes(cleaned)
-    recalled = semantic_memory.recall_context(cleaned, limit=1 if _slim else 2) \
-        if Config.RECALL_ENABLED and _needs_recall else []
-    doc_hits = []
-    try:
-        import library as _lib
-        _asks_local_docs = bool(re.search(
-            r"\b(apuntes|notas|documentos?|archivos?|ficheros?|pdf|docx|"
-            r"biblioteca|nextcloud|nube)\b", cleaned, re.I))
-        if len(cleaned) >= 20 and _lib.stats().get("files", 0) > 0 \
-                and (_asks_local_docs or _inyectar_apuntes(cleaned)):
-            doc_hits = _lib.search_docs(cleaned, limit=2 if _slim else 3)
-    except Exception as e:
-        log.debug("docs recall: %s", e)
-    messages = [{"role": "system",
-                 "content": _build_system_prompt(prompt_for_model)}]
-    for m in recalled:
-        messages.append({"role": m.get("role", "user"), "content": f"[recuerdos]: {m['content']}"})
-    # Memoria persistente (Mem0 OSS). Va DESPUES del prompt de sistema y antes
-    # del historial, y va entre <relevant_memory>: el modelo tiene que poder
-    # distinguir "esto lo acaba de decir el senor" de "esto sabemos de el".
-    #
-    # Sin esas etiquetas, un recuerdo que dijera "ignora lo anterior" se leia
-    # como una instruccion, y eso es una inyeccion de prompt escrita por el
-    # propio sistema. para_el_prompt() devuelve "" si la memoria esta apagada
-    # o caida, y nunca lanza.
-    _mem_block = ""
-    if Config.MEMORY_ENABLED:
-        try:
-            from memory.manager import para_el_prompt
-            _mem_block = para_el_prompt(cleaned)
-        except Exception as e:                       # pragma: no cover
-            log.debug("memoria en el prompt: %s", e)
-    if _mem_block:
-        messages.append({"role": "user", "content": _mem_block})
-    for h in doc_hits:
-        messages.append({"role": "user",
-                         "content": f"[documento: {h['name']}]: {h['text']}"})
-    for m in recent:
-        messages.append({"role": m["role"], "content": m["content"]})
-    # Si la pregunta va suelta, se le recuerda de qué hablábamos. Sin esto, un
-    # 'y eso' se contestaba de lo que saliera, y el señor perdía el hilo.
+    # El Context Engine decide que entra: memoria, documentos, apuntes, hilo,
+    # mision activa, decisiones y estado del sistema, con presupuesto. El motor
+    # llama a los mismos sistemas de siempre (memoria semantica, Mem0,
+    # biblioteca, apuntes, orquestador); aqui solo se le pasa lo que este camino
+    # ya sabe.
     _ancla = _ancla_del_hilo(cleaned)
-    if _ancla:
-        messages.append({"role": "user", "content": _ancla})
-    messages.append({"role": "user", "content": prompt_for_model})
+    _ctx_motor = context_engine.construir(
+        cleaned,
+        prompt_sistema=_build_system_prompt(prompt_for_model),
+        prompt_usuario=prompt_for_model,
+        input_mode=input_mode,
+        recent_messages=recent,
+        ancla=_ancla,
+        apuntes_texto=_ctx_apuntes,
+        emit=brain.emit,
+    )
+    messages = _ctx_motor.mensajes
+    # Lo que se ha dejado fuera se avisa por el log, pero no se le da al modelo:
+    # el modelo no necesita saber lo que no ha recibido.
+    if _ctx_motor.descartado:
+        log.debug("contexto recortado: %s", "; ".join(_ctx_motor.descartado))
 
     # --- Model Router ---
     _heavy_verbs = ("plan", "pasos", "investiga", "analiza", "compara",
@@ -3978,8 +4021,14 @@ def _handle(text: str, input_mode: str) -> str:
         prompt_for_model += "\n[Responde en 1-2 frases, directo al dato.]"
     timing = time.time()
     _reloj = _reloj_de_espera()
+    # Por texto la respuesta se pide en streaming: cada trozo sale por el bus y
+    # JARVIS Live la escribe mientras se genera. Por voz NO: ahi hace falta el
+    # texto entero para hablarlo, y el TTS solo recibe la respuesta final.
+    _en_vivo = (input_mode in ("text", "live", "web", "") and not _voice_mode
+                and bool(Config.LLM_STREAM_ENABLED))
     result = brain.router.respond(messages, heavy=is_heavy and not _fast,
-                                  light=is_light or _fast, segundos=_reloj)
+                                  light=is_light or _fast, segundos=_reloj,
+                                  stream=_en_vivo)
     reply = result.get("reply", "")
     rounds = _parse_tool_plan(reply) if (reply or "").strip() else None
     if not rounds:
@@ -4516,21 +4565,81 @@ def _exige_token_o_url(req) -> bool:
         return False
 
 
+# Rutas que se sirven SIN token, y por que:
+#   - paginas HTML: no devuelven datos, y llevan el token inyectado para que
+#     sus propios fetch si lo manden;
+#   - /health: la usan Docker y el orquestador para saber si el proceso vive;
+#   - assets estaticos.
+# Todo lo demas que empieza por /api/ o /automatizaciones/ PIDE token.
+RUTAS_SIN_TOKEN = {
+    "/", "/health", "/healthz", "/live", "/ui", "/board", "/config", "/setup",
+    "/modo", "/mic", "/mic_audio", "/wa", "/docs", "/redoc", "/openapi.json",
+    "/favicon.ico",
+}
+PREFIJOS_SIN_TOKEN = ("/live/", "/ui/", "/board/", "/assets", "/static",
+                      "/favicon")
+
+
+@app.middleware("http")
+async def _token_en_las_api(request: Request, call_next):
+    """Ninguna ruta de la API se sirve sin token. Ni una.
+
+    Antes cada endpoint se protegia por su cuenta y se passo de largo media
+    docena: `/api/board/terminal` abria una shell de verdad, `/api/dev/tasks/.../
+    approve` lanzaba la mision y `/api/config` escribia la configuracion, todo
+    eso sin pedir nada. Con el puerto publicado en la LAN (docker-compose) eso
+    era reachable por cualquiera de la red.
+
+    Aqui se cierra de una vez y en un solo sitio. Se acepta el token en la
+    cabecera o en la query, porque hay descargas y <img> que no pueden mandar
+    cabeceras; y OPTIONS pasa siempre, que es el previo de CORS y no lleva
+    token. Un 401 claro tambien es mejor que un fallo raro dentro del endpoint.
+    """
+    ruta = request.url.path
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if ruta in RUTAS_SIN_TOKEN or any(ruta.startswith(p) for p in PREFIJOS_SIN_TOKEN):
+        return await call_next(request)
+    if not (ruta.startswith("/api/") or ruta.startswith("/automatizaciones/")):
+        return await call_next(request)
+    if _exige_token(request) or _exige_token_o_url(request):
+        return await call_next(request)
+    return JSONResponse({"ok": False, "error": "Falta el token de sesion."},
+                        status_code=401)
+
+
 def _inyecta_token(html: str) -> str:
     """Mete el token en la pagina para que sus fetch y sus WebSocket lo lleven.
 
     Va en una variable de window y no en el HTML visible, y solo se sirve a
     quien ya puede ver la pagina.
+
+    Ademas envuelve `window.fetch` para anadir la cabecera SOLO en lo que va a
+    las rutas propias del cerebro (/api/, /automatizaciones/). Estas paginas
+    tienen el JS escrito en linea y llamaban a la API sin cabeceras; cuando
+    paso a pedir token, sin esto se rompian el guardado de ajustes, la
+    importacion de claves y el cambio de modo. Ponerlo aqui y no en cada
+    llamada es lo que evita que la proxima pagina nueva vuelva a olvidarlo.
     """
     import auth as _auth
     try:
         t = _auth.token()
     except Exception:
         return html
-    frag = '<script>window.JARVIS_TOKEN=%s;window.JARVIS_TOKEN_URL=%s;</script>' % (
+    envuelve = (
+        "(function(f){if(!f)return;window.fetch=function(u,o){try{"
+        "var s=(typeof u==='string')?u:(u&&u.url)||'';"
+        "if(s.indexOf('/api/')>=0||s.indexOf('/automatizaciones/')>=0){"
+        "o=o||{};o.headers=new Headers(o.headers||{});"
+        "if(!o.headers.has('X-Jarvis-Token')){"
+        "o.headers.set('X-Jarvis-Token',window.JARVIS_TOKEN||'');}}"
+        "catch(e){}return f.call(window,u,o);};})(window.fetch);"
+    )
+    frag = ('<script>window.JARVIS_TOKEN=%s;window.JARVIS_TOKEN_URL=%s;%s</script>' % (
         json.dumps(t),
         json.dumps("?token=" + t),
-    )
+        envuelve,
+    ))
     # Justo despues de <head>, para que este disponible antes que el resto.
     for ancla in ("</head>", "<body"):
         i = html.find(ancla)
@@ -6230,7 +6339,10 @@ load();
 @app.get("/config")
 async def config_page():
     from fastapi.responses import HTMLResponse
-    return HTMLResponse(_CONFIG_PAGE)
+    # Esta pagina guarda ajustes, importa y exporta claves: sin token, al
+    # proteger /api/* se quedaba sin poder hacer nada. El token se inyecta
+    # (junto con el envoltorio de fetch) antes de devolverla.
+    return HTMLResponse(_inyecta_token(_CONFIG_PAGE))
 
 
 # ------------------------------------------------------------------ #
@@ -6763,7 +6875,7 @@ async def modo_page():
     brain para que valga igual en Windows, en un servidor y en Docker, donde
     no existe instalador gráfico al que añadirle una página."""
     from fastapi.responses import HTMLResponse
-    return HTMLResponse(_MODO_HTML)
+    return HTMLResponse(_inyecta_token(_MODO_HTML))
 
 
 @app.get("/setup")
@@ -6774,7 +6886,7 @@ async def setup_page():
     html = (_SETUP_HTML
             .replace("__OBL__", _tarjetas_setup(OBL, True))
             .replace("__OPC__", _tarjetas_setup(OPC, False)))
-    return HTMLResponse(html)
+    return HTMLResponse(_inyecta_token(html))
 
 # ------------------------------------------------------------------ #
 # Selector de modo (/modo)

@@ -27,7 +27,66 @@ _SCHEDULE_LOCK = Lock()
 def register(app) -> None:
     """Monta las rutas de JARVIS Live en el FastAPI existente."""
     app.include_router(router)
+    # El ciclo de desarrollo con OpenCode cuelga de aquí, con su propio router
+    # y su propio candado: si falla, JARVIS Live sigue funcionando igual.
+    try:
+        from orchestrator import routes as dev_routes
+        app.include_router(dev_routes.router)
+        log.info("Ciclo de desarrollo con OpenCode montado en /api/dev")
+    except Exception:
+        log.exception("no pude montar el ciclo de desarrollo con OpenCode")
+    try:
+        from command import routes as cmd_routes
+        app.include_router(cmd_routes.router)
+        log.info("Centro de mando montado en /api/cmd")
+    except Exception:
+        log.exception("no pude montar el centro de mando")
+    try:
+        from ai_gateway import routes as ai_routes
+        app.include_router(ai_routes.router)
+        log.info("AI Gateway montado en /api/ai")
+    except Exception:
+        log.exception("no pude montar el AI Gateway")
     log.info("Centro de operaciones JARVIS Live montado en /live")
+    _arrancar_gestores()
+
+
+def _arrancar_gestores() -> None:
+    """Engancha Agent Manager y Resource Manager entre sí y con el bus.
+
+    Se hace aquí porque este es el sitio donde ya se montan el resto de
+    sistemas del centro de mando. El enganche es corto y, si algo falla, JARVIS
+    sigue arrancando: un gestor que no está es un gestor que no decide, no un
+    cerebro que no arranca.
+    """
+    try:
+        import agent_manager as _agentes
+        import resource_manager as _recursos
+
+        try:
+            from main import brain
+
+            _agentes.conectar_bus(brain.emit)
+            _recursos.conectar(brain.emit)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("gestores sin bus por ahora: %s", exc)
+            _agentes.conectar_bus(lambda _e: None)
+            _recursos.conectar(lambda _e: None)
+
+        # El Resource Manager puede BAJAR el tope de trabajos a la vez, pero
+        # nunca subirlo por encima del que puso el señor.
+        _agentes.conectar_limite(_recursos.limite_concurrencia)
+
+        # Que se sepa qué se quedó a medias al reiniciar.
+        recup = _agentes.recuperar_al_arrancar()
+        if recup.get("marcados_atascados"):
+            log.info("Trabajos de agentes marcados como atascados al arrancar: %s",
+                     recup["marcados_atascados"])
+        _recursos.revisar(forzar=True)
+        log.info("Agent Manager y Resource Manager en marcha (nivel %s)",
+                 _recursos.nivel())
+    except Exception:  # noqa: BLE001
+        log.exception("no pude arrancar los gestores; JARVIS sigue sin ellos")
 
 
 def _authorized(request: Request) -> bool:
@@ -233,8 +292,12 @@ def _guardar_programadas(tasks: list) -> None:
         _save_tasks(tasks)
     try:
         despertar()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Las tareas ya estan guardadas en disco; esto solo las despierta para
+        # que arranquen ya. Si falla, la tarea existe y suena en su horario,
+        # asi que no se pierde nada: pero se anota, porque desde fuera parece
+        # que la tarea no se guardó y no es verdad.
+        log.debug("las tareas quedan sin despertar hasta el siguiente ciclo: %s", exc)
 
 
 def _read_recent_events(brain) -> list[dict]:
@@ -276,8 +339,12 @@ async def live_page(request: Request):
     if not index.is_file():
         raise HTTPException(status_code=503, detail="JARVIS Live no está instalado")
     html = index.read_text(encoding="utf-8")
-    bootstrap = "<script>window.JARVIS_TOKEN=" + json.dumps(token()) + ";</script>"
-    html = html.replace("</head>", bootstrap + "</head>", 1)
+    # live.js ya manda la cabecera en sus fetch, pero se inyecta tambien el
+    # envoltorio por si algun script nuevo de la pagina llama a la API sin
+    # usarla: es el mismo criterio que el resto de paginas del brain.
+    from main import _inyecta_token
+
+    return HTMLResponse(_inyecta_token(html), headers={"Cache-Control": "no-store"})
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 

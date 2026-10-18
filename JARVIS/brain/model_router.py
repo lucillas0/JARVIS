@@ -127,80 +127,80 @@ class ModelRouter:
     # ---------- llamadas por proveedor ----------
     def _chat_groq(self, messages: list[dict], vision: Optional[str] = None,
                    model: Optional[str] = None) -> Optional[str]:
-        # Si Groq acaba de decir que se le acab\u00f3 la cuota, no se vuelve a
-        # llamar. Antes se probaba dos veces (el modelo peque\u00f1o y el grande),
-        # las dos con el mismo problema, y se perd\u00edan hasta diez segundos
-        # antes de caer en otro proveedor. Con este aviso se va all\u00ed de una.
+        """Groq por su API oficial, a traves del proveedor del AI Gateway.
+
+        Antes esta funcion usaba el SDK de Groq. Ahora el mismo camino lo lleva
+        `ai_gateway.providers.groq`, que habla la API por HTTP: asi el gateway
+        puede emitir cada trozo por el bus, cortar a mitad y clasificar los
+        errores. No hay dosimplementaciones de Groq, solo una.
+        """
         global _GROQ_COOLDOWN, _GROQ_PENALTY
+        # Si Groq acaba de decir que se le acabó la cuota, no se vuelve a
+        # llamar. Antes se probaba dos veces (el modelo pequeño y el grande),
+        # las dos con el mismo problema, y se perdían hasta diez segundos
+        # antes de caer en otro proveedor.
         if _GROQ_COOLDOWN > time.time():
             return None
-        client = self.groq()
-        if not client:
+        if not _tiene_clave("groq"):
             return None
+        from ai_gateway.errors import AIError
+        from ai_gateway.providers import groq as _groq_api
+
         start = time.time()
+        modelo = model or Config.GROQ_MODEL_FAST
+        if vision:
+            modelo = Config.GROQ_MODEL_VISION or modelo
         try:
-            kwargs = {"model": model or Config.GROQ_MODEL_FAST,
-                      "messages": messages, "temperature": 0.7}
-            if vision:
-                kwargs["model"] = Config.GROQ_MODEL_VISION
-                kwargs["messages"] = _attach_vision(messages, vision)
-            try:
-                completion = client.chat.completions.create(**kwargs, timeout=_queda())
-            except Exception as e1:
-                # gpt-oss intenta function-calling nativo y Groq lo rechaza con
-                # 400 ("Tool choice is none, but model called a tool"). Reintentar
-                # con otro prompt no lo arregla: las herramientas no viajan en
-                # kwargs, las pone el propio modelo, asi que la segunda llamada
-                # falla igual y solo anade otro segundo de espera. Se avisa una
-                # vez y se cae al siguiente proveedor, que es lo que queda bien.
-                if "400" in str(e1) and "tool" in str(e1).lower():
-                    log.warning("Groq: el modelo insists en llamar a una "
-                        "herramienta; se pasa al siguiente proveedor.")
-                    return None
-                raise
-            log.info("Groq OK en %.2fs", time.time() - start)
-            # Si va bien se olvida el castigo anterior: un 429 viejo no debe
-            # seguir mandando en la espera cuando Groq ya responde.
-            if _GROQ_PENALTY:
-                _GROQ_PENALTY = 0
-            return completion.choices[0].message.content
-        except Exception as e:
-            # 429 por cuota (tokens por d\u00eda o por minuto): se apaga un rato
+            r = _groq_api.completar(messages, modelo, vision=vision,
+                                    timeout=_queda())
+        except AIError as e:
+            # 429 por cuota (tokens por día o por minuto): se apaga un rato
             # en vez de reintentar y perder el tiempo. El enfriamiento empieza
             # corto y sube solo si Groq sigue igual.
-            if "429" in str(e) or "rate_limit" in str(e).lower() \
-                    or "quota" in str(e).lower():
+            if e.tipo == "rate_limited":
                 _GROQ_PENALTY += 1
                 espera = _groq_enfriado(_GROQ_PENALTY)
                 _GROQ_COOLDOWN = time.time() + espera
                 log.warning("Groq sin cuota: %d s de espera (intento %d).",
                             espera, _GROQ_PENALTY)
-                log.warning("Groq falló: %s", e)
                 return None
-            if "413" in str(e) or "too large" in str(e).lower():
-                # El prompt no cabe (p. ej. historial con un volcado grande):
-                # se reintenta UNA vez con el sistema y los dos ultimos
-                # intercambios. Sin esto, cada peticion siguiente falla igual
-                # hasta que el historial rote y el cerebro queda mudo un rato.
+            # El prompt no cabe (p. ej. historial con un volcado grande): se
+            # reintenta UNA vez con el sistema y los dos ultimos intercambios.
+            # Sin esto, cada peticion siguiente falla igual hasta que el
+            # historial rote y el cerebro queda mudo un rato.
+            if "too large" in str(e).lower() or e.estado == 413:
                 log.warning("Groq: prompt demasiado grande, reintento encogido.")
                 try:
                     encogido = ([messages[0]] + messages[-4:]
                                 if len(messages) > 5 else messages[-4:])
-                    completion = client.chat.completions.create(
-                        model=kwargs.get("model"), messages=encogido,
-                        temperature=0.7, timeout=_queda())
+                    r = _groq_api.completar(encogido, modelo, timeout=_queda())
                     log.info("Groq OK en %.2fs (encogido)", time.time() - start)
-                    if _GROQ_PENALTY:
-                        _GROQ_PENALTY = 0
-                    return completion.choices[0].message.content
-                except Exception as e2:
+                    _GROQ_PENALTY = 0
+                    return r.get("texto")
+                except AIError as e2:
                     log.warning("Groq encogido fallo: %s", e2)
                     return None
-            # Un fallo que no es de cuota no demuestra nada sobre el
-            # limite, asi que no se penaliza: se prueba normal.
+            # gpt-oss intenta function-calling nativo y Groq lo rechaza con 400
+            # ("Tool choice is none, but model called a tool"). Las herramientas
+            # no viajan en los mensajes, las pone el propio modelo, asi que una
+            # segunda llamada falla igual: se avisa y se cae al siguiente
+            # proveedor, que es lo que queda bien.
+            if e.estado == 400 and "tool" in str(e).lower():
+                log.warning("Groq: el modelo insiste en llamar a una "
+                            "herramienta; se pasa al siguiente proveedor.")
+                return None
+            # Un fallo que no es de cuota no demuestra nada sobre el limite,
+            # asi que no se penaliza: se prueba normal.
             _GROQ_COOLDOWN = 0.0
-            log.warning("Groq falló: %s", e)
+            log.warning("Groq fallo: %s", e)
             return None
+        log.info("Groq OK en %.2fs", time.time() - start)
+        # Si va bien se olvida el castigo anterior: un 429 viejo no debe seguir
+        # mandando en la espera cuando Groq ya responde.
+        if _GROQ_PENALTY:
+            _GROQ_PENALTY = 0
+        return r.get("texto")
+
 
     def _chat_gemini(self, messages: list[dict], vision: Optional[str] = None) -> Optional[str]:
         model = self.gemini()
@@ -261,7 +261,35 @@ class ModelRouter:
 
     # ---------- fachada pública ----------
     def respond(self, messages: list[dict], heavy: bool = False, vision: Optional[str] = None,
-                light: bool = False, segundos: float = 0.0) -> dict:
+                light: bool = False, segundos: float = 0.0,
+                stream: bool = False) -> dict:
+        """Punto de entrada de siempre: lo llama todo el cerebro.
+
+        Ahora pasa por el AI Gateway, que es quien elige modelo, hace los
+        reintentos, avisa al bus y guarda las metricas. La firma y el
+        diccionario que devuelve son los de siempre, asi que los seis sitios
+        que lo llaman (conversacion, voz, Discord, proactive, tool loop) no se
+        han tocado. Si el gateway no esta disponible, sigue el camino viejo.
+        """
+        try:
+            from ai_gateway import gateway as _gateway
+            from ai_gateway import registry as _registry
+
+            tarea = _registry.REASONING if heavy else (
+                _registry.FAST if (light and not vision) else _registry.GENERAL)
+            resultado = _gateway.instancia(self).chat(
+                messages, tarea, vision=vision, segundos=segundos,
+                stream=bool(stream) and Config.LLM_STREAM_ENABLED)
+            if resultado.get("provider") != "opencode":
+                return resultado
+        except Exception as exc:  # noqa: BLE001 - el gateway no puede romper la voz
+            log.warning("el AI Gateway no respondio (%s); se usa el camino viejo.",
+                        exc)
+        return self._respond_legacy(messages, heavy=heavy, vision=vision,
+                                    light=light, segundos=segundos)
+
+    def _respond_legacy(self, messages: list[dict], heavy: bool = False, vision: Optional[str] = None,
+                        light: bool = False, segundos: float = 0.0) -> dict:
         """Devuelve {'reply': str, 'provider': str, 'fallback': bool}.
 
         light=True (mensajes cortos cotidianos) → Groq pequeño primero.

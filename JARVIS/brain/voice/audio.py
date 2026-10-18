@@ -239,8 +239,19 @@ class AudioEngine:
 
     # ---------------- reproducción ----------------
     def _playback_worker(self):
+        # Espera adaptativa. El bucle daba 50 vueltas por segundo las 24 horas
+        # del dia aunque no hubiera micro ni sonido: trabajo de CPU para nada.
+        # Ahora va a 100 ms cuando no hay nada que mirar y vuelve a 20 ms en
+        # cuanto hay algo. Con el micro ABIERTO se mantiene el ritmo corto
+        # siempre (no solo cuando hay muestras pendientes): si se dependiera
+        # de `_ww_history`, justo despues de vaciarlo el bucle se frenaria y
+        # la palabra clave responderia hasta 100 ms mas tarde.
         while True:
-            time.sleep(0.02)
+            micro_o_sonido = self._istream is not None or self._playing.is_set()
+            if micro_o_sonido or self._ww_history:
+                time.sleep(0.02)
+            else:
+                time.sleep(0.1)
             # Wake word: alimentar el detector con el audio acumulado.
             try:
                 if self.on_mic_chunk and self._ww_history:

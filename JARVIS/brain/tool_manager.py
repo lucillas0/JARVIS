@@ -95,7 +95,7 @@ class ToolManager:
 
     def _register_defaults(self) -> None:
         try:
-            from tools import system_tools, web_tools, virtualbox_tools, campus_tools, raspberry_tools, code_tools, syshealth_tools, auto_tools, git_tools, translate_tools, opencode_tools, diag_tools, install_tools, github_tools, mobile_tools, camera_tools, memory_tools
+            from tools import system_tools, web_tools, virtualbox_tools, campus_tools, raspberry_tools, code_tools, syshealth_tools, auto_tools, git_tools, translate_tools, opencode_tools, dev_task_tools, diag_tools, install_tools, github_tools, mobile_tools, camera_tools, memory_tools
             all_tools = (system_tools.TOOLS + system_tools.WINDOW_TOOLS +
                          system_tools.MEDIA_TOOLS + system_tools.NAV_TOOLS +
                          virtualbox_tools.VB_TOOLS +
@@ -107,6 +107,7 @@ class ToolManager:
                          git_tools.GIT_TOOLS +
                          translate_tools.TRANSLATE_TOOLS +
                          opencode_tools.OCODE_TOOLS +
+                         dev_task_tools.DEV_TOOLS +
                          diag_tools.DIAG_TOOLS +
                          install_tools.INSTALL_TOOLS +
                          github_tools.TOOLS +
@@ -248,8 +249,11 @@ class ToolManager:
                 _sh.report_error("missing_tool", f"No tengo herramienta: {name}",
                                  f"params={str(params)[:300]}")
                 _sh.fix_now()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # El fallo ya se le dice a quien lo pidió (return de abajo); esto
+                # es solo el diagnóstico extra. Si tampoco funciona, se anota:
+                # si no, una herramienta que desaparece deja de ser rastreable.
+                log.debug("autorreparacion no pudo registrar %s: %s", name, exc)
             return {"status": "failed", "message": f"No conozco esa herramienta: {name}"}
 
         self.risk.emit({"type": "action_status",
@@ -282,8 +286,9 @@ class ToolManager:
                 _sh.report_error(f"tool:{name}", e,
                                  f"params={str(params)[:300]}")
                 _sh.fix_now()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug("autorreparacion no pudo registrar el fallo de %s: %s",
+                          name, exc)
             return {"status": "failed", "message": str(e)}
 
 

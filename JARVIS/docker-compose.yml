@@ -51,8 +51,10 @@ services:
     restart: unless-stopped
 
     ports:
-      # Solo en la LAN. /health, /api/* y /ws no piden contrasena: si esto llega
-      # a internet, pon algo delante.
+      # Solo en la LAN. /api/* y /ws exigen el token de sesion (esta en
+      # /data/jarvis.token, y las paginas del propio JARVIS lo llevan
+      # inyectado, asi que se usan sin hacer nada). Las que NO piden nada son
+      # las paginas y /health. Si esto llega a internet, pon algo delante.
       - "${JARVIS_PUERTO:-8000}:8000"
 
     # Cada variable tiene su defecto, asi que esto arranca sin .env. El .env de
@@ -100,6 +102,23 @@ services:
       HA_URL: "${HA_URL:-}"
       HA_TOKEN: "${HA_TOKEN:-}"
       HA_INSEGURO: "${HA_INSEGURO:-0}"
+
+      # ---- Modelos de IA (AI Gateway) ------------------------------------
+      # La clave de Groq es la que mas usa JARVIS: el gateway la lee de aqui
+      # y, si no esta, cae en Gemini o en OpenRouter. El valor sale del .env
+      # del host; dentro de la imagen no hay ninguna clave.
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      GROQ_BASE_URL: "${GROQ_BASE_URL:-https://api.groq.com/openai/v1}"
+      GROQ_DEFAULT_MODEL: "${GROQ_DEFAULT_MODEL:-}"
+      GROQ_FAST_MODEL: "${GROQ_FAST_MODEL:-}"
+      GROQ_REASONING_MODEL: "${GROQ_REASONING_MODEL:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      # Tiempos del gateway. Si no se ponen, valen los de brain/config.py.
+      LLM_TIMEOUT_SECONDS: "${LLM_TIMEOUT_SECONDS:-45}"
+      LLM_MAX_RETRIES: "${LLM_MAX_RETRIES:-2}"
+      LLM_STREAM_ENABLED: "${LLM_STREAM_ENABLED:-1}"
+      LLM_TOOLS_ENABLED: "${LLM_TOOLS_ENABLED:-1}"
 
       # ---- Proyectos con OpenCode (autonomia) -----------------------------
       # Modelo que usa OpenCode para programar. Formato proveedor/modelo de

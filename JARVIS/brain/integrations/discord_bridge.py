@@ -184,6 +184,23 @@ class JarvisDiscordBridge:
             log.debug("discord selfheal: %s", e)
 
     # ---------------- enrutado ----------------
+    def _responder_desarrollo(self, texto: str):
+        """Si el mensaje contesta a una pregunta o permiso de OpenCode, lo envía.
+
+        Devuelve el texto de confirmación, o None si no era una respuesta. No
+        inventa decisiones: solo traduce lo que el propietario ha escrito.
+        """
+        try:
+            from orchestrator import inbox
+        except Exception as exc:  # noqa: BLE001 - sin orquestador, el chat sigue igual
+            log.debug("orquestador de desarrollo no disponible: %s", exc)
+            return None
+        try:
+            return inbox.responder_desde_chat(texto)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("respuesta de desarrollo: %s", exc)
+            return None
+
     async def _route(self, client, message):
         author = getattr(message, "author", None)
         try:
@@ -223,6 +240,14 @@ class JarvisDiscordBridge:
             return
         if _JOIN_RE.search(clean):
             await self._join_voice(message)
+            return
+
+        # Antes de llevar la palabra al modelo: si OpenCode está esperando una
+        # decisión (permiso o pregunta), este mensaje ES la respuesta y se
+        # entrega tal cual. Si no encaja, sigue su camino normal.
+        respuesta_dev = self._responder_desarrollo(clean)
+        if respuesta_dev is not None:
+            await self._send(message.channel, respuesta_dev)
             return
 
         payload = {"kind": "text", "text": clean, "voice_reply": False}

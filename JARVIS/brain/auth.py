@@ -31,10 +31,14 @@ Que protege y que no:
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Iterable
+
+log = logging.getLogger("auth")
 
 _TOKEN_CACHE: dict[str, str] = {}
 
@@ -53,14 +57,31 @@ def token() -> str:
     ruta = token_path()
     if ruta in _TOKEN_CACHE:
         return _TOKEN_CACHE[ruta]
-    try:
-        if ruta.is_file():
-            t = ruta.read_text(encoding="utf-8").strip()
-            if t:
-                _TOKEN_CACHE[ruta] = t
-                return t
-    except OSError:
-        pass
+    if ruta.is_file():
+        t = ""
+        # Se reintenta unas veces porque en Windows un antivirus o un indiceo
+        # pueden tener el fichero abierto un instante y eso no es un fallo de
+        # permisos. Lo que NO se hace nunca es seguir como si el fichero no
+        # existiera: generar otro token sobrescribiendo este deja fuera a
+        # todos los clientes que ya lo tenían (panel, móvil, scripts), sin
+        # aviso y sin vuelta atrás.
+        for intento in range(3):
+            try:
+                t = ruta.read_text(encoding="utf-8").strip()
+                break
+            except OSError as exc:
+                if intento == 2:
+                    log.error("el token existe pero no se puede leer: %s", exc)
+                    raise RuntimeError(
+                        f"el token existe pero no se puede leer ({exc}). "
+                        f"Arregla los permisos de {ruta} en vez de borrarlo: "
+                        f"si se regenera, JARVIS cierra la puerta a quien "
+                        f"ya la usaba."
+                    ) from exc
+                time.sleep(0.2)
+        if t:
+            _TOKEN_CACHE[ruta] = t
+            return t
     t = secrets.token_urlsafe(32)
     try:
         ruta.parent.mkdir(parents=True, exist_ok=True)
@@ -128,15 +149,18 @@ def token_por_cabecera(cabeceras) -> str | None:
         auth = cabeceras.get("authorization") or ""
         if auth.lower().startswith("bearer "):
             return auth[7:].strip()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Si las cabeceras vinieran corruptas, lo mas seguro es "no hay token"
+        # (rechazar) en vez de dejar pasar a alguien. Se deja rastro porque
+        # un `pass` aqui esconde justo el fallo que permitiria colar a uno.
+        log.warning("no se pudo leer la cabecera Authorization: %s", exc)
     # X-Jarvis-Token: <token>
     try:
         x = cabeceras.get("x-jarvis-token")
         if x:
             return x.strip()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("no se pudo leer X-Jarvis-Token: %s", exc)
     return None
 
 

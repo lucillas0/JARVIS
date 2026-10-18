@@ -81,19 +81,21 @@ class VoiceManager:
         try:
             from memory import sqlite_store as _db
             _db.set_setting("mic_muted", "1" if self.mic_muted else "0")
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Si no se guarda, el silencio dura hasta que se reinicie: el
+            # micro vuelve a abrir solo. Por eso se anota en vez de callar.
+            log.debug("no se pudo guardar el estado del micro: %s", exc)
         if self.mic_muted:
             try:
                 self.engine.end_recording()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug("no se pudo cerrar la grabacion al silenciar: %s", exc)
             self._wake_detected_at = 0.0
             try:
                 from voice import clap as _clap
                 _clap.detector().reiniciar()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug("el detector de palmas no se reinicio: %s", exc)
             self._set_state(IDLE)
         if not silent:
             self.emit({"type": "mic_state", "muted": self.mic_muted})
@@ -160,8 +162,9 @@ class VoiceManager:
                 if self.state == LISTENING:
                     try:
                         self.engine.end_recording()
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("no se pudo cerrar la grabacion (micro mudo): %s",
+                                  exc)
                     self._wake_detected_at = 0.0
                     self._set_state(IDLE)
                 if (self.state == SPEAKING and self._speech_queued.is_set()

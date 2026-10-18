@@ -26,12 +26,27 @@ function _jarvisWsUrl() {
 
   const memory = {};
 
+  // El token lo inyecta el servidor al servir la pagina (ver _inyecta_token en
+// brain/main.py). /api/board/* abre ficheros y una terminal, asi que sin token
+// no se sirven: es lo que evita que cualquiera de la LAN abra una shell en el
+// equipo del servidor. Mismo criterio que el puente de Electron
+// (app/ui/overlay/browser-bridge.js): cabecera y, por si acaso, tambien en la
+// query.
+function conToken(url) {
+    const t = (typeof window !== 'undefined' && window.JARVIS_TOKEN) || '';
+    if (!t || !url || url.indexOf('token=') >= 0) return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(t);
+  }
+
   async function get(url, body) {
-    const r = await fetch(url, body ? {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    } : undefined);
+    const cabeceras = {};
+    if (body) cabeceras['Content-Type'] = 'application/json';
+    const t = (typeof window !== 'undefined' && window.JARVIS_TOKEN) || '';
+    if (t) cabeceras['X-Jarvis-Token'] = t;
+    const destino = conToken(url);
+    const r = await fetch(destino, body
+      ? { method: 'POST', headers: cabeceras, body: JSON.stringify(body) }
+      : { headers: cabeceras });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }

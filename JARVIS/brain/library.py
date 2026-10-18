@@ -78,7 +78,198 @@ def stats() -> dict:
     return {"roots": m.get("roots", []),
             "files": len(files),
             "chunks": sum(int(v.get("chunks", 0)) for v in files.values()
-                          if isinstance(v, dict))}
+                          if isinstance(v, dict)),
+            "categorias": categorias_stats(),
+            "indexador": estado_indexador()}
+
+
+# --------------------------------------------------------------------------- #
+# Categorías (FASE 6).
+# El índice vectorial sigue siendo el de siempre; esto es lo que responde a
+# "¿qué hay de Docker?" o "muéstrame la documentación de este proyecto".
+#
+# La categoría se deduce de la RUTA del documento con reglas explícitas, no
+# con un modelo: es determinista, se puede explicar y no depende de que haya
+# un LLM. Y es revisable: `reasignar_categoria()` la cambia a mano y esa
+# gana, porque lo que dijo una persona manda sobre lo que deduce una regla.
+# --------------------------------------------------------------------------- #
+CATEGORIAS = ("arquitectura", "configuracion", "docker", "red", "servicios",
+              "convenciones", "troubleshooting", "seguridad", "infraestructura",
+              "proyecto", "documentacion", "otras")
+
+# (categoria, palabras que la identifican en la ruta o el nombre).
+_REGLAS = (
+    ("docker", ("docker", "compose", "dockerfile", "container")),
+    ("infraestructura", ("infra", "kubernetes", "k8s", "terraform", "ansible",
+                         "nginx", "systemd")),
+    ("red", ("red", "network", "firewall", "dns", "vpn", "proxy", "puerto",
+             "networking")),
+    ("seguridad", ("seguridad", "security", "auth", "permiso", "permission",
+                   "firewall", "secret", "cve")),
+    ("troubleshooting", ("troubleshoot", "diagnostico", "diagnostic", "error",
+                         "fallo", "problema", "faq", "solucion")),
+    ("configuracion", ("config", "settings", ".env", "variables", "ajustes")),
+    ("arquitectura", ("arquitectura", "architecture", "design", "diseño",
+                      "diagrama", "modelo", "schema")),
+    ("servicios", ("servicio", "service", "api", "endpoint", "servidor")),
+    ("convenciones", ("convencion", "convencion", "estilo", "style", "guide",
+                      "guia", "normas", "linter", "reglas")),
+    ("documentacion", ("readme", "doc", "manual", "guia", "guía", "wiki",
+                       "changelog")),
+)
+
+# Extensiones que delatan documentación.
+_ES_DOC = (".md", ".rst", ".txt", ".adoc", ".pdf", ".docx")
+
+
+def deducir_categoria(ruta: str) -> str:
+    """Categoría deducida de la ruta. Determinista y explicable."""
+    r = (ruta or "").replace("\\", "/").lower()
+    nombre = r.rsplit("/", 1)[-1]
+    for categoria, claves in _REGLAS:
+        for clave in claves:
+            if clave in nombre:
+                return categoria
+    for categoria, claves in _REGLAS:
+        for clave in claves:
+            if clave in r:
+                return categoria
+    # Un .md suelto dentro de una carpeta de proyecto es de ese proyecto.
+    if nombre.endswith(_ES_DOC):
+        partes = [p for p in r.split("/") if p]
+        if len(partes) > 1:
+            return "proyecto"
+    if r.endswith(_ES_DOC):
+        return "documentacion"
+    return "proyecto"
+
+
+def registrar_documento(ruta: str, categoria: str = "", proyecto: str = "",
+                        estado: str = "ok", detalle: str = "") -> dict:
+    """Anota un documento: su categoría, de qué proyecto es y si se pudo leer.
+
+    Se llama al indexar. Si el documento no se pudo leer, se guarda con
+    estado='ilegible' y su motivo: es preferible que se vea que hay algo que
+    no entró en el índice a que falte sin explicación.
+    """
+    if not ruta:
+        return {"ok": False, "error": "Falta la ruta."}
+    cat = categoria or deducir_categoria(ruta)
+    if cat not in CATEGORIAS:
+        cat = "otras"
+    try:
+        from memory import sqlite_store as db
+
+        with db.get_conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO knowledge_docs "
+                "(ruta, categoria, proyecto, mtime, estado, detalle, indexado) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (ruta, cat, proyecto, time.time(), estado, detalle[:300],
+                 time.time()))
+            c.commit()
+        return {"ok": True, "ruta": ruta, "categoria": cat}
+    except Exception as exc:  # noqa: BLE001
+        log.debug("no pude registrar el documento %s: %s", ruta, exc)
+        return {"ok": False, "error": str(exc)[:120]}
+
+
+def listar_documentos(categoria: str = "", proyecto: str = "",
+                      estado: str = "", limite: int = 100) -> list[dict]:
+    cond, vals = [], []
+    if categoria:
+        cond.append("categoria = ?")
+        vals.append(categoria)
+    if proyecto:
+        cond.append("proyecto = ?")
+        vals.append(proyecto)
+    if estado:
+        cond.append("estado = ?")
+        vals.append(estado)
+    donde = ("WHERE " + " AND ".join(cond)) if cond else ""
+    vals.append(max(1, min(1000, int(limite))))
+    try:
+        from memory import sqlite_store as db
+
+        with db.get_conn() as c:
+            filas = c.execute(
+                f"SELECT * FROM knowledge_docs {donde} ORDER BY ruta LIMIT ?",
+                tuple(vals)).fetchall()
+        return [dict(f) for f in filas]
+    except Exception as exc:  # noqa: BLE001
+        log.debug("listar documentos: %s", exc)
+        return []
+
+
+def reasignar_categoria(ruta: str, categoria: str, proyecto: str = "") -> dict:
+    """Cambia la categoría a mano. Lo decided una personas gana a la regla."""
+    if categoria not in CATEGORIAS:
+        return {"ok": False, "error": f"Categoría no válida. Usa: {', '.join(CATEGORIAS)}"}
+    try:
+        from memory import sqlite_store as db
+
+        with db.get_conn() as c:
+            c.execute("UPDATE knowledge_docs SET categoria=?, proyecto=COALESCE(?,proyecto) "
+                      "WHERE ruta=?", (categoria, proyecto or None, ruta))
+            c.commit()
+        return {"ok": True, "ruta": ruta, "categoria": categoria}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:120]}
+
+
+def buscar_por_categoria(categoria: str, limite: int = 5) -> list[dict]:
+    """Documentos de una categoría. Si hay índice vectorial, con su texto."""
+    docs = listar_documentos(categoria=categoria, limite=limite * 3)
+    salida = []
+    for d in docs:
+        item = {"name": d["ruta"].rsplit("/", 1)[-1], "path": d["ruta"],
+                "categoria": d["categoria"], "proyecto": d["proyecto"],
+                "text": "", "score": 0.0, "origen": "indice_documentos"}
+        if d.get("detalle"):
+            item["text"] = d["detalle"]
+        salida.append(item)
+        if len(salida) >= limite:
+            break
+    return salida
+
+
+def categorias_stats() -> dict:
+    """Cuántos documentos hay por categoría (y cuáles están ilegibles)."""
+    salida = {c: 0 for c in CATEGORIAS}
+    ilegibles = 0
+    for d in listar_documentos(limite=5000):
+        salida[d["categoria"]] = salida.get(d["categoria"], 0) + 1
+        if d["estado"] != "ok":
+            ilegibles += 1
+    return {"por_categoria": salida, "ilegibles": ilegibles}
+
+
+def estado_indexador() -> dict:
+    """Lo que está indexando ahora mismo, para verlo en el centro de mando."""
+    return {"corriendo": bool(_indexing.get("running")),
+            "hechos": int(_indexing.get("done") or 0),
+            "total": int(_indexing.get("total") or 0)}
+
+
+def limpiar_categorias() -> int:
+    """Olvida las categorías de documentos que ya no están en el manifiesto."""
+    m = _load_manifest()
+    archivos = set((m.get("files") or {}).keys())
+    try:
+        from memory import sqlite_store as db
+
+        with db.get_conn() as c:
+            filas = c.execute("SELECT ruta FROM knowledge_docs").fetchall()
+            borrados = 0
+            for (ruta,) in filas:
+                if ruta not in archivos:
+                    c.execute("DELETE FROM knowledge_docs WHERE ruta=?", (ruta,))
+                    borrados += 1
+            c.commit()
+        return borrados
+    except Exception as exc:  # noqa: BLE001
+        log.debug("limpiar categorías: %s", exc)
+        return 0
 
 
 def _embed(text: str) -> list[float]:

@@ -179,6 +179,39 @@ class Config:
     OPENROUTER_VISION_MODEL = _get("OPENROUTER_VISION_MODEL", "openai/gpt-4o-mini")
     GEMINI_VISION_MODEL = _get("GEMINI_VISION_MODEL", "gemini-3.6-flash")
 
+    # ------------------------------------------------------------------ #
+    # AI Gateway (brain/ai_gateway)
+    # ------------------------------------------------------------------ #
+    # La API oficial de Groq es compatible con OpenAI: mismo formato de
+    # /chat/completions, mismo streaming por Server-Sent Events. Se llama por
+    # HTTP con urllib para poder emitir cada trozo por el bus y cortar a mitad.
+    GROQ_BASE_URL = _get("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+    # Los tres modelos por tipo de tarea. Si GROQ_FAST_MODEL / REASONING /
+    # DEFAULT no se ponen, se caen a los nombres antiguos de arriba, para que
+    # una instalacion que ya funciona no se quede sin modelos.
+    GROQ_DEFAULT_MODEL = _get("GROQ_DEFAULT_MODEL", "")
+    GROQ_FAST_MODEL = _get("GROQ_FAST_MODEL", "")
+    GROQ_REASONING_MODEL = _get("GROQ_REASONING_MODEL", "")
+    GROQ_TEMPERATURE = float(_get("GROQ_TEMPERATURE", "0.7"))
+    GROQ_MAX_TOKENS = int(_get("GROQ_MAX_TOKENS", "0") or 0)
+
+    # Tiempos y reintentos del gateway, compartidos por todos los proveedores.
+    LLM_TIMEOUT_SECONDS = float(_get("LLM_TIMEOUT_SECONDS", "45"))
+    LLM_MAX_RETRIES = int(_get("LLM_MAX_RETRIES", "2"))
+    LLM_MAX_CONCURRENT = int(_get("LLM_MAX_CONCURRENT", "4"))
+    # Streaming y herramientas se pueden apagar sin tocar codigo.
+    LLM_STREAM_ENABLED = _get("LLM_STREAM_ENABLED", "1").strip().lower() in (
+        "1", "true", "si", "sí", "yes", "on")
+    LLM_TOOLS_ENABLED = _get("LLM_TOOLS_ENABLED", "1").strip().lower() in (
+        "1", "true", "si", "sí", "yes", "on")
+
+    # Cuantos caracteres de contexto (memoria, documentos, apuntes, misión,
+    # estado) caben como mucho en una peticion. El prompt de sistema y el
+    # historial NO cuentan: los pone siempre el camino de conversacion. Con lo
+    # que cabe, lo que no se puede guardar se recorta y se avisa, en vez de
+    # reventar la ventana del modelo (o el bolsillo del que paga la API).
+    CONTEXT_MAX_CHARS = int(_get("CONTEXT_MAX_CHARS", "6000"))
+
     DB_PATH = str(DATA_DIR / "jarvis.db")
     QDRANT_PATH = str(DATA_DIR / "qdrant")
     AUDIO_THEME_PATH = _get("AUDIO_THEME_PATH", str(ASSETS_DIR / "audio" / "wake-up-theme.mp3"))

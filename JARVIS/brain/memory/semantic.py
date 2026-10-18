@@ -5,6 +5,7 @@ Qdrant local para recuperar cosas de conversaciones largas (sección 11, bloque 
 Usa el modelo de embeddings de Ollama si está disponible; si no, hash-hashing
 con Jaccard (sin dependencias) para poder funcionar siempre.
 """
+import atexit
 import hashlib
 import json
 import logging
@@ -74,6 +75,23 @@ class SemanticMemory:
                 log.warning("Qdrant local no arrancó: %s", e)
                 self._client = None
         return self._client
+
+    def cerrar(self) -> None:
+        """Cierra Qdrant de forma ordenada.
+
+        Sin esto, al salir el proceso el destructor de `qdrant-client` intenta
+        cerrar la base durante el apagado del intérprete y revienta con
+        «ImportError: sys.meta_path is None». No rompe nada, pero imprime una
+        traza que parece un fallo cuando en realidad JARVIS se ha parado bien,
+        y eso hace que el que lee el log se preocupe por lo que no pasa.
+        """
+        cliente, self._client = self._client, None
+        if cliente is None:
+            return
+        try:
+            cliente.close()
+        except Exception as e:  # noqa: BLE001
+            log.debug("Qdrant no se pudo cerrar limpiamente: %s", e)
 
     # ---------- embeddings ----------
     def _embed(self, text: str) -> list[float]:
@@ -148,3 +166,14 @@ class SemanticMemory:
 
 
 semantic_memory = SemanticMemory()
+
+
+def cerrar() -> None:
+    """Cierra el índice semántico al apagar JARVIS (ver SemanticMemory.cerrar)."""
+    semantic_memory.cerrar()
+
+
+# Se registra para que el cierre ocurra antes de que Python apague el
+# intérprete: si se deja para el destructor, qdrant-client revienta con
+# «sys.meta_path is None» y el log parece un fallo.
+atexit.register(cerrar)
