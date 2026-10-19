@@ -38,6 +38,7 @@ SUITES = [
     ("Seguridad de proyectos", Path("test_seguridad_proyectos.py")),
     ("Atascamiento", Path("test_atascamiento.py")),
     ("Proveedores de OpenCode", Path("test_proveedores_opencode.py")),
+    ("Contesta de verdad (escritorio)", Path("verificar_escritorio.py")),
 ]
 
 # Cada suite cierra con su frase ("... VERIFICADO", "... VERIFICADA", "... PROTEGIDA").

@@ -385,6 +385,127 @@ diciendo «OpenCode terminó con problemas» sin decir por qué.
 
 ---
 
+## La API de OpenCode abre la sesión pero no ejecuta el turno
+
+Lo peor de este lote, porque **parecía** que funcionaba: la tarea pasaba a
+`RUNNING`, OpenCode contestaba HTTP 200, el evento `session.next.prompted`
+salía… y no pasaba nada. Ni un mensaje, ni un fichero, y la tarea se quedaba
+ahí hasta que se atascaba.
+
+Se probaron todas las combinaciones: con modelo y sin modelo, con `location` y
+con `directory`, con agente y sin agente, y por las rutas de verdad
+(`/session`) y por las de compatibilidad (`/api/session`). **Ninguna** arranca
+el turno.
+
+Lo decisivo se encontró midiendo, no leyendo: **`opencode run --attach` contra
+ESE MISMO servidor sí funciona y escribe ficheros**. El servidor estaba bien;
+lo que no funcionaba era hablarle por HTTP. Con `--session` se ata a la sesión
+que JARVIS ya tiene abierta, de modo que no se pierde el análisis, el plan ni
+la aprobación.
+
+Por eso ahora el trabajo se le encarga al CLI (`service.ejecutar_cli`) y no a
+`POST /api/session/{id}/prompt`.
+
+---
+
+## El modelo por defecto de OpenCode ya no existía
+
+```python
+OC_MODEL = "opencode/muse-spark-1.3-contributor-free"
+```
+
+Ese modelo **ya no está** en el catálogo de 1.19, así que cada desarrollo
+moría con:
+
+```
+Error: {"name":"UnknownError","data":{"message":"Unexpected server error.
+        Check server logs for details."}}
+```
+
+Un error que no dice ni qué ha pasado ni que el culpable es el nombre del
+modelo.
+
+Ahora el modelo **se le pregunta a OpenCode** con su propio comando, que
+responde sin necesidad de servidor:
+
+```
+opencode models opencode
+opencode/beam-free
+opencode/big-pickle
+opencode/deepseek-v4.1-flash-free
+opencode/glm-5.3-flash-free
+...
+```
+
+Y no por casualidad el catálogo había cambiado: el 19-10-2026 ya había un
+modelo gratuito más que el día anterior. Escribir el nombre a mano no vale.
+
+---
+
+## «Conectado» no es «con clave», y tener clave no es «que funcione»
+
+Tres confusiones que costaron tiempo y que se medieron:
+
+| Proveedor | Clave | Conectado | Con clave | Resultado |
+|---|---|---|---|---|
+| `opencode` (Zen) | `OPENCODE_API_KEY` | sí | no | funciona **sin** ella |
+| `groq` | `GROQ_API_KEY` | sí | sí | `UnsupportedApiError` |
+| `google` | `GEMINI_API_KEY` | sí | sí | `UnsupportedApiError` |
+
+Y además: **el catálogo no está en `/api/provider`**. Esa ruta devuelve los
+proveedores *activos* y sin el parámetro `location` contesta lista vacía. La
+lista entera (232) está en `/provider`.
+
+Los `UnsupportedApiError` solo salen del log propio de OpenCode
+(`~/.local/share/opencode/log/opencode.log`), no de la API. También salen en
+1.19.3: subir la versión no los arregla.
+
+---
+
+## Groq contestaba una de cada tres, y no era culpa de la cuota
+
+Medido en el contenedor: seis preguntas seguidas, **cinco contestadas**. La que
+fallaba decía:
+
+> *Groq: sin cuota (límite de la API), esperando 45 s; Gemini: 504 Deadline
+> expired*
+
+El mensaje era cierto (era un 429 de verdad), pero la reacción era pasiva:
+esperar y rendirse. Y el error escondía un detalle que lo cambia todo: **el
+límite de Groq es POR MODELO, no de la cuenta entera**. Medido con la clave
+real, con `openai/gpt-oss-120b` ya limitado, `qwen/qwen3.8-27b` contestaba sin
+problema en el mismo instante.
+
+Ahora, cuando Groq dice que no hay cuota, se prueban dos cosas antes de
+rendirse:
+
+1. **Otro modelo del mismo proveedor.** Y la lista se le pide a Groq
+   (`GET /models`), porque la escrita a mano está caduca: esa clave ya no
+   tiene `llama-3.3-70b-versatile` ni `llama-3.1-8b-instant`, y sí
+   `qwen/qwen3.8-27b`.
+2. **Esperar al enfriamiento**, si la petición todavía tiene tiempo. Antes
+   se rendía al instante; ahora, con reloj de por medio, espera lo que falte y
+   vuelve a intentarlo. Es peor tardar medio minuto que no contestar nada.
+
+Con las dos cosas: **6 de 6** en el contenedor y **4 de 4** en el escritorio.
+
+---
+
+## «(Modo local.)» en respuestas que había dado Groq
+
+El rótulo salía en casi todas las respuestas, y era **falso**: ponía «modo
+local» a respuestas que había dado Groq, que está en la nube.
+
+La causa: el campo `fallback` del gateway se activaba no solo cuando contestaba
+otro proveedor, sino también **cuando el proveedor contestaba tras un
+reintento**. Con el modelo alterno (arriba) eso pasa a menudo, así que el
+rótulo mentía más.
+
+Ahora el prefijo dice **quién contestó**: `(Contestó groq.)`, o `(Modo local.)`
+solo si fue de verdad Ollama.
+
+---
+
 ## «Implementación completada» con cero ficheros
 
 Cuando OpenCode no tenía modelo, no escribía nada — y JARVIS lo contaba como

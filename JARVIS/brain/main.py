@@ -4146,10 +4146,19 @@ def _handle(text: str, input_mode: str) -> str:
             _net = _has_internet()
         except Exception:
             _net = True
+        # Y se dice QUIÉN contestó, que antes no se decía y por eso era
+        # falso: ponía «(Modo local.)» en respuestas que había dado Groq, que
+        # está en la nube. Saltaba porque `fallback` también se activa cuando
+        # el proveedor contesto tras un reintento (por ejemplo, cuando el
+        # modelo principal se quedó sin cuota y contestó otro de Groq), y en
+        # ese caso el proveedor sigue siendo Groq.
+        proveedor = str(result.get("provider") or "").lower()
         if not _net:
             reply = f"(Modo limitado, sin conexión.) {reply}"
-        else:
+        elif proveedor == "ollama":
             reply = f"(Modo local.) {reply}"
+        elif proveedor:
+            reply = f"(Contestó {proveedor}.) {reply}"
     return reply
 
 

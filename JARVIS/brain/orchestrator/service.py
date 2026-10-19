@@ -403,6 +403,112 @@ def formatear_modelo(modelo: str) -> dict:
     return {"id": texto}
 
 
+# Modelo de reserva para cuando no hay ningún proveedor con clave puesta.
+#
+# El Zen de OpenCode funciona SIN credencial: su opción es `apiKey: "public"` y
+# medido en el contenedor, `opencode run -m opencode/space-bunny-free` trabaja y
+# escribe ficheros sin que haya ninguna clave puesta. Por eso el catálogo se
+# lee para elegir, pero si no se puede elegir no se aborta: se usa este, que se
+# ha comprobado que existe y responde.
+MODELO_DE_RESERVA = "opencode/space-bunny-free"
+
+
+def ejecutar_cli(url: str, sesion: str, workdir: str, prompt: str,
+                 modelo: str = "", agente: str = "build",
+                 username: str = "", password: str = "",
+                 timeout: float = 3600.0, al_proceso=None) -> dict:
+    """Encarga el trabajo al CLI de OpenCode, que es el camino que funciona.
+
+    POR QUÉ ESTE CAMINO Y NO EL DE LA API
+    --------------------------------------
+    JARVIS había estado mandando el encargo por la API REST
+    (`POST /api/session/{id}/prompt`). Con OpenCode 1.19 ese camino **no
+    ejecuta el turno**: se abre la sesión, el encargo se admite (`admittedSeq`,
+    evento `session.next.prompted`) y no ocurre nada. Se probaron con y sin
+    modelo, con `location` y con `directory`, con y sin agente, y por las rutas
+    de verdad y por las de compatibilidad: ninguna arranca el turno.
+
+    Lo decisivo fue esto, medido en el contenedor: **`opencode run --attach`
+    contra ese MISMO servidor sí trabaja y escribe ficheros**. El servidor
+    estaba bien; lo que no funcionaba era hablarle por HTTP. Con `--session`
+    se ata a una sesión que haya creado JARVIS, así que se conservan el
+    análisis, el plan y la aprobación, y el trabajo lo hace el CLI.
+
+    Se usa `--format json` para poder contarle al señor lo que va diciendo, y
+    se devuelve lo último que escribió para que el resumen no sea inventado.
+
+    `al_proceso` recibe el proceso para que quien llama pueda detenerlo si el
+    señor cancela la tarea a mitad.
+    """
+    cli = cli_path()
+    if not cli:
+        return {"ok": False, "error": "No se encuentra el CLI de OpenCode."}
+    if not (prompt or "").strip():
+        return {"ok": False, "error": "El encargo está vacío."}
+
+    cmd = [cli, "run", "--format", "json", "--auto", "--dir", workdir]
+    if url:
+        cmd += ["--attach", url]
+        if username:
+            cmd += ["-u", username]
+        if password:
+            cmd += ["-p", password]
+    if sesion:
+        cmd += ["-s", sesion]
+    if modelo:
+        cmd += ["-m", modelo]
+    if agente:
+        cmd += ["--agent", agente]
+    cmd.append(prompt)
+
+    env = _oc_env()
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace", bufsize=1, env=env,
+        cwd=workdir if os.path.isdir(workdir) else None,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    textos: list = []
+    if al_proceso is not None:
+        # Se le pasa el proceso a quien llama para que pueda pararlo si el
+        # señor cancela la tarea a mitad.
+        try:
+            al_proceso(proc)
+        except Exception:  # noqa: BLE001
+            pass
+
+    fin = time.monotonic() + max(60.0, float(timeout or 3600.0))
+    linea = ""
+    try:
+        while time.monotonic() < fin:
+            linea = (proc.stdout.readline() if proc.stdout else "") or ""
+            if not linea:
+                if proc.poll() is not None:
+                    break
+                continue
+            if not linea.startswith("{"):
+                continue
+            try:
+                evento = json.loads(linea)
+            except ValueError:
+                continue
+            if evento.get("type") == "text":
+                txt = ((evento.get("part") or {}).get("text") or "").strip()
+                if txt:
+                    textos.append(txt)
+            elif evento.get("type") == "error":
+                textos.append("[error] " + str(evento.get("part") or evento)[:300])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("leyendo el CLI de OpenCode: %s", exc)
+    finally:
+        if proc.poll() is None:
+            _matar(proc)
+
+    resumen = " ".join(textos).strip() if textos else ""
+    return {"ok": proc.returncode == 0, "reply": resumen[-4000:],
+            "texto": textos, "codigo": proc.returncode}
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))

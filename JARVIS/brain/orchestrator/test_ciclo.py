@@ -148,66 +148,78 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- el turno
     def _turno(self) -> None:
-        """Reproduce lo que hace OpenCode de verdad: pedir permiso, preguntar
-        al usuario, trabajar y contarlo. Se queda bloqueado hasta que el
-        usuario contesta, igual que el agente real."""
-        # 1. pide permiso para leer un fichero fuera del proyecto
-        with ESTADO.lock:
-            ESTADO.permiso = {"id": "perm-1", "sessionID": ESTADO.sesion,
-                              "action": "read", "resources": ["config/ejemplo.conf"],
-                              "message": "Leer la configuración actual",
-                              "save": []}
-            ESTADO.mensajes.append({"id": "msg-1", "type": "user",
-                                    "text": "Trabaja.", "time": {"created": time.time()}})
-        while ESTADO.permiso:
-            if ESTADO.despertar.wait(0.05):
-                break
-            ESTADO.despertar.clear()
-
-        # 2. pregunta algo que solo puede decidir el señor
-        with ESTADO.lock:
-            ESTADO.pregunta = {
-                "id": "form-1", "sessionID": ESTADO.sesion,
-                "title": "¿Qué base de datos quieres utilizar?",
-                "fields": [{"key": "base_datos", "type": "string", "title": "Base de datos",
-                            "options": [{"value": "sqlite", "label": "SQLite"},
-                                        {"value": "postgres", "label": "PostgreSQL"},
-                                        {"value": "mariadb", "label": "MariaDB"}],
-                            "custom": True}],
-                "state": {"status": "pending"},
-            }
-        while ESTADO.pregunta:
-            if ESTADO.despertar.wait(0.05):
-                break
-            ESTADO.despertar.clear()
-
-        # 3. trabaja de verdad: escribe un fichero y ejecuta los tests
-        try:
-            Path(ESTADO.workspace, "nuevo_modulo.py").write_text(
-                "# escrito por el doble de prueba\n", encoding="utf-8")
-        except OSError as exc:
-            _log(f"no se pudo escribir en el workspace: {exc}")
-        ahora = time.time()
-        with ESTADO.lock:
-            ESTADO.mensajes.append({
-                "id": "msg-2", "type": "assistant", "agent": "build",
-                "time": {"created": ahora},
-                "content": [
-                    {"type": "tool", "callID": "call-1", "tool": "edit",
-                     "state": {"status": "completed", "input": {"filePath": "nuevo_modulo.py"},
-                               "content": [{"type": "text", "text": "escrito"}]}},
-                    {"type": "tool", "callID": "call-2", "tool": "bash",
-                     "state": {"status": "completed", "input": {"command": "pytest -q"},
-                               "content": [{"type": "text",
-                                            "text": "3 passed, 1 failed in 0.4s"}]}},
-                    {"type": "text", "text": "Hecho: creado nuevo_modulo.py y "
-                                              "ejecutados los tests."},
-                ]})
-            ESTADO.mensajes.append({"id": "msg-3", "type": "idle",
-                                    "time": {"created": ahora}, "outcome": "succeeded"})
+        """El doble por HTTP. El turno en sí está en `_reproducir_turno`."""
+        _reproducir_turno()
         self._json(200, {"info": {"id": "msg-2", "type": "assistant"},
                          "parts": [{"type": "text",
                                     "text": "Hecho: creado nuevo_modulo.py y ejecutados los tests."}]})
+
+
+def _reproducir_turno() -> None:
+    """Reproduce lo que hace OpenCode de verdad: pedir permiso, preguntar
+    al usuario, trabajar y contarlo. Se queda bloqueado hasta que el
+    usuario contesta, igual que el agente real.
+
+    Vive fuera del manejador HTTP a propósito: el trabajo se lo encarga JARVIS
+    al CLI de OpenCode (`service.ejecutar_cli`), no por la API, así que el
+    doble tiene que poder reproducirse también por ese camino. La API sigue
+    sirviendo para lo demás: abrir la sesión, leer los mensajes, responder al
+    permiso y a la pregunta.
+    """
+    # 1. pide permiso para leer un fichero fuera del proyecto
+    with ESTADO.lock:
+        ESTADO.permiso = {"id": "perm-1", "sessionID": ESTADO.sesion,
+                          "action": "read", "resources": ["config/ejemplo.conf"],
+                          "message": "Leer la configuración actual",
+                          "save": []}
+        ESTADO.mensajes.append({"id": "msg-1", "type": "user",
+                                "text": "Trabaja.", "time": {"created": time.time()}})
+    while ESTADO.permiso:
+        if ESTADO.despertar.wait(0.05):
+            break
+        ESTADO.despertar.clear()
+
+    # 2. pregunta algo que solo puede decidir el señor
+    with ESTADO.lock:
+        ESTADO.pregunta = {
+            "id": "form-1", "sessionID": ESTADO.sesion,
+            "title": "¿Qué base de datos quieres utilizar?",
+            "fields": [{"key": "base_datos", "type": "string", "title": "Base de datos",
+                        "options": [{"value": "sqlite", "label": "SQLite"},
+                                    {"value": "postgres", "label": "PostgreSQL"},
+                                    {"value": "mariadb", "label": "MariaDB"}],
+                        "custom": True}],
+            "state": {"status": "pending"},
+        }
+    while ESTADO.pregunta:
+        if ESTADO.despertar.wait(0.05):
+            break
+        ESTADO.despertar.clear()
+
+    # 3. trabaja de verdad: escribe un fichero y ejecuta los tests
+    try:
+        Path(ESTADO.workspace, "nuevo_modulo.py").write_text(
+            "# escrito por el doble de prueba\n", encoding="utf-8")
+    except OSError as exc:
+        _log(f"no se pudo escribir en el workspace: {exc}")
+    ahora = time.time()
+    with ESTADO.lock:
+        ESTADO.mensajes.append({
+            "id": "msg-2", "type": "assistant", "agent": "build",
+            "time": {"created": ahora},
+            "content": [
+                {"type": "tool", "callID": "call-1", "tool": "edit",
+                 "state": {"status": "completed", "input": {"filePath": "nuevo_modulo.py"},
+                           "content": [{"type": "text", "text": "escrito"}]}},
+                {"type": "tool", "callID": "call-2", "tool": "bash",
+                 "state": {"status": "completed", "input": {"command": "pytest -q"},
+                           "content": [{"type": "text",
+                                        "text": "3 passed, 1 failed in 0.4s"}]}},
+                {"type": "text", "text": "Hecho: creado nuevo_modulo.py y "
+                                          "ejecutados los tests."},
+            ]})
+        ESTADO.mensajes.append({"id": "msg-3", "type": "idle",
+                                "time": {"created": ahora}, "outcome": "succeeded"})
 
 
 # --------------------------------------------------------------------------- #
@@ -313,11 +325,37 @@ def main() -> int:
     (workspace / "README.md").write_text("proyecto de prueba\n", encoding="utf-8")
     print(f"Doble de OpenCode escuchando en {url}")
 
-    from orchestrator import planner
-    from orchestrator.manager import get_manager
     from orchestrator import service
+    from orchestrator.manager import get_manager
 
     gestor = get_manager(lambda evento: _oc_events.append(evento))
+
+    # El trabajo se le encarga al CLI de OpenCode (`service.ejecutar_cli`) y no
+    # por la API, porque por la API el turno no se ejecuta (comprobado en el
+    # contenedor). Por eso el doble de esta prueba se pone ahí: reproduce el
+    # turno entero, con su permiso, su pregunta y su fichero. La API sigue
+    # haciendo su parte: abrir la sesión, leer mensajes, responder al permiso
+    # y a la pregunta.
+    def _cli_de_prueba(url="", sesion="", workdir="", prompt="", **kw):
+        _reproducir_turno()
+        return {"ok": True, "codigo": 0,
+                "reply": "Hecho: creado nuevo_modulo.py y ejecutados los tests.",
+                "texto": ["Hecho: creado nuevo_modulo.py y ejecutados los tests."]}
+
+    _cli_real = service.ejecutar_cli
+    service.ejecutar_cli = _cli_de_prueba
+    try:
+        return _ciclo(gestor, workspace, url, _servidor)
+    finally:
+        service.ejecutar_cli = _cli_real
+
+
+def _ciclo(gestor, workspace, url, _servidor) -> int:
+    # Los imports que usa el resto del ciclo vivían en `main()`. Ahora el
+    # cuerpo está en su propia función, así que se importan aquí.
+    from orchestrator import planner
+    from orchestrator import service as _svc
+    from orchestrator.manager import TaskManager, get_manager
 
     # --- 0. Si no hay servidor, JARVIS lo dice (no inventa nada) -------------
     estado = gestor.estado()
@@ -402,7 +440,6 @@ def main() -> int:
 
     # --- 9. Recuperacion: nunca relanzar a ciegas ----------------------------
     from orchestrator import store as _store
-    from orchestrator.manager import TaskManager
 
     huerfana = _store.nueva("Tarea que se quedó a medias", str(workspace))
     huerfana["status"] = "RUNNING"
@@ -427,7 +464,6 @@ def main() -> int:
     # OpenCode de verdad registrado; en el contenedor, donde no lo hay, fallaba
     # sin que hubiera ningún fallo. Ahora se compara con lo que el propio
     # servicio dice, que es lo que decide.
-    from orchestrator import service as _svc
     _hay_servidor = bool(_svc.describe().get("ok"))
     _comprobar(recuperada["recoverable"] is _hay_servidor,
                f"recuperable dice la verdad según el servidor "

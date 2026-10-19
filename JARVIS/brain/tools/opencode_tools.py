@@ -55,6 +55,8 @@ OC_CMD = r"C:\Users\Lucas\AppData\Roaming\npm\opencode.cmd"
 # pregunta al propio OpenCode cuál hay. Ver `_modelo_opencode()`.
 _OC_MODEL_FALLBACK = "opencode/space-bunny-free"
 OC_MODEL = os.environ.get("OPENCODE_MODEL", "").strip() or _OC_MODEL_FALLBACK
+# Caché del modelo elegido: no hace falta preguntar a OpenCode cada vez.
+_MODELO_CACHE = ""
 OC_TIMEOUT = 480
 PROTECT = ("keys.env", ".env", ".db", ".db-wal", ".db-shm", "auth.json",
            "creds.json", "opencode_tools.py")
@@ -325,45 +327,65 @@ def _dir_proyectos() -> str:
 
 
 def _modelo_opencode(cli: str = "") -> str:
-    """Qué modelo usar, preguntándoselo a OpenCode y no suponiéndolo.
+    """Qué modelo usar, preguntándoselo al propio OpenCode.
 
-    Un nombre de modelo escrito a mano se queda viejo: `muse-spark-1.3-
-    contributor-free` era el de por defecto y en 1.19 ya no existe, con lo
-    cual cada desarrollo moría con un error que no decía nada útil. Aquí se
-    arranca el servidor de OpenCode un momento, se le pregunta el catálogo y se
-    elige el primero de los suyos que salga gratis.
+    Un nombre de modelo escrito a mano se queda viejo enseguida. El valor de
+    por defecto era `opencode/muse-spark-1.3-contributor-free`, que **ya no
+    existe** en el catálogo de 1.19, con lo cual cada desarrollo moría con un
+    error que no explicaba nada:
 
-    Si algo falla (no hay servidor, no contesta, no hay catalogue), se devuelve
-    el de reserva, que sí se ha comprobado que funciona. Nunca se lanza una
-    tarea sin modelo.
+        Error: {"name":"UnknownError","data":{"message":"Unexpected server
+                 error. Check server logs for details."}}
+
+    Ahora se le pregunta a OpenCode con su propio comando, que lista lo que
+    tiene sin necesidad de servidor:
+
+        opencode models opencode
+        opencode/beam-free
+        opencode/big-pickle
+        opencode/deepseek-v4.1-flash-free
+        opencode/glm-5.3-flash-free
+        ...
+
+    Se coge el primero que sea gratuito. Y como el catálogo cambia (el
+    19-10-2026 ya tenía uno más que el día antes), queda demostrado que
+    escribir el nombre a mano no vale.
+
+    Este módulo NO puede depender del orquestador: `opencode_build` es el
+    camino de reserva, el que va sin pensar la idea, y si dependiera del
+    orquestador se juntaría con el camino bueno. Por eso se pregunta al CLI
+    directamente y no se arranca ningún servidor.
     """
     if os.environ.get("OPENCODE_MODEL", "").strip():
         return os.environ["OPENCODE_MODEL"].strip()
+    global _MODELO_CACHE
+    if _MODELO_CACHE:
+        return _MODELO_CACHE
     cli = cli or _cli_disponible()
     if not cli:
         return _OC_MODEL_FALLBACK
     try:
-        from orchestrator.service import elegir_modelo
-        from orchestrator.service import _arrancar_propio  # noqa: PLC2701
-        import time as _time
-        info = _arrancar_propio(_time.monotonic() + 30.0)
-        if not info:
+        r = subprocess.run([cli, "models", "opencode"], capture_output=True,
+                           text=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        lineas = [l.strip() for l in (r.stdout or "").splitlines()]
+        gratuitos = [l for l in lineas
+                     if "/" in l and l.split("/", 1)[1].lower().endswith("-free")]
+        if not gratuitos:
             return _OC_MODEL_FALLBACK
-        try:
-            elegido = elegir_modelo(info["url"], timeout=20.0)
-        finally:
-            from orchestrator.service import stop_owned
-            stop_owned()
-        if elegido.get("ok"):
-            modelo = (f"{elegido.get('proveedor')}/{elegido.get('modelo')}"
-                      or "").strip()
-            if modelo:
-                log.info("modelo de OpenCode: %s%s", modelo,
-                         " (gratis)" if elegido.get("gratis") else "")
-                return modelo
+        # Se prefieren los que suenan a modelo de verdad y no a los de relleno.
+        # Entre ellos, el primero por orden.
+        preferidos = ("glm", "deepseek", "qwen", "minimax", "nemotron",
+                      "longcat", "mimo")
+        ordenados = sorted(
+            gratuitos,
+            key=lambda m: (0 if any(p in m.lower() for p in preferidos) else 1, m))
+        _MODELO_CACHE = ordenados[0]
+        log.info("modelo de OpenCode: %s", _MODELO_CACHE)
+        return _MODELO_CACHE
     except Exception as e:  # noqa: BLE001 - no puede impedir lanzar el trabajo
         log.debug("no se pudo preguntar a OpenCode su modelo: %s", e)
-    return _OC_MODEL_FALLBACK
+        return _OC_MODEL_FALLBACK
 
 
 def _sanitizar_proyecto(nombre: str) -> str:

@@ -353,9 +353,18 @@ class OpenCodeAdapter:
                 log.info("tarea sin modelo: se usa el de OpenCode %s",
                          self.model)
             else:
-                log.warning("OpenCode no tiene ningún proveedor conectado: "
-                            "la tarea no podrá trabajar (%s)",
-                            elegido.get("error"))
+                # No hay proveedor CON clave. Pero el Zen de OpenCode funciona
+                # igual sin ella: medido, `opencode run -m opencode/space-bunny-
+                # free` trabaja y escribe ficheros sin ninguna credencial
+                # puesta (su opción es `apiKey: "public"`). Por eso no se
+                # descarta solo por no tener clave, sino con el de reserva,
+                # que se ha comprobado que existe y responde.
+                self.model = service.MODELO_DE_RESERVA
+                ref = service.formatear_modelo(self.model)
+                log.info("tarea sin modelo: se usa el de reserva %s",
+                         self.model)
+                self._publish(EVENT_STARTED,
+                              detail=f"OpenCode usará {self.model} (gratis)")
 
         if ref:
             cuerpo["model"] = ref
@@ -434,40 +443,49 @@ class OpenCodeAdapter:
         return {"ok": True, "session_id": self.session_id}
 
     def send_prompt(self, text: str, timeout: float = 7200.0) -> dict:
-        """Manda el prompt a OpenCode y espera a que termine el turno.
+        """Manda el encargo a OpenCode y espera a que termine.
 
-        La llamada es larga a propósito: OpenCode contesta cuando la sesión
-        queda libre. Por eso el orquestador la lanza en su propio hilo.
+        OJO con el camino: se usa el CLI (`opencode run --attach`) y NO la
+        llamada HTTP `POST /api/session/{id}/prompt`. Con OpenCode 1.19 esa
+        llamada abre la sesión y admite el encargo (`admittedSeq`, evento
+        `session.next.prompted`) pero **el turno no se ejecuta nunca**: no
+        aparecen mensajes, no se escribe nada y la tarea se queda en RUNNING
+        hasta que se atasca. Se probaron con y sin modelo, con `location` y con
+        `directory`, con y sin agente, y por las rutas de verdad y por las de
+        compatibilidad: ninguna funciona.
+
+        Lo que sí funciona, y se comprobó en el contenedor, es el CLI enganchado
+        a ese mismo servidor con la sesión que ya tiene JARVIS abierta:
+
+            > build · space-bunny-free
+            ← Write hola.html
+            Wrote file successfully.
+
+        Ver `service.ejecutar_cli`.
         """
         if not self.client or not self.session_id:
             return {"ok": False, "error": "No hay sesión de OpenCode."}
         if not (text or "").strip():
             return {"ok": False, "error": "El prompt está vacío."}
-        try:
-            # OJO con la forma del cuerpo. OpenCode 1.19 la define así en su
-            # propio esquema:
-            #
-            #   {"prompt": {"text": "..."}, "id": "msg_...", "delivery": ...,
-            #    "resume": false}   con required=["prompt"]
-            #    y additionalProperties: false
-            #
-            # Antes se mandaba {"text": ...} a pelo: sin la clave `prompt` y
-            # con una propiedad que no existe. La respuesta era
-            #     Missing key  at ["prompt"]
-            # y la tarea moría en "OpenCode terminó con problemas" sin decir
-            # por qué. El esquema se ha leído de /doc del propio servidor, no
-            # de memoria.
-            cuerpo = {"prompt": {"text": text}}
-            respuesta = self.client.post(f"/api/session/{self.session_id}/prompt",
-                                         cuerpo, timeout=timeout)
-        except OpenCodeError as exc:
-            self.last_error = str(exc)
-            self._publish(EVENT_ERROR, error=str(exc), detail=str(exc))
-            return {"ok": False, "error": str(exc)}
-        resumen = respuesta_texto(respuesta)
+
+        resultado = service.ejecutar_cli(
+            url=self.server.get("url", ""), sesion=self.session_id,
+            workdir=self.workspace, prompt=text, modelo=self.model,
+            agente=self.agent or "build",
+            username=self.server.get("username", ""),
+            password=self.server.get("password", ""),
+            timeout=timeout)
+
+        resumen = str(resultado.get("reply") or "")
         if resumen:
             self._publish(EVENT_OUTPUT, detail=resumen[:1200], text=resumen[:4000])
-        return {"ok": True, "reply": resumen, "message": respuesta}
+        if not resultado.get("ok") and not resumen:
+            self.last_error = (f"El CLI de OpenCode terminó con código "
+                               f"{resultado.get('codigo')}")
+            self._publish(EVENT_ERROR, error=self.last_error,
+                          detail=self.last_error)
+            return {"ok": False, "error": self.last_error}
+        return {"ok": True, "reply": resumen, "message": resultado}
 
     def continue_session(self, text: str = "") -> dict:
         """Continúa la sesión ya existente con un mensaje nuevo."""

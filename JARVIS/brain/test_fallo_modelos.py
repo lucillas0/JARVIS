@@ -23,6 +23,7 @@ camino viejo —que existe para eso— no se probaba nunca.
 from __future__ import annotations
 
 import os
+import time
 import sys
 import tempfile
 from pathlib import Path
@@ -169,12 +170,131 @@ def probar_no_toca_el_exito():
         gw_real.instancia = original
 
 
+def probar_modelo_alterno():
+    """Si Groq dice «sin cuota», se prueba OTRO modelo suyo antes de rendirse.
+
+    Por qué: el límite de Groq es POR MODELO, no de la cuenta entera. Medido
+    con la clave real: con `openai/gpt-oss-120b` ya limitado por tokens por
+    minuto, `qwen/qwen3.8-27b` contestaba sin problema en el mismo instante.
+
+    Y la lista de modelos hay que pedírsela a Groq, porque la escrita a mano
+    está caduca: esta clave ya no tiene `llama-3.3-70b-versatile` ni
+    `llama-3.1-8b-instant`, y sí `qwen/qwen3.8-27b`.
+    """
+    print("\n5. Sin cuota se prueba otro modelo del mismo proveedor")
+
+    import model_router as mr
+
+    router = mr.ModelRouter()
+
+    from ai_gateway.providers import groq as _groq_api
+    original_listar = _groq_api.listar_modelos
+    original_completar = _groq_api.completar
+    _groq_api.listar_modelos = lambda timeout=8.0: [
+        {"id": "openai/gpt-oss-120b"}, {"id": "qwen/qwen3.8-27b"},
+        {"id": "openai/gpt-oss-20b"}, {"id": "whisper-large-v3"},
+        {"id": "meta-llama/llama-prompt-guard-2-22m"},
+    ]
+
+    try:
+        alterno = router._modelo_alterno_groq("openai/gpt-oss-120b")
+        comprobar(alterno == "qwen/qwen3.8-27b",
+                  f"elige el más grande que no sea de voz: {alterno!r}")
+        comprobar("whisper" not in alterno and "guard" not in alterno,
+                  "y no escoge ni el de voz ni el de vigilancia")
+        comprobar(router._modelo_alterno_groq("qwen/qwen3.8-27b") != "",
+                  "y si el alternativo también está ocupado, propone otro")
+
+        from ai_gateway.errors import AIError, RATE_LIMITED
+
+        pedidos = []
+
+        def _completar(mensajes, modelo, **kw):
+            pedidos.append(modelo)
+            if modelo == "openai/gpt-oss-120b":
+                raise AIError(RATE_LIMITED, "sin cuota", "groq")
+            return {"texto": "Respuesta del modelo alterno."}
+
+        _groq_api.completar = _completar
+        mr._GROQ_COOLDOWN = 0.0
+        mr._GROQ_PENALTY = 0
+        r = router._chat_groq([{"role": "user", "content": "hola"}])
+        comprobar(r == "Respuesta del modelo alterno.",
+                  f"responde con el otro modelo: {r!r}")
+        comprobar(len(pedidos) >= 2,
+                  f"y lo intenta: {pedidos[:3]}")
+        comprobar("qwen/qwen3.8-27b" in pedidos,
+                  f"y el segundo intento es el alterno: {pedidos[:3]}")
+    finally:
+        _groq_api.listar_modelos = original_listar
+        _groq_api.completar = original_completar
+        mr._GROQ_COOLDOWN = 0.0
+        mr._GROQ_PENALTY = 0
+
+
+def probar_espera_enfriamiento():
+    """Si Groq está enfriándose pero hay tiempo, se espera y se reintenta.
+
+    Por qué: medido en el escritorio, con el enfriamiento puesto la cuarta
+    pregunta seguida se rendía con «Groq y Gemini fallaron», y un minuto
+    después Groq contestaba sin problema. Es peor tardar medio minuto que no
+    contestar nada.
+    """
+    print("\n6. Con Groq enfriándose pero con tiempo, se espera y se reintenta")
+
+    import model_router as mr
+
+    router = mr.ModelRouter()
+    from ai_gateway.providers import groq as _groq_api
+
+    original_completar = _groq_api.completar
+    original_listar = _groq_api.listar_modelos
+    _groq_api.listar_modelos = lambda timeout=8.0: [
+        {"id": "openai/gpt-oss-120b"}, {"id": "qwen/qwen3.8-27b"}]
+
+    try:
+        # Groq está en enfriamiento y a punto de liberarse.
+        mr._GROQ_COOLDOWN = time.time() + 1.0
+        mr._GROQ_PENALTY = 0
+        mr._DEADLINE = time.time() + 30.0
+
+        llamadas = []
+
+        def _completar(mensajes, modelo, **kw):
+            llamadas.append(modelo)
+            return {"texto": "Respuesta tras esperar."}
+
+        _groq_api.completar = _completar
+        router._groq_esperado = False
+        r = router._chat_groq([{"role": "user", "content": "hola"}])
+        comprobar(r == "Respuesta tras esperar.",
+                  f"contesta tras esperar al enfriamiento: {r!r}")
+        comprobar(len(llamadas) == 1, f"y lo intenta una vez: {llamadas}")
+
+        # Sin reloj (o sin tiempo) NO espera: se rinde, que es lo de antes.
+        mr._DEADLINE = 0.0
+        mr._GROQ_COOLDOWN = time.time() + 60.0
+        router._groq_esperado = False
+        llamadas.clear()
+        r = router._chat_groq([{"role": "user", "content": "hola"}])
+        comprobar(r is None, "sin reloj no espera: se rinde")
+        comprobar(llamadas == [], f"y ni siquiera lo intenta: {llamadas}")
+    finally:
+        _groq_api.completar = original_completar
+        _groq_api.listar_modelos = original_listar
+        mr._DEADLINE = 0.0
+        mr._GROQ_COOLDOWN = 0.0
+        mr._GROQ_PENALTY = 0
+
+
 def main_() -> int:
     print("FALLO DE MODELOS · el mensaje dice la causa y hay red de seguridad")
     probar_el_mensaje()
     probar_que_no_inventa_causas()
     probar_red_de_seguridad()
     probar_no_toca_el_exito()
+    probar_modelo_alterno()
+    probar_espera_enfriamiento()
 
     print()
     if fallos:

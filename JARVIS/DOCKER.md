@@ -152,95 +152,77 @@ sitios.
 ### El resultado, dentro del contenedor
 
 ```
-1. idea creada: dev-6142f7993c
+1. idea creada: dev-9441532bd9
    carpeta: /data/proyectos/fichero-html-diga-hola-mundo
-2. PLANNING → WAITING_PLAN_APPROVAL   (3 pasos, 3 riesgos, 21-45 min)
-4. aprobando → STARTING_OPENCODE → COMPLETED
+2. PLANNING → WAITING_PLAN_APPROVAL   (2 pasos, 4 riesgos)
+4. aprobando → STARTING_OPENCODE → RUNNING → COMPLETED
+6. ficheros: index.html (219 bytes)
+```
+
+Y el fichero que escribió:
+
+```html
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Hola mundo</title>
+</head>
+<body>
+  <h1>Hola mundo</h1>
+</body>
+</html>
 ```
 
 **La cadena entera funciona**: idea → JARVIS la piensa → plan y riesgos →
-espera tu aprobación → abre sesión en OpenCode → le manda el prompt.
+espera tu aprobación → **escribe los ficheros**. Con modelo gratuito y sin
+ninguna clave.
 
-### Lo que NO puede hacer todavía, y por qué
+### Por qué se ejecuta con el CLI y no con la API
 
-OpenCode arranca y acepta el encargo, pero **no ha escrito ningún fichero**:
+Porque la API **no ejecuta el turno**. Se comprobó en el contenedor:
 
-```
-/api/provider -> []      /api/model -> []      /api/agent -> []
-```
+- `POST /api/session` abre la sesión, el encargo se admite (`admittedSeq`,
+  evento `session.next.prompted`) y no ocurre nada. Ni mensajes, ni ficheros.
+- Se probaron con y sin modelo, con `location` y con `directory`, con y sin
+  agente, y por las rutas de verdad (`/session`) y por las de compatibilidad
+  (`/api/session`). **Ninguna** arranca el turno.
+- `opencode run --attach http://127.0.0.1:PUERTO` contra **ese mismo servidor**
+  sí trabaja y escribe ficheros.
 
-**No tiene ni un proveedor configurado.** JARVIS le pasa `GROQ_API_KEY`, que
-es una clave de Groq: OpenCode no la sabe usar porque no es un proveedor suyo.
+Servidor bueno, camino HTTP malo. Así que el trabajo se le encarga al CLI
+enganchado al servidor con la sesión que ya tiene JARVIS abierta: se conservan
+el análisis, el plan y la aprobación, y el que programa es el camino que
+funciona.
 
-Y antes de enterarse de eso, JARVIS decía **«Implementación completada»** con
-cero ficheros. Eso es mentarle al señor sobre lo único que ha pedido, así que
-ahora una tarea que termina sin haber tocado nada **se marca como fallida** y
-dice por qué:
+### El modelo se le pregunta a OpenCode
 
-> *OpenCode no ha hecho nada: no tiene ningún modelo configurado. Revise que
-> tenga una clave (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`…) dentro del
-> contenedor.*
+Antes estaba fijado a `opencode/muse-spark-1.3-contributor-free`, que **ya no
+existe** en el catálogo de 1.19, así que cada desarrollo moría con un
+`UnknownError` que no explicaba nada. Ahora se arranca el servidor, se lee el
+catálogo (`GET /provider`, 232 proveedores) y se elige el primero de los suyos
+que salga gratis. Si eso falla se usa `opencode/space-bunny-free`, que se ha
+comprobado que existe y responde.
 
-**Para cerrarlo del todo** hay que darle a OpenCode un proveedor. Es
-configuración, no código: una clave que OpenCode reconozca en el contenedor.
-Se comprobaron tres caminos y **ninguno** funcionó con 1.19.0 (se midió
-`/api/provider` con cada uno):
+Los diez gratuitos del Zen, medidos: `beam-free`, `big-pickle`,
+`deepseek-v4.1-flash-free`, `glm-5.3-flash-free`, `longcat-2.5-preview-free`,
+`mimo-v2.6-flash-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`,
+`nemotron-3.5-super-vl-free`, `space-bunny-free`.
 
-| Cómo | Resultado |
-|---|---|
-| Sin tocar nada | `[]` proveedores |
-| `OPENAI_API_KEY` + `OPENAI_BASE_URL` a Groq | `[]` proveedores |
-| `provider.groq` en `opencode.json` | `[]` proveedores |
+**Cuentas que sirven y no, medido también:**
 
-Se comprueba en cuanto la pongas con:
+| Proveedor | Clave | Con la clave puesta |
+|---|---|---|
+| `opencode` (Zen, 10 gratis) | `OPENCODE_API_KEY` | funciona **sin** ella (`apiKey: public`) |
+| `groq` | `GROQ_API_KEY` | `UnsupportedApiError: aisdk:@ai-sdk/groq` |
+| `google` | `GEMINI_API_KEY` | `UnsupportedApiError: aisdk:@ai-sdk/google` |
+| `meta` (Muse Spark) | `META_MODEL_API_KEY` | requiere clave de Meta |
 
-```bash
-docker exec jarvis-prueba python -c "
-import sys; sys.path.insert(0,'/app/brain')
-from orchestrator import service
-print(service.ensure(timeout=40))"
-```
+Los errores de `UnsupportedApiError` salen del log propio de OpenCode
+(`~/.local/share/opencode/log/opencode.log`), no de la API. También salen en
+1.19.3: subir la versión no los arregla.
 
-### 4. Una tarea se quedaba colgada horas sin decir nada
-
-Sin modelo, OpenCode acepta el encargo, escribe **un** mensaje de error
-(`HTTP transport failed`) y se queda ahí. La petición que JARVIS le hizo
-—`send_prompt()`, que espera a que la sesión quede libre— **no se cerraba
-nunca**, así que el hilo que la esperaba no terminaba y la tarea se quedaba en
-`RUNNING` con el último evento siendo «OpenCode está trabajando.».
-
-El límite era brutal: **dos horas** por tarea, sin un solo aviso.
-
-Ahora hay un reloj de estancamiento (`_SIN_PROGRESO`, diez minutos por
-defecto): si en ese rato no llega **ningún** mensaje nuevo, **ningún** fichero
-tocado y **ninguna** pregunta, la tarea se da por parada y se explica. Un
-desarrollo de verdad no se dispara, porque sigue hablando y sigue escribiendo.
-Se puede cambiar con `JARVIS_OPENCODE_SIN_PROGRESO` (segundos), con suelo de
-5 s para que nadie lo deje en cero.
-
-### 5. Y un fallo mío que dejaba la tarea viva para siempre
-
-Al añadir el aviso de «no ha hecho nada» metí una comprobación nueva con la
-clave `detalle`, siendo que el cierre la lee como `detail`. Al cerrar la tarea,
-`_resumen()` reventaba con:
-
-```
-Exception in thread jarvis-dev-dev-3c93e9960a:
-    "errores": [c["detail"] for c in comprobaciones ...
-KeyError: 'detail'
-```
-
-El hilo de la tarea **moría**, la tarea se quedaba en `RUNNING` para siempre
-y el error solo aparecía enterrado en `docker logs`.
-
-Cómo se encontró: el vigilante dejó de guardar la tarea y `updated_at` llevaba
-301 s sin tocarse, mientras la API contestaba normal. El vigilante no estaba
-colgado — estaba muerto.
-
-Arreglado por dos lados: la comprobación usa `detail`, y `_resumen()` ya no
-puede reventar aunque le llegue una comprobación sin esa clave o que no sea un
-diccionario. Es una función que solo pinta: si peta, el trabajo hecho se queda
-abierto para siempre sin estado ni error.
+`OPENCODE_MODEL` sigue mandando si la pones.
 
 ---
 
@@ -261,9 +243,14 @@ abierto para siempre sin estado ni error.
 | La idea NO escribe sobre el cerebro | sí: `/data/proyectos/<nombre>` |
 | `ensure()` arranca el servidor de OpenCode | sí, ~21 s |
 | La idea llega hasta OpenCode | sí: sesión abierta y prompt enviado |
+| **La idea ESCRIBE FICHEROS** | **sí**: `index.html` con `<h1>Hola mundo</h1>` |
+| Modelo usado | `opencode/space-bunny-free`, coste 0 |
+| **Contesta de verdad** | **6 de 6** preguntas seguidas, con Groq |
+| Cuando Groq dice «sin cuota» | prueba otro modelo de Groq y espera al enfriamiento |
+| El rótulo de la respuesta | dice quién contestó: `(Contestó groq.)` |
 | Conversación normal | contesta en español |
 | "cómo va el Real Madrid" | busca en la web y lee una página |
-| Las 19 suites | **todas en verde** |
+| Las 22 suites | **todas en verde** |
 
 ---
 
@@ -281,11 +268,12 @@ abierto para siempre sin estado ni error.
 
 ## Lo que sigue sin comprobar
 
-- **OpenCode no ha escrito un solo fichero.** La cadena entera está probada de
-  verdad en el contenedor (idea → plan → riesgos → aprobación → sesión abierta
-  → prompt enviado), pero al no haber proveedor configurado no llega a
-  escribir. Está medido y está dicho arriba; lo único que falta es una clave de
-  proveedor que OpenCode reconozca, y no se ha puesto ninguna por cuenta ajena.
+- **Solo se ha probado con una idea pequeña.** Un `<h1>` y una web de gastos
+  tabular, las dos bien. Un encargo largo de varias sesiones —con permisos,
+  preguntas en medio y muchos ficheros— sigue sin probarse de punta a punta.
+- **El modelo se elige al empezar la tarea.** Si OpenCode cambia el catálogo a
+  mitad, una tarea ya abierta sigue con el modelo que tenía, que es lo
+  correcto, pero no se ha probado qué pasa si ese modelo desaparece.
 - **Discord**, **Ollama** y **Qdrant** no están en el contenedor de prueba.
   Qdrant sí está instalado (estaba declarado y faltaba); Ollama no se espera
   en un servidor.

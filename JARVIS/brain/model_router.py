@@ -81,6 +81,10 @@ class ModelRouter:
         # podía decir "todos fallaron, mire el registro", que no es un
         # diagnóstico: es devolver el problema al que pregunta.
         self._errores: dict[str, str] = {}
+        # Si ya se ha esperado al enfriamiento de Groq en ESTA petición: no se
+        # vuelve a esperar, o dos entradas de Groq (groq-light y groq) harían
+        # esperar el doble.
+        self._groq_esperado = False
 
     def _fallo(self, nombre: str, exc: Exception | str) -> None:
         texto = str(exc)
@@ -174,6 +178,49 @@ class ModelRouter:
         return _ollama_cache["v"] if time.time() - _ollama_cache["t"] <= _OLLAMA_TTL else False
 
     # ---------- llamadas por proveedor ----------
+    def _modelo_alterno_groq(self, modelo: str) -> str:
+        """Otro modelo de Groq para cuando este se ha quedado sin cuota.
+
+        Se le pregunta a Groq qué modelos tiene (`GET /models`), que es la
+        única fuente fiable: la lista escrita a mano se queda vieja, y ya ha
+        pasado —la clave ya no tiene `llama-3.3-70b-versatile` ni
+        `llama-3.1-8b-instant`.
+
+        De los que devuelve se descartan los de voz (whisper) y los de
+        vigilancia, y se elige el más grande que quede: mejor respuesta antes
+        que respuesta rápida.
+        """
+        try:
+            from ai_gateway.providers import groq as _groq_api
+            modelos = _groq_api.listar_modelos(timeout=8.0)
+        except Exception as e:  # noqa: BLE001
+            log.debug("no se pudo pedir la lista de modelos a Groq: %s", e)
+            return ""
+        ids = []
+        for m in modelos or []:
+            if isinstance(m, dict):
+                ident = str(m.get("id") or "")
+            else:
+                ident = str(m or "")
+            if not ident or ident == modelo:
+                continue
+            if "whisper" in ident or "guard" in ident:
+                continue
+            ids.append(ident)
+        if not ids:
+            return ""
+        # A mayor tamaño de modelo, mejor respuesta. El nombre suele traer el
+        # número de parámetros ("120b", "27b"), pero no siempre es el primer
+        # número: "qwen/qwen3.8-27b" tiene el 27 al final, y el 3.8 es la
+        # versión. Se coge el número más grande de los que haya.
+        import re as _re
+
+        def _clave(ident: str):
+            numeros = [int(n) for n in _re.findall(r"\d+", ident)]
+            return (-(max(numeros) if numeros else 0), ident)
+
+        return sorted(ids, key=_clave)[0]
+
     def _chat_groq(self, messages: list[dict], vision: Optional[str] = None,
                    model: Optional[str] = None) -> Optional[str]:
         """Groq por su API oficial, a traves del proveedor del AI Gateway.
@@ -189,7 +236,23 @@ class ModelRouter:
         # las dos con el mismo problema, y se perdían hasta diez segundos
         # antes de caer en otro proveedor.
         if _GROQ_COOLDOWN > time.time():
-            return None
+            # PERO si la petición todavía tiene sitio, se espera a que Groq se
+            # enfríe y se vuelve a intentarlo. Medido en el escritorio: con el
+            # enfriamiento puesto, la cuarta pregunta seguidas se rendía con
+            # «Groq y Gemini fallaron», cuando un minuto después Groq
+            # contestaba sin problema. Es peor tardar medio minuto que no
+            # contestar nada.
+            faltan = _GROQ_COOLDOWN - time.time()
+            if (not self._groq_esperado and _DEADLINE
+                    and _queda() > faltan + 5):
+                self._groq_esperado = True
+                log.info("Groq está en enfriamiento (%.0f s); se espera y se "
+                         "vuelve a intentar", faltan)
+                espera = min(faltan, max(0.0, _queda() - 3))
+                if espera > 0:
+                    time.sleep(espera)
+            else:
+                return None
         if not _tiene_clave("groq"):
             return None
         from ai_gateway.errors import AIError
@@ -207,6 +270,33 @@ class ModelRouter:
             # en vez de reintentar y perder el tiempo. El enfriamiento empieza
             # corto y sube solo si Groq sigue igual.
             if e.tipo == "rate_limited":
+                # ANTES de rendirse, se prueba OTRO modelo del mismo
+                # proveedor. El límite de Groq es por modelo, no de la cuenta
+                # entera: medido, con `openai/gpt-oss-120b` ya limitado por
+                # tokens por minuto, `qwen/qwen3.8-27b` contestaba sin
+                # problema en el mismo instante.
+                #
+                # Antes esto se quitó porque se probaban el modelo pequeño y el
+                # grande, y los dos tenían el mismo problema: son el mismo
+                # modelo con distinto nombre. Lo que hace falta es cambiar de
+                # modelo de verdad.
+                alterno = self._modelo_alterno_groq(modelo)
+                if alterno:
+                    try:
+                        r2 = _groq_api.completar(messages, alterno,
+                                                 vision=vision, timeout=_queda())
+                    except AIError as e2:
+                        if e2.tipo != "rate_limited":
+                            log.warning("Groq: el modelo alterno %s falló: %s",
+                                        alterno, e2)
+                    else:
+                        log.info("Groq sin cuota en %s; se contesta con %s",
+                                 modelo, alterno)
+                        self._fallo("Groq", f"sin cuota en {modelo}; "
+                                            f"se usó {alterno}")
+                        if _GROQ_PENALTY:
+                            _GROQ_PENALTY = 0
+                        return r2.get("texto")
                 _GROQ_PENALTY += 1
                 espera = _groq_enfriado(_GROQ_PENALTY)
                 _GROQ_COOLDOWN = time.time() + espera
@@ -329,6 +419,10 @@ class ModelRouter:
         try:
             from ai_gateway import gateway as _gateway
             from ai_gateway import registry as _registry
+
+            # Cada petición empieza sin esperas previas: el enfriamiento se
+            # puede esperar una vez, no arrastrarse de una petición a otra.
+            self._groq_esperado = False
 
             tarea = _registry.REASONING if heavy else (
                 _registry.FAST if (light and not vision) else _registry.GENERAL)
