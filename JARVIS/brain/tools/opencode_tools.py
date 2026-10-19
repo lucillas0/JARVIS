@@ -35,8 +35,26 @@ def _step(task: str, label: str, done: bool = False, error: str = "") -> None:
         log.debug("progress emit: %s", e)
 
 OC_CMD = r"C:\Users\Lucas\AppData\Roaming\npm\opencode.cmd"
-# El modelo se puede cambiar sin tocar codigo: OPENCODE_MODEL="groq/llama-3.3-70b-versatile".
-OC_MODEL = os.environ.get("OPENCODE_MODEL", "opencode/muse-spark-1.3-contributor-free")
+
+# El modelo se puede cambiar sin tocar codigo con OPENCODE_MODEL.
+#
+# ANTES estaba fijado a "opencode/muse-spark-1.3-contributor-free". Ese modelo
+# YA NO EXISTE en el catálogo de OpenCode 1.19, y el resultado era un error
+# seco en cada desarrollo:
+#
+#     Error: {"name":"UnknownError","data":{"message":"Unexpected server
+#              error. Check server logs for details."}}
+#
+# Los diez modelos gratuitos que quedan en el proveedor `opencode` (el Zen)
+# son, medidos en el contenedor:
+#   beam-free, big-pickle, deepseek-v4.1-flash-free, glm-5.3-flash-free,
+#   longcat-2.5-preview-free, mimo-v2.6-flash-free, nemotron-3-ultra-free,
+#   nemotron-3.5-lightning-free, nemotron-3.5-super-vl-free, space-bunny-free
+#
+# En vez de apuntar a ciegas a un nombre que puede volver a desaparecer, se
+# pregunta al propio OpenCode cuál hay. Ver `_modelo_opencode()`.
+_OC_MODEL_FALLBACK = "opencode/space-bunny-free"
+OC_MODEL = os.environ.get("OPENCODE_MODEL", "").strip() or _OC_MODEL_FALLBACK
 OC_TIMEOUT = 480
 PROTECT = ("keys.env", ".env", ".db", ".db-wal", ".db-shm", "auth.json",
            "creds.json", "opencode_tools.py")
@@ -216,7 +234,7 @@ def opencode_fix(task: str, timeout: int = OC_TIMEOUT, workdir: str = "") -> dic
     full_task = task  # ya viene con rol+reglas desde selfheal
     try:
         r = subprocess.run(
-            [OC_CMD, "run", "-m", OC_MODEL, "--format", "json", "--auto",
+            [OC_CMD, "run", "-m", _modelo_opencode(OC_CMD), "--format", "json", "--auto",
              "--dir", workdir, full_task],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=_keys_env(), cwd=workdir,
@@ -304,6 +322,48 @@ def _dir_proyectos() -> str:
     except Exception:
         pass
     return base
+
+
+def _modelo_opencode(cli: str = "") -> str:
+    """Qué modelo usar, preguntándoselo a OpenCode y no suponiéndolo.
+
+    Un nombre de modelo escrito a mano se queda viejo: `muse-spark-1.3-
+    contributor-free` era el de por defecto y en 1.19 ya no existe, con lo
+    cual cada desarrollo moría con un error que no decía nada útil. Aquí se
+    arranca el servidor de OpenCode un momento, se le pregunta el catálogo y se
+    elige el primero de los suyos que salga gratis.
+
+    Si algo falla (no hay servidor, no contesta, no hay catalogue), se devuelve
+    el de reserva, que sí se ha comprobado que funciona. Nunca se lanza una
+    tarea sin modelo.
+    """
+    if os.environ.get("OPENCODE_MODEL", "").strip():
+        return os.environ["OPENCODE_MODEL"].strip()
+    cli = cli or _cli_disponible()
+    if not cli:
+        return _OC_MODEL_FALLBACK
+    try:
+        from orchestrator.service import elegir_modelo
+        from orchestrator.service import _arrancar_propio  # noqa: PLC2701
+        import time as _time
+        info = _arrancar_propio(_time.monotonic() + 30.0)
+        if not info:
+            return _OC_MODEL_FALLBACK
+        try:
+            elegido = elegir_modelo(info["url"], timeout=20.0)
+        finally:
+            from orchestrator.service import stop_owned
+            stop_owned()
+        if elegido.get("ok"):
+            modelo = (f"{elegido.get('proveedor')}/{elegido.get('modelo')}"
+                      or "").strip()
+            if modelo:
+                log.info("modelo de OpenCode: %s%s", modelo,
+                         " (gratis)" if elegido.get("gratis") else "")
+                return modelo
+    except Exception as e:  # noqa: BLE001 - no puede impedir lanzar el trabajo
+        log.debug("no se pudo preguntar a OpenCode su modelo: %s", e)
+    return _OC_MODEL_FALLBACK
 
 
 def _sanitizar_proyecto(nombre: str) -> str:
@@ -587,7 +647,7 @@ def opencode_build(objetivo: str, proyecto: str = "",
                 "error": "OpenCode CLI no esta disponible en este equipo. "
                          "En el servidor Docker no hay node ni opencode; "
                          "esto funciona en el JARVIS de escritorio."}
-    cmd = [cli, "run", "-m", OC_MODEL, "--format", "json", "--auto",
+    cmd = [cli, "run", "-m", _modelo_opencode(cli), "--format", "json", "--auto",
            "--dir", workdir, prompt]
     # live_task_start: los paneles lo muestran como trabajo activo. Lleva el
     # objetivo para que el trabajo salga en Recientes y se pueda reintentar.
@@ -669,7 +729,7 @@ def opencode_ask(question: str, timeout: int = 180) -> str:
         return ""
     try:
         r = subprocess.run(
-            [OC_CMD, "run", "-m", OC_MODEL, "--format", "json",
+            [OC_CMD, "run", "-m", _modelo_opencode(OC_CMD), "--format", "json",
              "--dir", _brain_dir(), question],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=_keys_env(),
