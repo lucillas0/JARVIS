@@ -34,6 +34,35 @@ from typing import Iterator, Optional
 log = logging.getLogger("brain.opencode.client")
 
 
+def _desenvolver(datos):
+    """Quita el envoltorio `{"data": ...}` si lo hay.
+
+    OpenCode sirve su API por dos rutas: las de compatibilidad bajo `/api/...`
+    y las sueltas. Las de `/api` contestan la respuesta ENVUELTA y las sueltas
+    no. Comprobado contra 1.19.0:
+
+        POST /api/session -> {"data": {"id": "ses_...", ...}}
+        POST /session     -> {"id": "ses_...", ...}
+
+    Sin esto, todo el código que lee `respuesta["id"]` —la sesión, los
+    mensajes, los permisos, los formularios— falla con la ruta envuelta, y el
+    ciclo se muere en «OpenCode no devolvió una sesión válida».
+
+    Se desenvuelve aquí y no en cada llamada, para que las dos rutas den lo
+    mismo y un cambio de versión de OpenCode no rompa diez sitios.
+    """
+    if isinstance(datos, dict):
+        clave = datos.get("data")
+        # Solo se desenvuelve si lo de dentro es lo que se espera: una
+        # respuesta que tenga su propio "id" no se toca, porque ahí "data" es
+        # un campo más y no un envoltorio.
+        if isinstance(clave, (dict, list)) and "id" not in datos:
+            return clave
+    return datos
+
+    # ------------------------------------------------------------------ #
+
+
 class OpenCodeError(RuntimeError):
     """Fallo hablando con OpenCode. Conserva el codigo HTTP para poder decidir."""
 
@@ -95,11 +124,12 @@ class OpenCodeClient:
         if not crudo:
             return {}
         try:
-            return json.loads(crudo.decode("utf-8", "replace"))
+            datos = json.loads(crudo.decode("utf-8", "replace"))
         except ValueError as exc:
             raise OpenCodeError("OpenCode devolvió una respuesta que no es JSON") from exc
+        return _desenvolver(datos)
 
-    # ------------------------------------------------------------------ #
+
     def get(self, path: str, params: dict | None = None, timeout: Optional[float] = None):
         if params:
             limpio = {k: v for k, v in params.items() if v not in (None, "")}

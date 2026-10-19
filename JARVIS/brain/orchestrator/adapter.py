@@ -329,8 +329,36 @@ class OpenCodeAdapter:
                                      endpoint.get("password", ""), timeout=30.0)
 
         cuerpo = {"title": self.title[:120], "location": {"directory": self.workspace}}
-        if self.model:
-            cuerpo["model"] = self.model
+
+        # El modelo. OpenCode 1.19 define `ModelRef` con required = ["id",
+        # "providerID"], así que una cadena suelta no vale: hay que mandarlo
+        # como objeto. Antes se mandaba el texto tal cual y el servidor
+        # contestaba `Missing key at ["model"]["id"]`.
+        ref = service.formatear_modelo(self.model)
+
+        # Si nadie ha pedido modelo, se pregunta al servidor cuál tiene él
+        # conectado. Sin esto OpenCode se queda sin modelo, acepta el encargo
+        # y no hace nada: el caso que dejó tareas colgadas en el contenedor.
+        if not ref:
+            elegido = service.elegir_modelo(endpoint["url"],
+                                            endpoint.get("username", ""),
+                                            endpoint.get("password", ""))
+            if elegido.get("ok"):
+                ref = elegido.get("ref") or {}
+                self.model = f"{elegido.get('proveedor')}/{elegido.get('modelo')}"
+                self._publish(
+                    EVENT_STARTED,
+                    detail=(f"OpenCode usará {self.model}"
+                            + (" (gratis)" if elegido.get("gratis") else "")))
+                log.info("tarea sin modelo: se usa el de OpenCode %s",
+                         self.model)
+            else:
+                log.warning("OpenCode no tiene ningún proveedor conectado: "
+                            "la tarea no podrá trabajar (%s)",
+                            elegido.get("error"))
+
+        if ref:
+            cuerpo["model"] = ref
         if self.agent:
             cuerpo["agent"] = self.agent
         try:
@@ -339,6 +367,9 @@ class OpenCodeAdapter:
             self.last_error = f"No se pudo abrir la sesión de OpenCode: {exc}"
             self._publish(EVENT_ERROR, error=self.last_error, detail=self.last_error)
             return {"ok": False, "error": self.last_error}
+        # La sesión viene desenvuelta por el cliente: las rutas de compatibilidad
+        # `/api/...` contestan {"data": {...}} y las sueltas, el objeto pelado.
+        # Ver `_desenvolver` en client.py.
         if not isinstance(sesion, dict) or not sesion.get("id"):
             self.last_error = "OpenCode no devolvió una sesión válida."
             self._publish(EVENT_ERROR, error=self.last_error, detail=self.last_error)
@@ -413,8 +444,22 @@ class OpenCodeAdapter:
         if not (text or "").strip():
             return {"ok": False, "error": "El prompt está vacío."}
         try:
+            # OJO con la forma del cuerpo. OpenCode 1.19 la define así en su
+            # propio esquema:
+            #
+            #   {"prompt": {"text": "..."}, "id": "msg_...", "delivery": ...,
+            #    "resume": false}   con required=["prompt"]
+            #    y additionalProperties: false
+            #
+            # Antes se mandaba {"text": ...} a pelo: sin la clave `prompt` y
+            # con una propiedad que no existe. La respuesta era
+            #     Missing key  at ["prompt"]
+            # y la tarea moría en "OpenCode terminó con problemas" sin decir
+            # por qué. El esquema se ha leído de /doc del propio servidor, no
+            # de memoria.
+            cuerpo = {"prompt": {"text": text}}
             respuesta = self.client.post(f"/api/session/{self.session_id}/prompt",
-                                         {"text": text}, timeout=timeout)
+                                         cuerpo, timeout=timeout)
         except OpenCodeError as exc:
             self.last_error = str(exc)
             self._publish(EVENT_ERROR, error=str(exc), detail=str(exc))

@@ -41,7 +41,103 @@ _CUBO = {
 _POLL = 1.2          # cada cuánto se mira la sesión real
 _GUARDAR = 4.0       # cada cuánto se vuelca la tarea a la base de datos
 _CAMBIOS = 8.0       # cada cuánto se releen los cambios del proyecto
+
+# Cuánto aguanta un turno de OpenCode SIN dar señales de vida antes de darlo
+# por muerto.
+#
+# `send_prompt()` deja la llamada abierta hasta dos horas: OpenCode contesta
+# cuando la sesión queda libre, así que un turno de verdad puede tardar todo lo
+# que haga falta. El problema es el otro caso, comprobado en el contenedor: si
+# OpenCode no tiene ningún modelo configurado, acepta el encargo, no lo ejecuta
+# y NUNCA cierra el turno. La petición se queda colgada, el hilo que la espera
+# no termina, y la tarea se queda en RUNNING durante horas sin decir nada.
+#
+# Diez minutos sin ningún mensaje nuevo, ningún fichero tocado y ninguna
+# pregunta es tiempo de sobra para que cualquier trabajo real dé señales. Un
+# desarrollo largo no se dispara: sigue hablando y sigue escribiendo ficheros.
+#
+# Se puede cambiar con JARVIS_OPENCODE_SIN_PROGRESO (segundos) para quien
+# tenga un presupuesto de tiempo distinto, y para probar el camino sin tener
+# que esperar diez minutos.
+_SIN_PROGRESO = 600.0
+try:
+    _ajuste = float(os.environ.get("JARVIS_OPENCODE_SIN_PROGRESO", "") or 0)
+    if _ajuste >= 5.0:
+        _SIN_PROGRESO = _ajuste
+except (TypeError, ValueError):
+    pass
 _TEST_CMDS = ("npm install", "pip install", "npm ci", "yarn add", "pnpm add")
+
+
+def _nombre_de_proyecto(idea: str) -> str:
+    """Un nombre de carpeta corto y seguro a partir de la idea."""
+    import re as _re
+    import unicodedata as _ud
+    if not idea:
+        return ""
+    t = _ud.normalize("NFKD", idea.lower())
+    t = "".join(c for c in t if not _ud.combining(c))
+    t = _re.sub(r"^(desarrollame|desarrolla|programame|programa|creame|crea|"
+                r"hazme|haz|quiero|necesito|montame|monta|construye|construyeme|"
+                r"una?|el|la|los|las|de|del|para|que|con)\b", " ", t)
+    # Palabras de relleno: no dicen qué proyecto es. Se quitan en cualquier
+    # posición, no solo al principio, porque el nombre sale de una frase entera
+    # («desarrollame una web para llevar los gastos» → "gastos").
+    t = _re.sub(r"\b(una?|el|la|los|las|de|del|para|que|con|por|sin|"
+                r"app|web|programa|script|proyecto|pagina|aplicacion|"
+                r"herramienta|cosa|aplicacion)\b", " ", t)
+    t = _re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+    return t[:40].strip("-")
+
+
+def _es_codigo_de_jarvis(ruta: str) -> bool:
+    """¿Esta ruta está dentro del propio JARVIS?"""
+    try:
+        import config
+        raices = []
+        for nombre in ("ROOT_DIR", "BRAIN_DIR"):
+            valor = getattr(config, nombre, None)
+            if valor:
+                raices.append(str(valor))
+    except Exception:  # noqa: BLE001
+        return False
+    if not raices:
+        return False
+    try:
+        objetivo = os.path.abspath(ruta)
+    except Exception:  # noqa: BLE001
+        return False
+    for raiz in raices:
+        try:
+            if os.path.commonpath([objetivo, os.path.abspath(raiz)]) == \
+                    os.path.abspath(raiz):
+                return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
+def _a_carpeta_segura(ruta: str, idea: str) -> str:
+    """Si la ruta cae dentro del código de JARVIS, decide si se deja pasar.
+
+    Solo se deja si el señor ha pedido claramente tocar JARVIS. Una idea
+    corriente («una web para los gastos») que acabe apuntando al cerebro es un
+    descuido con consecuencias: OpenCode escribiría encima del código que lo
+    está haciendo funcionar.
+    """
+    if not ruta:
+        return ruta
+    if not _es_codigo_de_jarvis(ruta):
+        return ruta
+    _re = __import__("re")
+    if _re.search(r"\b(j|a)rvis\b|\bcerebro\b|\bnucleo\b|\bbrain\b|"
+                  r"\bplugin\b|\bherramienta\b|\btool\b|\bfuente\b",
+                  idea or "", _re.I):
+        return ruta
+    log.warning("la tarea pedía trabajar dentro del código de JARVIS (%s) "
+                "y la idea no habla de modificarlo: se va a la carpeta de "
+                "proyectos", ruta)
+    return ""
 
 
 class TaskManager:
@@ -127,8 +223,9 @@ class TaskManager:
             return {"ok": False, "error": "Dime qué quieres que haga JARVIS."}
         if len(idea) > 4000:
             idea = idea[:4000]
+        project_path = _a_carpeta_segura(project_path, idea)
         if not project_path:
-            project_path = self._ruta_por_defecto()
+            project_path = self._ruta_por_defecto(idea)
         tarea = store.nueva(idea, project_path, model, agent)
         self._guardar(tarea)
         self._publicar("opencode.task_created", tarea,
@@ -582,27 +679,70 @@ class TaskManager:
         """
         ultimo_guardado = 0.0
         ultimo_cambios = 0.0
+        # Cualquier señal de vida (un mensaje nuevo, un fichero escrito, una
+        # pregunta) postpone el reloj de estancamiento. Ver `_SIN_PROGRESO`.
+        ultimo_movimiento = time.time()
+        p = tarea["payload"]
         while True:
             if cancelar.is_set():
                 return True
+
+            # Cada lectura va por separado. Antes estaban todas juntas en un
+            # `try` común, y eso rompía el reloj de estancamiento en los dos
+            # sentidos: si una fallaba, se saltaba la cuenta del movimiento
+            # (una tarea que trabajaba bien acababa dada por muerta) y si no
+            # fallaba, la comprobación entera quedaba dentro del `try`
+            # (una tarea muerta no se daba por muerta nunca). Las dos cosas se
+            # vieron en la prueba de atascamiento.
             try:
+                antes = len(self._vistos.get(tarea["id"], ()))
                 self._leer_mensajes(tarea, adaptador)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("mensajes de %s: %s", tarea["id"], exc)
+            try:
                 self._revisar_permisos(tarea, adaptador)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("permisos de %s: %s", tarea["id"], exc)
+            try:
                 self._revisar_preguntas(tarea, adaptador)
-                ahora = time.time()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("preguntas de %s: %s", tarea["id"], exc)
+
+            ahora = time.time()
+            if len(self._vistos.get(tarea["id"], ())) != antes:
+                ultimo_movimiento = ahora
+
+            try:
                 if ahora - ultimo_cambios > _CAMBIOS:
-                    ultimo_cambios = ahora
                     cambios = adaptador.get_changes()
+                    previos = len(p.get("changes") or [])
                     if cambios:
-                        tarea["payload"]["changes"] = cambios
+                        ultimo_cambios = ahora
+                        if len(cambios) != previos:
+                            ultimo_movimiento = ahora
+                        p["changes"] = cambios
                         self._publicar("opencode.file_changed", tarea,
                                        detail=", ".join(f"{c['mark']} {c['path']}"
                                                         for c in cambios[:4]))
                 if ahora - ultimo_guardado > _GUARDAR:
                     ultimo_guardado = ahora
                     self._guardar(tarea)
-            except Exception as exc:  # noqa: BLE001 - un fallo de lectura no mata la tarea
+            except Exception as exc:  # noqa: BLE001
                 log.debug("vigilancia de %s: %s", tarea["id"], exc)
+
+            # El reloj de estancamiento va FUERA de los `try`: tiene que
+            # comprobarlo siempre, aunque todo lo de arriba falle.
+            if time.time() - ultimo_movimiento > _SIN_PROGRESO:
+                p["atascada"] = True
+                p["atascada_desde"] = ultimo_movimiento
+                self._publicar(
+                    "opencode.error", tarea,
+                    detail=(f"OpenCode lleva {int(_SIN_PROGRESO // 60)} minutos "
+                            "sin hacer ni decir nada. Se da la tarea por parada."))
+                log.warning("el turno de %s lleva %.0f s sin movimiento: "
+                            "se da por atascado", tarea["id"],
+                            time.time() - ultimo_movimiento)
+                return False
             if not hilo_prompt.is_alive():
                 return False
             time.sleep(_POLL)
@@ -796,20 +936,61 @@ class TaskManager:
             resultado = "completed_with_warnings"
         else:
             resultado = "completed"
+
+        # "Completada" sin haber tocado un fichero no es completada. Pasa
+        # cuando OpenCode acepta el trabajo y no tiene con qué ejecutarlo: en
+        # el contenedor se comprobó que no hay NI UN proveedor configurado, así
+        # que acepta el encargo, no hace nada y devuelve vacío. Decir
+        # "Implementación completada" con cero ficheros es mentarle al señor
+        # sobre lo único que ha pedido.
+        sin_hacer = (not cambios
+                     and not (texto_final or "").strip())
+        atascada = bool(p.get("atascada"))
+        # OJO: hay que mirar TAMBIÉN "completed_with_warnings". Si hay avisos
+        # pero ningún fichero, el resultado es "completada con matices" y la
+        # tarea se daba por buena igual. Con avisos de por medio la condición
+        # de antes no se cumplía y se escapaba.
+        if sin_hacer and resultado in ("completed", "completed_with_warnings"):
+            resultado = "failed"
+            fallos = list(fallos) + [{
+                "nombre": "opencode-trabajo",
+                "ok": False,
+                "grave": True,
+                # La clave se llama `detail` y no `detalle` porque es la que
+                # lee `_resumen()`. Con `detalle` salía un `KeyError: 'detail'`
+                # al cerrar, el hilo de la tarea moría y la tarea se quedaba
+                # en RUNNING para siempre sin decir nada. Se vio porque el
+                # vigilante dejó de guardar y el contenedor tenía el
+                # `Exception in thread jarvis-dev-…` enterrado en los logs.
+                "detail": ("OpenCode no ha tocado ningún fichero ni ha "
+                           "contestado nada."),
+            }]
+            comprobaciones = comprobaciones + fallos[-1:]
+
         p["result"] = {"status": resultado, "checks": comprobaciones,
                        "errors": [c for c in fallos], "warnings": avisos,
                        "final_message": texto_final[:2000]}
         p["summary"] = self._resumen(tarea, comprobaciones)
         estado = "COMPLETED" if resultado != "failed" else "FAILED"
-        self._set_status(tarea, estado,
-                         "Implementación completada." if estado == "COMPLETED"
-                         else "OpenCode terminó con problemas.")
+        if atascada:
+            mensaje = (f"OpenCode se quedó parado: {int(_SIN_PROGRESO // 60)} "
+                       "minutos sin hacer ni decir nada.")
+        elif sin_hacer:
+            mensaje = ("OpenCode no ha hecho nada: no tiene ningún modelo "\
+                       "configurado. Revise que tenga una clave (OPENAI_API_KEY, "\
+                       "ANTHROPIC_API_KEY…) dentro del contenedor.")
+        elif estado == "COMPLETED":
+            mensaje = "Implementación completada."
+        else:
+            mensaje = "OpenCode terminó con problemas."
+        self._set_status(tarea, estado, mensaje)
         self._publicar("opencode.completed" if estado == "COMPLETED" else "opencode.error",
                        tarea, detail=(p["summary"].get("resumen") or "")[:240],
                        result=resultado)
         self._publicar("live_task_end", tarea, task_id=tarea["id"],
                        title=("OpenCode · completada" if estado == "COMPLETED"
-                              else "OpenCode · con problemas"),
+                              else ("OpenCode · sin hacer nada" if sin_hacer
+                                    else "OpenCode · con problemas")),
                        failed=estado == "FAILED")
 
     def _validar(self, tarea: dict, respuesta: dict, cambios: list[dict]) -> list[dict]:
@@ -889,6 +1070,11 @@ class TaskManager:
 
     def _resumen(self, tarea: dict, comprobaciones: list[dict]) -> dict:
         p = tarea["payload"]
+        # Solo interesan las comprobaciones que son diccionarios. Una que
+        # llegue en otra forma no puede hacer revirar el cierre: si esta
+        # función peta, el hilo de la tarea muere y el trabajo se queda
+        # abierto para siempre sin estado ni error.
+        checks = [c for c in (comprobaciones or []) if isinstance(c, dict)]
         t = p.get("timings") or {}
         total = ((tarea.get("finished_at") or time.time()) - (tarea.get("created_at") or time.time()))
         esperando = (t.get("permission", 0.0) or 0.0) + (t.get("question", 0.0) or 0.0)
@@ -921,9 +1107,17 @@ class TaskManager:
                 "tests": round(t.get("tests", 0.0) or 0.0, 1),
                 "esperando_usuario": round(esperando, 1),
             },
-            "errores": [c["detail"] for c in comprobaciones if not c["ok"] and c["grave"]][:6],
-            "advertencias": [c["detail"] for c in comprobaciones
-                             if not c["ok"] and not c["grave"]][:6],
+            # `c.get("detail")` y no `c["detail"]`: esta función solo pinta el
+            # resumen, y si le falta una clave no debe reventar. Antes sí
+            # reventaba, y al reventar en el hilo de la tarea el trabajo
+            # hecho se quedaba sin cerrar para siempre. Una comprobación mal
+            # formada se ve como un error sin texto; no como una tarea viva
+            # para siempre.
+            "errores": [str(c.get("detail") or c.get("nombre") or "")
+                        for c in checks if not c.get("ok") and c.get("grave")][:6],
+            "advertencias": [str(c.get("detail") or c.get("nombre") or "")
+                             for c in checks
+                             if not c.get("ok") and not c.get("grave")][:6],
         }
 
     def _fallo(self, tarea: dict, error: str) -> None:
@@ -990,14 +1184,34 @@ class TaskManager:
             self._adaptadores[tarea["id"]] = adaptador
         return adaptador
 
-    def _ruta_por_defecto(self) -> str:
-        """Dónde se trabaja si el usuario no dice nada: el propio JARVIS."""
+    def _ruta_por_defecto(self, idea: str = "") -> str:
+        """Dónde se trabaja si el señor no dice dónde: una carpeta SUYA.
+
+        Antes devolvía `ROOT_DIR`, que es el propio JARVIS. Está comprobado: al
+        pedir «una web para llevar los gastos» el plan SALIÓ diciendo que
+        escribiera `/app/brain/models.py`, `/app/brain/routes.py` y
+        `/app/brain/app.py`. Si el señor aprueba eso, OpenCode le pisa el
+        cerebro a JARVIS por una app de gastos. Aquí se cueló por dos sitios:
+        el plannerreceive la ruta, y además `tools/opencode_tools` usa su
+        propia carpeta (`DATA_DIR/proyectos`), así que los dos caminos
+        escribían en sitios distintos.
+
+        Ahora la idea nueva va a `DATA_DIR/proyectos/<nombre>`, y aunque
+        alguien pase una ruta dentro del código de JARVIS a propósito, se
+        comprueba abajo: solo se permite si la idea habla de tocar JARVIS.
+        """
         try:
-            from config import ROOT_DIR
-            return str(ROOT_DIR)
+            from config import DATA_DIR
+            base = str(DATA_DIR) if str(DATA_DIR) else os.getcwd()
         except Exception:  # noqa: BLE001
-            import os
-            return os.getcwd()
+            base = os.getcwd()
+        nombre = _nombre_de_proyecto(idea) or "proyecto"
+        destino = os.path.join(base, "proyectos", nombre)
+        try:
+            os.makedirs(destino, exist_ok=True)
+        except OSError:
+            pass
+        return destino
 
     # ------------------------------------------------------------------ #
     # Vistas para el panel

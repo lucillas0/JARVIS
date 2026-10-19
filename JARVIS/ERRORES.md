@@ -314,6 +314,111 @@ Python avisaba por consola en cada evento perdido al apagar.
 
 ---
 
+## «Desarrollame una web» escribía encima del cerebro de JARVIS
+
+El plan que salía para una idea corriente («una web para llevar los gastos»)
+decía, textual:
+
+```
+2. Definir modelo de gasto → en /app/brain/models.py
+3. Implementar API REST     → en /app/brain/routes.py
+4. Configurar aplicación    → /app/brain/app.py
+```
+
+La causa era `_ruta_por_defecto()`, que devolvía `ROOT_DIR`: el propio JARVIS.
+Aprobada la idea, OpenCode le pisaba el cerebro con una app de gastos.
+
+Ahora la idea va a `DATA_DIR/proyectos/<nombre>`, y hay un guardián: una ruta
+dentro del código de JARVIS solo se acepta si la idea habla claramente de
+modificar JARVIS. Probado en `test_seguridad_proyectos.py`.
+
+---
+
+## JARVIS no encontraba un servidor de OpenCode que estaba levantado
+
+`health()` preguntaba a `/api/info`. En OpenCode 1.19 **esa ruta no existe**:
+devuelve el HTML de la interfaz, no JSON. Así que `health()` decía «OpenCode
+devolvió una respuesta que no es JSON», `ensure()` no encontraba el servidor
+**nunca**, y la tarea se quedaba eternamente en `STARTING_OPENCODE`.
+
+Las rutas se han leído del esquema que publica el propio servidor en `/doc`.
+Ahora se prueban varias: `/global/health`, `/api/health`, `/api/info`,
+`/health`, y vale la primera que conteste JSON.
+
+### Y `ensure()` no cumplía su propio plazo
+
+El parámetro `timeout` no se usaba para nada. Los dos arranques tenían relojes
+propios (45 s y 30 s) y se encadenaban: `ensure(timeout=15)` tardaba más de
+minuto y medio. Y el reparto estaba peor — de los 25 s del llamante, 12 se
+iban esperando un fichero de registro que nunca llegaba, porque
+`opencode service start` **falla** (ese subcomando ya no existe). Al servidor
+propio, que es el que sí funciona, le tocaban menos de un segundo.
+
+### Y OpenCode nunca cerraba el turno
+
+`send_prompt()` espera a que la sesión quede libre, y su límite eran **dos
+horas**. Con el contenedor sin modelo, OpenCode aceptaba el encargo, escribía
+un mensaje de error (`HTTP transport failed`) y se quedaba ahí: la petición no
+se cerraba, el hilo no terminaba y la tarea se quedaba en `RUNNING` con el
+último evento siendo «OpenCode está trabajando.» y sin decir nada más.
+
+Ahora hay un reloj de estancamiento (`_SIN_PROGRESO`, 10 min): sin ningún
+mensaje nuevo, ningún fichero tocado y ninguna pregunta, la tarea se da por
+parada y se explica. Configurable con `JARVIS_OPENCODE_SIN_PROGRESO`.
+
+---
+
+## Tres incompatibilidades con la API de OpenCode 1.19
+
+| Qué | Lo que mandaba JARVIS | Lo que quiere 1.19 |
+|---|---|---|
+| Sesión | leía `respuesta["id"]` | `/api/session` devuelve **`{"data": {...}}`** envuelto |
+| Prompt | `{"text": ...}` | **`{"prompt": {"text": ...}}`**, con `additionalProperties: false` |
+| Salud | `/api/info` | **`/global/health`** (la otra devuelve el HTML) |
+
+El envoltorio se quita **en el cliente**, no en cada llamada: así las dos
+rutas que OpenCode sirve devuelven lo mismo y un cambio de versión no rompe
+diez sitios.
+
+Y el prompt mal formado contestaba `Missing key at ["prompt"]`: la tarea moría
+diciendo «OpenCode terminó con problemas» sin decir por qué.
+
+---
+
+## «Implementación completada» con cero ficheros
+
+Cuando OpenCode no tenía modelo, no escribía nada — y JARVIS lo contaba como
+**completado**. Mentir sobre lo único que se ha pedido no vale.
+
+Ahora una tarea que termina sin haber tocado ningún fichero **se marca como
+fallida** y explica por qué. La comprobación tiene que mirar también
+`completed_with_warnings`: si hay avisos pero ningún fichero, se escapaba.
+
+### Y el arreglo inicial traía un fallo que dejaba la tarea viva para siempre
+
+La comprobación nueva usaba la clave `detalle`, siendo que el cierre la lee
+como `detail`. Al cerrar la tarea:
+
+```
+Exception in thread jarvis-dev-dev-3c93e9960a:
+    "errores": [c["detail"] for c in comprobaciones ...
+KeyError: 'detail'
+```
+
+El hilo de la tarea **moría**: la tarea se quedaba en `RUNNING` para siempre
+y el error solo salía enterrado en `docker logs`.
+
+Se encontró porque el vigilante dejó de guardar la tarea y `updated_at`
+llevaba 301 s sin tocarse mientras la API contestaba normal. El vigilante no
+estaba colgado: estaba muerto.
+
+Arreglado por dos lados: la clave correcta, y `_resumen()` ya no puede reventar
+aunque le llegue una comprobación sin esa clave o que no sea un diccionario.
+Una función que solo pinta el resumen no puede dejar trabajo abierto para
+siempre.
+
+---
+
 ## Otros
 
 - **La respuesta de una investigación salía en inglés**: `He investigated
