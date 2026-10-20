@@ -9,6 +9,7 @@ delega en el módulo que ya usa JARVIS (`library`, `tools.auto_tools`,
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
@@ -387,12 +388,75 @@ def agentes() -> dict:
             "activo": activo,
             "procesos": detected.get("procesos", []) if activo else [],
             "ejecutable": ejecutable,
-            "acciones": {"start": bool(ejecutable or clave == "jarvis"),
-                         "stop": False, "pause": False, "resume": False},
+            "acciones": {
+                # «Abrir» se puede si el programa está instalado.
+                "start": bool(ejecutable or clave == "jarvis"),
+                # «Cerrar» se puede si el programa está ABIERTO: `agente_parar`
+                # existe y hace trabajo de verdad (cuenta los procesos reales,
+                # pide permiso y termina de forma educada). Estaba puesto a
+                # `False` a propósito y el botón no se dibujaba nunca, aunque
+                # todo el trabajo estaba hecho.
+                "stop": bool(activo),
+                "pause": False, "resume": False},
             "nota": "Solo lectura: apps.py detecta procesos, no los gobierna."
-                    if not ejecutable else "Se puede abrir el programa.",
+                    if not ejecutable else
+                    ("Abierto y en marcha." if activo else "Se puede abrir el programa."),
         })
     return {"ok": True, "agentes": lista}
+
+
+def agente_iniciar(agente_id: str) -> dict:
+    """Abre el programa del agente, si está instalado.
+
+    ESTA FUNCIÓN NO EXISTÍA
+    -----------------------
+    El botón «Abrir» del centro de mando llamaba a `services.agente_iniciar`, y
+    esa función no estaba en ningún sitio del repositorio. Como la ruta no lo
+    envolvía en un `try`, el panel recibía un **HTTP 500** y el señor veía
+    «El cerebro respondió con HTTP 500.» al pulsar «Abrir».
+
+    Ahora usa el mismo lanzador que usa la herramienta `open_app` del sistema
+    (`tools/system_tools._launch_native`), que es el que ya sabe abrir cosas
+    bien en cada sistema operativo, en vez de inventar un lanzador nuevo.
+    """
+    clave = str(agente_id or "").strip()
+    if not clave:
+        return {"ok": False, "error": "Falta el agente."}
+    try:
+        import apps
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:160]}
+    candidatos = list(apps.DETECTORES.get(clave) or [])
+    if not candidatos:
+        return {"ok": False, "error": f"{clave} no es un agente conocido."}
+
+    import shutil
+    ejecutable = next((c for c in candidatos if shutil.which(c)), "")
+    if not ejecutable:
+        return {"ok": False,
+                "error": f"{clave} no está instalado en este equipo."}
+
+    try:
+        from tools.system_tools import _launch_native
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"No sé abrir programas: {exc}"}
+    try:
+        if os.name == "nt":
+            r = _launch_native(ejecutable)
+            codigo = getattr(r, "returncode", 0)
+        else:
+            # En Linux y Docker no hay `os.startfile`: se lanza directamente y
+            # se cierra la mano con él, que es lo que se quiere (abrir el
+            # programa y que se quede).
+            import subprocess
+            subprocess.Popen([ejecutable],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            codigo = 0
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"No se pudo abrir {ejecutable}: {exc}"}
+    return {"ok": True, "agente": clave, "abierto": ejecutable, "rc": codigo}
 
 
 def agente_parar(agente_id: str) -> dict:

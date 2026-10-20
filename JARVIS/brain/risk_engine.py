@@ -66,11 +66,16 @@ def normalizar_nivel(nivel: str) -> str:
 class PendingConfirmation:
     """Representa una confirmación pendiente con timeout."""
     def __init__(self, action_id: str, description: str, timeout_seconds: int,
-                 cancel_callback: Optional[Callable[[], Awaitable[None]]] = None):
+                 cancel_callback: Optional[Callable[[], Awaitable[None]]] = None,
+                 tool_name: str = ""):
         self.action_id = action_id
         self.description = description
         self.timeout_seconds = timeout_seconds
         self.cancel_callback = cancel_callback
+        # El nombre de la herramienta que se quiere ejecutar. Sin esto, cuando
+        # el señor dice «permite siempre» no se sabe qué ámbito hay que dejar
+        # concedido, y lo único que se puede hacer es resolver esta vez.
+        self.tool_name = tool_name
         self.result: Optional[bool] = None
         self._event = asyncio.Event()
 
@@ -185,7 +190,8 @@ class RiskEngine:
             f"Voy a ejecutar: {name} ({params}). ¿Confirma?"
         )
 
-        pending = PendingConfirmation(action_id, description, self.timeout)
+        pending = PendingConfirmation(action_id, description, self.timeout,
+                                     tool_name=name)
         with self._pending_lock:
             self._pending[action_id] = pending
 

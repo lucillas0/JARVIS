@@ -166,6 +166,13 @@ def permisos() -> dict:
                         "id": action_id, "origen": "JARVIS", "accion": "Acción protegida",
                         "detalle": str(getattr(item, "description", ""))[:300],
                         "riesgo": str(getattr(item, "risk_level", "sensitive"))[:24],
+                        # `resoluble` y `herramienta` son lo que usa el panel
+                        # para dibujar los botones. Antes solo se dibujaban los
+                        # permisos que traían `mision` (los de OpenCode), así
+                        # que los de JARVIS salían en la lista SIN forma de
+                        # resolverlos: el panel no podía aprobar nada.
+                        "resoluble": True,
+                        "herramienta": str(getattr(item, "tool_name", ""))[:60],
                         "vence_en": max(0, int(getattr(item, "timeout_seconds", 0)
                                                - (time.monotonic() - getattr(
                                                    item, "created_at", time.monotonic())))),

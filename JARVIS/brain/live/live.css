@@ -39,7 +39,14 @@
 *{box-sizing:border-box}
 html{background:var(--fondo)}
 body{margin:0;color:var(--texto);font-family:var(--ui);font-size:14px;line-height:1.5;
-  background:var(--fondo);overflow:hidden}
+  background:var(--fondo)}
+/* El `overflow:hidden` estaba en el `body`. Como el `html` no lo lleva, ese
+   overflow se propaga al viewport y la página se recortaba: media interfaz
+   quedaba inalcanzable en 1080p, y con ella la respuesta de JARVIS, que vive
+   en un `<p>` de la barra inferior. Ahora el corte lo lleva `.principal`, que
+   es quien tiene que desplazarse, y el `body` solo fija la altura para que la
+   barra de órdenes quede fija abajo. */
+html,body{height:100%}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 a{color:inherit;text-decoration:none}
 :focus-visible{outline:2px solid var(--acento);outline-offset:2px;border-radius:4px}
@@ -143,7 +150,8 @@ a{color:inherit;text-decoration:none}
 
 /* ─────────────────────────────── principal ─────────────────────────────── */
 .principal{margin-left:var(--ancho-nav);margin-top:var(--alto);margin-right:var(--ancho-lateral);
-  padding:18px 20px 96px;min-height:100vh;transition:margin .22s ease}
+  padding:18px 20px 96px;height:calc(100vh - var(--alto));overflow-y:auto;
+  transition:margin .22s ease}
 .nav.contenido ~ .principal{margin-left:64px}
 .vista{display:none;flex-direction:column;gap:14px}
 .vista.activa{display:flex}
@@ -393,8 +401,15 @@ a{color:inherit;text-decoration:none}
 .command-bar .btn.accionar{min-height:38px;padding:0 20px;border-radius:10px;
   background:var(--acento);border-color:var(--acento);color:#04121e;font-weight:700}
 .command-bar .btn.accionar:hover:not(:disabled){background:#5ac8fa;color:#04121e}
-.respuesta{margin:0 20px 0 0;padding:10px 14px;border-left:2px solid var(--acento);background:var(--panel);
-  border-radius:0 8px 8px 0;font-size:12.5px;color:var(--texto-2);white-space:pre-wrap;overflow-wrap:break-word}
+/* La respuesta vive FUERA del `<main>`, así que con el scroll arreglado caía
+   debajo del borde inferior, justo detrás de la barra de órdenes: el señor
+   escribía su orden y no veía la contestación. Ahora está fija encima de la
+   barra, que es donde tiene que estar. */
+.respuesta{position:fixed;left:var(--ancho-nav);right:var(--ancho-lateral);bottom:74px;z-index:34;
+  margin:0 20px 0 0;padding:10px 14px;border-left:2px solid var(--acento);background:var(--panel);
+  border-radius:0 8px 8px 0;font-size:12.5px;color:var(--texto-2);white-space:pre-wrap;overflow-wrap:break-word;
+  max-height:22vh;overflow-y:auto}
+.nav.contenido ~ .respuesta{left:64px}
 
 /* ─────────────────────────────── varios ─────────────────────────────── */
 .campo{width:100%;background:var(--panel);border:1px solid var(--linea);border-radius:10px;color:var(--texto);

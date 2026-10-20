@@ -222,6 +222,11 @@
       TESTING: ['EJECUTANDO TESTS', 'ok'], WAITING_PERMISSION: ['ESPERANDO PERMISO', 'espera'],
       WAITING_USER: ['ESPERANDO DECISIÓN', 'espera'], COMPLETED: ['COMPLETADA', 'fin'],
       FAILED: ['CON PROBLEMAS', 'parada'], CANCELLED: ['DETENIDA', 'parada'],
+      // Estos tres no estaban: salian en ingles crudo dentro de una
+      // interfaz en espanol.
+      PAUSED: ['PAUSADA', 'espera'],
+      ERROR: ['CON ERROR', 'parada'],
+      COMPLETED_WITH_WARNINGS: ['COMPLETADA CON AVISOS', 'ok'],
     };
     return mapa[estado] || [(estado || '—'), 'espera'];
   }
@@ -274,6 +279,12 @@
     }
     if (['RUNNING', 'TESTING', 'ANALYZING', 'PLANNING', 'STARTING_OPENCODE'].includes(a.estado)) {
       botones.push(`<button type="button" class="btn" data-mision="pause" data-id="${id}">Pausar</button>`);
+      botones.push(`<button type="button" class="btn peligro" data-mision="cancel" data-id="${id}">Detener</button>`);
+    }
+    if (a.estado === 'PAUSED') {
+      // El endpoint de reanudar existia y funcionaba, pero el boton no se
+      // dibujaba, asi que una tarea pausada se quedaba pausada para siempre.
+      botones.push(`<button type="button" class="btn ok" data-mision="resume" data-id="${id}">Reanudar</button>`);
       botones.push(`<button type="button" class="btn peligro" data-mision="cancel" data-id="${id}">Detener</button>`);
     }
     if (['FAILED', 'CANCELLED'].includes(a.estado)) {
@@ -684,17 +695,50 @@
   function pintarPermisos() {
     const per = S.per || {};
     const pend = Array.isArray(per.pendientes) ? per.pendientes : [];
-    $('per-pendientes').innerHTML = pend.length ? pend.map((p) => `
+    // Antes los botones solo se dibujaban si el permiso traía `mision`, que
+    // es un dato de las misiones de OpenCode. Los permisos del propio JARVIS
+    // (los del Risk Engine) salían en la lista SIN ninguna forma de
+    // resolverlos, así que el panel no podía aprobar nada.
+    //
+    // Ahora se dibujan para los dos orígenes, y cada uno va a su endpoint:
+    // los de JARVIS a `/api/cmd/permisos/{id}/decidir` y los de OpenCode al
+    // que ya usaba el panel.
+    const botones = (p) => {
+      if (!p.resoluble && !p.mision) return '';
+      if (p.origen === 'OpenCode') {
+        return `<div class="acciones">
+          <button type="button" class="btn chico peligro" data-permiso="reject" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Denegar</button>
+          <button type="button" class="btn chico ok" data-permiso="once" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Permitir una vez</button>
+          <button type="button" class="btn chico" data-permiso="always" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Permitir siempre</button>
+        </div>`;
+      }
+      return `<div class="acciones">
+        <button type="button" class="btn chico peligro" data-permiso="reject" data-id="${esc(p.id)}" data-herramienta="${esc(p.herramienta || '')}">Denegar</button>
+        <button type="button" class="btn chico ok" data-permiso="once" data-id="${esc(p.id)}" data-herramienta="${esc(p.herramienta || '')}">Permitir una vez</button>
+        <button type="button" class="btn chico" data-permiso="always" data-id="${esc(p.id)}" data-herramienta="${esc(p.herramienta || '')}">Permitir siempre</button>
+      </div>`;
+    };
+
+    // La peticion de la autocorreccion va primero: si esta esperando, es lo
+    // mas urgente que hay en la pantalla.
+    const heal = S.heal || {};
+    const healHtml = heal.action_id ? `
+      <div class="caja alerta">
+        <h3>JARVIS quiere arreglar algo <span class="insignia-estado">autorreparación</span></h3>
+        <p>${esc(heal.description || heal.detail || 'Pide permiso para tocar el sistema.')}</p>
+        <div class="acciones">
+          <button type="button" class="btn chico peligro" data-heal="reject" data-id="${esc(heal.action_id)}">Denegar</button>
+          <button type="button" class="btn chico ok" data-heal="once" data-id="${esc(heal.action_id)}">Permitir</button>
+        </div>
+      </div>` : '';
+
+    $('per-pendientes').innerHTML = (healHtml + (pend.length ? pend.map((p) => `
       <div class="caja ${p.origen === 'OpenCode' ? 'alerta' : ''}">
         <h3>${esc(p.accion || '')} <span class="insignia-estado">${esc(p.origen || '')}</span></h3>
         <p>${esc(p.detalle || p.mensaje || '')}</p>
         ${p.espera != null ? `<p class="nota">Esperando ${dur(p.espera)}</p>` : ''}
-        ${p.mision ? `<div class="acciones">
-          <button type="button" class="btn chico peligro" data-permiso="reject" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Denegar</button>
-          <button type="button" class="btn chico ok" data-permiso="once" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Permitir una vez</button>
-          <button type="button" class="btn chico" data-permiso="always" data-id="${esc(p.id)}" data-mision="${esc(p.mision)}">Permitir siempre</button>
-        </div>` : ''}
-      </div>`).join('') : vacio('No hay permisos pendientes', 'JARVIS no hace nada protegido sin tu visto bueno.');
+        ${botones(p)}
+      </div>`).join('') : '')) + (healHtml || (pend.length ? '' : vacio('No hay permisos pendientes', 'JARVIS no hace nada protegido sin tu visto bueno.')));
 
     const amb = Array.isArray(per.ambitos) ? per.ambitos : [];
     $('per-ambitos').innerHTML = amb.length ? amb.map((a) => `
@@ -757,6 +801,27 @@
           <span class="detalle-agent">${esc(t.estado)}${t.duracion ? ` · ${dur(t.duracion)}` : ''}${t.resumen ? ` · ${esc(t.resumen)}` : ''}${t.error ? ` · ${esc(t.error)}` : ''}</span></span>
         <button type="button" class="btn chico" style="margin-left:auto" data-test-ver="${esc(t.id)}">Salida</button>
       </div>`).join('') : '<p class="vacio-mini">Aún no se ha ejecutado nada.</p>';
+  }
+
+  /* Boton «Ejecutar» de la cabecera de «Comandos detectados».
+     Antes no tenia handler: era un boton que no hacia nada. Ahora ejecuta el
+     comando que el proyecto declara (el primero), y si no hay ninguno dice
+     por que y se desactiva, en vez de fallar en silencio. */
+  async function ejecutarTests() {
+    const boton = $('tes-ejecutar');
+    try {
+      const d = await get('/api/cmd/pruebas');
+      const cands = Array.isArray(d.candidatos) ? d.candidatos : [];
+      if (!cands.length) {
+        avisar('El proyecto no declara comando de tests, asi que no hay nada que ejecutar.', true);
+        return;
+      }
+      await conBoton(boton, () => post('/api/cmd/pruebas', { comando: cands[0].comando }));
+      avisar(`Ejecutando: ${cands[0].comando}`);
+      await refrescar(true);
+    } catch (e) {
+      avisar(e.message, true);
+    }
   }
 
   async function verTrabajo(id) {
@@ -959,8 +1024,16 @@
       // por un extra es peor que un panel sin el extra.
       tareas.push(get('/api/cmd/agentes/estado').catch(() => ({ ok: false })));
       tareas.push(get('/api/cmd/recursos/decisiones').catch(() => ({ ok: false })));
-      const [estado, act, per, ag, ia, agMgr, recMgr] = await Promise.all(tareas);
+      // El estado de la voz va en el mismo lote: el indicador vive en el pie
+      // del menu lateral y se ve desde cualquier vista.
+      tareas.push(get('/api/live/overview').catch(() => ({ voice_available: false })));
+      const [estado, act, per, ag, ia, agMgr, recMgr, vozDatos] = await Promise.all(tareas);
       S.estado = estado; S.act = act; S.per = per; S.ag = ag;
+      // El indicador de voz se pintaba una sola vez al arrancar, asi que
+      // ponia 'inactivo' durante toda la sesion aunque JARVIS estuviera
+      // hablando. Va aqui, en cada pasada del panel, porque el indicador
+      // esta en el pie del menu lateral, que se ve desde cualquier vista.
+      voz(vozDatos);
       S.ia = ia && ia.ok ? (ia.uso || {}) : {};
       S.agentesMgr = agMgr && agMgr.ok ? agMgr : null;
       S.recursosMgr = recMgr && recMgr.ok ? recMgr : null;
@@ -1031,7 +1104,14 @@
         }
       }
       const tipo = String(m.type || '');
-      if (/^(opencode\.|live_task|confirmation_|heal_|agent_|action_status|selfheal_)/.test(tipo)) {
+      // La autocorreccion pide permiso antes de tocar nada. El evento llegaba
+    // por el WebSocket pero el panel no lo pintaba, asi que no habia forma de
+    // responderle: se quedaba esperando sola.
+    if (tipo === 'heal_approval_request') {
+      S.heal = d;
+      avisar('JARVIS quiere tocar algo para arreglar un fallo. Decide en «Permisos».');
+    }
+    if (/^(opencode\.|live_task|confirmation_|heal_|agent_|action_status|selfheal_)/.test(tipo)) {
         clearTimeout(t);
         t = setTimeout(() => refrescar(), 250);
       }
@@ -1061,6 +1141,9 @@
         cancel: ['cancelar', 'Misión detenida.'],
         pause: ['pausar', 'Turno de OpenCode interrumpido.'],
         retry: ['reintentar', 'Misión relanzada.'],
+        // Reanudar: el endpoint existía y funcionaba, pero no estaba en la
+        // tabla, asi que el boton no hacia nada.
+        resume: ['resume', 'Misión reanudada.'],
         analyze: ['analizar', 'JARVIS está analizando el proyecto.'],
       };
       const [ruta, okMsg] = rutas[accion] || [null, null];
@@ -1073,11 +1156,20 @@
     }).catch((e) => avisar(e.message, true));
   }
 
-  async function accionPermiso(decision, id, mision, boton) {
+  async function accionPermiso(decision, id, mision, boton, herramienta) {
     await conBoton(boton, async () => {
-      if (!mision) throw new Error('Ese permiso no viene de una misión de OpenCode.');
-      const d = await post(`/api/dev/tasks/${encodeURIComponent(mision)}/permissions/${encodeURIComponent(id)}`, { decision });
-      avisar(d.message || `Permiso enviado: ${decision}.`);
+      // Dos caminos distintos segun de quien sea el permiso. Los de OpenCode
+      // cuelgan de una mision; los del Risk Engine de JARVIS no, y antes no
+      // habia manera de resolverlos desde aqui: el panel no podia aprobar
+      // nada, y el commit se quedaba esperando al timeout de 30 s.
+      if (mision) {
+        const d = await post(`/api/dev/tasks/${encodeURIComponent(mision)}/permissions/${encodeURIComponent(id)}`, { decision });
+        avisar(d.message || `Permiso enviado: ${decision}.`);
+      } else {
+        const d = await post(`/api/cmd/permisos/${encodeURIComponent(id)}/decidir`,
+                             { decision, herramienta: herramienta || '' });
+        avisar(d.ok ? `Permiso ${decision}: hecho.` : (d.error || 'No se pudo resolver el permiso.'));
+      }
       await refrescar(true);
     }).catch((e) => avisar(e.message, true));
   }
@@ -1138,7 +1230,7 @@
         const d = permiso.dataset.permiso;
         if (d === 'always' && !window.confirm('¿Permitir esto siempre, también en futuras misiones?')) return;
         if (d === 'reject' && !window.confirm('¿Denegar? OpenCode no podrá continuar esa acción.')) return;
-        await accionPermiso(d, permiso.dataset.id, permiso.dataset.mision, permiso);
+        await accionPermiso(d, permiso.dataset.id, permiso.dataset.mision, permiso, permiso.dataset.herramienta);
         return;
       }
 
@@ -1290,6 +1382,22 @@
         return;
       }
 
+      const heal = ev.target.closest('[data-heal]');
+      if (heal) {
+        const decision = heal.dataset.heal;
+        if (decision === 'reject' && !window.confirm('Denegar la autoreparación?')) return;
+        await conBoton(heal, () => post(`/api/cmd/autorreparacion/${encodeURIComponent(heal.dataset.id)}/decidir`, { decision }))
+          .then(() => { S.heal = {}; avisar(decision === 'reject' ? 'Denegado.' : 'Permitido.'); })
+          .then(() => refrescar(true))
+          .catch((e) => avisar(e.message, true));
+        return;
+      }
+
+      if (ev.target.closest('#tes-ejecutar')) {
+        await ejecutarTests();
+        return;
+      }
+
       const test = ev.target.closest('[data-test-cmd]');
       if (test) {
         await conBoton(test, () => post('/api/cmd/pruebas', { comando: test.dataset.testCmd }))
@@ -1408,9 +1516,16 @@
   }
 
   /* ───────────────────────── arranque ───────────────────────── */
-  async function voz() {
-    try { S.voz = await get('/api/live/overview'); pintarVoz(); }
-    catch { S.voz = { voice_available: false }; pintarVoz(); }
+  async function voz(datos) {
+    // Si ya viene en el lote de `refrescar()`, no se pide otra vez: el panel
+    // hace siete peticiones en cada pasada y no hacía falta una octava.
+    try {
+      S.voz = datos || await get('/api/live/overview');
+      pintarVoz();
+    } catch {
+      S.voz = { voice_available: false };
+      pintarVoz();
+    }
   }
 
   function arrancar() {

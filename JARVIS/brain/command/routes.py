@@ -54,7 +54,7 @@ import re
 # 500 al señor. No estaba importado, y PUT /memoria/recuerdos/{id} estaba roto.
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -338,6 +338,112 @@ async def cmd_permisos(request: Request):
     if not _authorized(request):
         return _no_autorizado()
     return JSONResponse(await asyncio.to_thread(activity.permisos))
+
+
+@router.post("/permisos/{action_id}/decidir")
+async def cmd_decidir_permiso(request: Request, action_id: str,
+                              cuerpo: dict = Body(default={})):
+    """Resuelve un permiso pendiente del Risk Engine de JARVIS.
+
+    POR QUÉ ESTA RUTA
+    -----------------
+    Los permisos que pide JARVIS (los del Risk Engine) no se podían resolver
+    desde el panel: el botón se dibujaba solo si el permiso traía `mision`, y
+    los del Risk Engine no la traían. El único sitio que los resolvía era un
+    endpoint de otro módulo (`/api/live/actions`) que la interfaz no
+    llamaba. Resultado: desde el centro de mando no se podía aprobar nada, y
+    el «Confirmar cambios» (el commit) se quedaba esperando hasta que el
+    permiso expiraba a los 30 s y salía «Denegado por el usuario».
+
+    Ahora se resuelven por aquí, que es la ruta que el panel ya usa para todo
+    lo demás. Los de OpenCode siguen por su endpoint, que es el que ya
+    usaba el panel.
+
+    `once` = permitir esta vez; `always` = permitir y acordarse el ámbito;
+    `reject` = denegar.
+    """
+    if not _authorized(request):
+        return _no_autorizado()
+    decision = str((cuerpo or {}).get("decision") or "once").strip().lower()
+    if decision not in ("once", "always", "reject"):
+        return JSONResponse({"ok": False, "error": "Decisión no válida."},
+                            status_code=400)
+    accion = str(action_id or "").strip()
+    if not accion:
+        return JSONResponse({"ok": False, "error": "Falta el permiso."},
+                            status_code=400)
+    alcance = str((cuerpo or {}).get("herramienta") or "").strip()
+
+    def _resolver():
+        import main
+        brain = getattr(main, "brain", None)
+        engine = getattr(brain, "risk", None) if brain is not None else None
+        if engine is None:
+            return {"ok": False, "error": "El motor de permisos no está listo."}
+        engine.resolve(accion, decision != "reject")
+        if decision == "always" and alcance:
+            try:
+                from authz import concede as _concede
+                _concede(alcance, decision="always")
+            except Exception as exc:  # noqa: BLE001
+                log.info("permiso %s permitido, pero el ámbito %s no se pudo "
+                         "acordar: %s", accion, alcance, exc)
+        return {"ok": True, "permiso": accion, "decision": decision}
+
+    try:
+        res = await asyncio.to_thread(_resolver)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("no se pudo resolver el permiso %s: %s", accion, exc)
+        return JSONResponse({"ok": False, "error": str(exc)[:200]},
+                            status_code=500)
+    return JSONResponse(res)
+
+
+@router.post("/autorreparacion/{action_id}/decidir")
+async def cmd_decidir_autorreparacion(request: Request, action_id: str,
+                                       cuerpo: dict = Body(default={})):
+    """Resuelve la petición de permiso de la autocorrección (self-heal).
+
+    La autocorrección pide permiso antes de tocar nada, y emitía el evento
+    `heal_approval_request` por el WebSocket. El único sitio donde se podía
+    responder era `/api/live/actions`, un endpoint de otro módulo al que el
+    panel no llamaba: desde el centro de mando la autocorrección se quedaba
+    esperando sola.
+
+    Ahora se responde por aquí, que es la ruta que el panel ya usa.
+    """
+    if not _authorized(request):
+        return _no_autorizado()
+    decision = str((cuerpo or {}).get("decision") or "reject").strip().lower()
+    if decision not in ("once", "always", "reject"):
+        return JSONResponse({"ok": False, "error": "Decisión no válida."},
+                            status_code=400)
+    accion = str(action_id or "").strip()
+    if not accion:
+        return JSONResponse({"ok": False, "error": "Falta la petición."},
+                            status_code=400)
+
+    def _resolver():
+        from memory import selfheal
+        return bool(selfheal.resolve_approval(accion, decision != "reject"))
+
+    try:
+        aceptado = await asyncio.to_thread(_resolver)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("no se pudo resolver la autocorrección %s: %s", accion, exc)
+        return JSONResponse({"ok": False, "error": str(exc)[:200]},
+                            status_code=503)
+    if aceptado:
+        try:
+            import main
+            main.brain.emit({"type": "confirmation_resolved",
+                             "action_id": accion, "approved": decision != "reject",
+                             "ok": True})
+        except Exception:  # noqa: BLE001
+            pass
+    return JSONResponse({"ok": aceptado, "error": None if aceptado
+                         else "La aprobación ya no está pendiente."},
+                        status_code=200 if aceptado else 404)
 
 
 @router.get("/salud")
