@@ -43,7 +43,18 @@ def main_() -> int:
     from fastapi.testclient import TestClient
     import main
 
+    # `/wa` pide token desde que la API se cerro: sin el, el puente de
+    # WhatsApp y este script serian control del cerebro sin credencial.
+    # Se entra por la puerta de entrada, como haria un navegador.
+    import auth
+    token = auth.token()
     cliente = TestClient(main.app)
+    entrada = cliente.post("/entrar", json={"token": token})
+    if entrada.status_code != 200:
+        print(f"    · no se pudo entrar: HTTP {entrada.status_code}")
+        return 1
+    print(f"    (sesion iniciada con la puerta de entrada, HTTP {entrada.status_code})")
+
     with cliente:
         # --- La API vive ---------------------------------------------
         r = cliente.get("/health")
