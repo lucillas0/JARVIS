@@ -105,6 +105,81 @@ def coincide(candidato: str | None) -> bool:
     return hmac.compare_digest(str(candidato).strip(), token())
 
 
+# --------------------------------------------------------------------------- #
+# La sesión: cookie HttpOnly
+# --------------------------------------------------------------------------- #
+#
+# POR QUÉ EXISTE
+# --------------
+# El token se inyectaba en el HTML de las páginas que se servían SIN
+# autenticar (`/config`, `/setup`, `/modo`, `/live`, `/board`). Con el puerto
+# publicado en la LAN, eso significaba que cualquier equipo de la red podía
+# hacer `curl http://IP:8000/config`, leerse el token del HTML, y con él
+# llamar a `POST /api/config/exportar-claves`, que devuelve TODAS las claves
+# de API en claro.
+#
+# La solución no es dejar de usar el token (el panel, el móvil y los scripts
+# lo necesitan), sino dejar de PUBLICARLO. Ahora el token solo se entrega
+# dentro de la cookie de sesión, que es `HttpOnly` (el JavaScript de la
+# página no puede leerla) y `SameSite=Strict` (no viaja a otros sitios). Y
+# las páginas que la necesitan exigen estar autenticado.
+#
+# La cookie contiene el propio token: no hay un segundo secreto que
+# mantener, y la comparación sigue siendo en tiempo constante.
+COOKIE_SESION = "jarvis_sesion"
+
+
+def token_de_la_peticion(request) -> str:
+    """El token de quien llama, venga de donde venga.
+
+    Se mira, en este orden: la cabecera `X-Jarvis-Token` o `Authorization`,
+    la query `?token=` (para descargas y `<img>`, que no pueden mandar
+    cabeceras) y la cookie de sesión.
+
+    Antes la cookie no existia, y por eso el token acababa metido en el HTML
+    de las paginas publicas.
+    """
+    # 1) Cabeceras
+    cabecera = request.headers.get("x-jarvis-token") or ""
+    if not cabecera:
+        auth = request.headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            cabecera = auth[7:]
+    if cabecera.strip():
+        return cabecera.strip()
+    # 2) Query
+    try:
+        q = request.query_params.get("token") or ""
+    except Exception:  # noqa: BLE001
+        q = ""
+    if q.strip():
+        return q.strip()
+    # 3) Cookie de sesion
+    try:
+        galletas = getattr(request, "cookies", None) or {}
+        return str(galletas.get(COOKIE_SESION) or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def autenticado(request) -> bool:
+    """¿Quien llama ha dicho quien es?"""
+    return coincide(token_de_la_peticion(request))
+
+
+def cookie_de_sesion(token: str = "") -> str:
+    """La cookie de sesion, con sus atributos.
+
+    `HttpOnly` para que el JavaScript de la pagina no pueda leerla (asi el
+    token no se puede robar con un XSS), `SameSite=Strict` para que no viaje
+    a otros sitios, y `Secure` solo si la peticion viene por HTTPS (en una
+    instalacion local por HTTP, ponerlo haria que el navegador la tirara).
+    """
+    t = (token or "").strip() or token()
+    partes = [f"{COOKIE_SESION}={t}", "Path=/", "HttpOnly", "SameSite=Strict"]
+    return "; ".join(partes)
+
+
 # Orígenes que SÍ pueden hablar con el cerebro. Todo lo demás se rechaza, y con
 # esto el ataque por pestaña abierta queda tapado aunque el token se filtrara.
 #

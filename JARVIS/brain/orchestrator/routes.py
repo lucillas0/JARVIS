@@ -25,7 +25,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from auth import coincide, origen_permitido
+from auth import autenticado, origen_permitido
 
 from .manager import get_manager
 
@@ -38,11 +38,9 @@ _DECISIONES = ("once", "always", "reject")
 
 
 def _authorized(request: Request) -> bool:
-    """El mismo candado que el resto de JARVIS Live."""
-    authorization = request.headers.get("authorization", "")
-    candidato = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    candidato = candidato or request.headers.get("x-jarvis-token")
-    return origen_permitido(request.headers.get("origin")) and coincide(candidato)
+    """El mismo candado que el resto de JARVIS Live: cabecera, query o cookie."""
+    return (origen_permitido(request.headers.get("origin"))
+            and autenticado(request))
 
 
 def _no_autorizado() -> JSONResponse:

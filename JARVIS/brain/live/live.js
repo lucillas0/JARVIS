@@ -1082,12 +1082,18 @@
   /* ───────────────────────── WebSocket ───────────────────────── */
   function urlWs() {
     const esquema = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${esquema}//${location.host}/ws?token=${encodeURIComponent(token)}`;
+    // Con token, se pasa en la query (movil, Electron). Sin token, se deja
+    // la query vacia y la cookie de sesion hace su trabajo.
+    const q = token ? `?token=${encodeURIComponent(token)}` : '';
+    return `${esquema}//${location.host}/ws${q}`;
   }
 
   function conectar() {
     clearTimeout(S.reintento);
-    if (!token) { avisar('No se recibió la sesión de JARVIS. Recarga la página.', true); return; }
+    // El token ya no viene en el HTML (eso era un agujero: cualquiera en la
+    // LAN se lo llevaba con un curl). La sesion va en una cookie HttpOnly, y
+    // el navegador la manda SOLA en el handshake del WebSocket, asi que aqui
+    // no hace falta el token para nada. Si lo hay (movil, Electron), se usa.
     try { S.ws = new WebSocket(urlWs()); }
     catch { avisar('No se pudo abrir el enlace en tiempo real.', true); return; }
     S.ws.addEventListener('open', () => { S.conectado = true; S.errores = 0; refrescar(true); });

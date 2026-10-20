@@ -12,7 +12,7 @@ from threading import Lock
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from auth import coincide, origen_permitido
+from auth import autenticado, origen_permitido
 from config import BRAIN_DIR
 from memory import sqlite_store as db
 
@@ -88,11 +88,14 @@ def _arrancar_gestores() -> None:
 
 
 def _authorized(request: Request) -> bool:
-    """El mismo token y la misma política de origen que protegen el WebSocket."""
-    authorization = request.headers.get("authorization", "")
-    candidate = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    candidate = candidate or request.headers.get("x-jarvis-token")
-    return origen_permitido(request.headers.get("origin")) and coincide(candidate)
+    """El mismo candado que el resto: cabecera, query o cookie de sesion.
+
+    Antes solo miraba la cabecera y la query, asi que con la sesion por
+    cookie (que es como entra el navegador ahora) el panel se cargaba y sus
+    llamadas a la API contestaban 401.
+    """
+    return (origen_permitido(request.headers.get("origin"))
+            and autenticado(request))
 
 
 def _not_authorized() -> JSONResponse:

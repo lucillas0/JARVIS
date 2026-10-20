@@ -27,12 +27,11 @@ router = APIRouter()
 # Autorización (la misma que el resto del centro de mando)
 # --------------------------------------------------------------------------- #
 def _authorized(request: Request) -> bool:
-    from auth import coincide, origen_permitido
+    """Cabecera, query o cookie de sesion (ver `auth.autenticado`)."""
+    from auth import autenticado, origen_permitido
 
-    authorization = request.headers.get("authorization", "")
-    candidato = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    candidato = candidato or request.headers.get("x-jarvis-token")
-    return origen_permitido(request.headers.get("origin")) and coincide(candidato)
+    return (origen_permitido(request.headers.get("origin"))
+            and autenticado(request))
 
 
 def _no_autorizado() -> JSONResponse:

@@ -58,7 +58,7 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from auth import coincide, origen_permitido
+from auth import autenticado, origen_permitido
 
 from . import activity, ai, briefing, centers, notify, runner, services, store
 
@@ -69,10 +69,15 @@ _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
 
 
 def _authorized(request: Request) -> bool:
-    authorization = request.headers.get("authorization", "")
-    candidato = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    candidato = candidato or request.headers.get("x-jarvis-token")
-    return origen_permitido(request.headers.get("origin")) and coincide(candidato)
+    """Cabecera, query o cookie de sesion.
+
+    `auth.autenticado()` mira las tres. Antes esta funcion (y sus tres
+    copias en otros modulos) miraba solo la cabecera y la query, asi que con
+    la sesion por cookie el panel se cargaba y todas sus llamadas a la API
+    contestaban 401.
+    """
+    return (origen_permitido(request.headers.get("origin"))
+            and autenticado(request))
 
 
 def _no_autorizado() -> JSONResponse:

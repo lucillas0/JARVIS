@@ -149,13 +149,36 @@ def probar_query() -> None:
 
 
 def probar_abiertas() -> None:
-    seccion("4. Lo que debe seguir abierto, abierto")
+    """Lo que DEBE seguir abierto, y lo que ya no.
+
+    Antes estas cuatro paginas (`/live`, `/ui`, `/board`, `/config`) se
+    servian a cualquiera y llevaban el token dentro del HTML. Con el puerto
+    publicado en la LAN, eso era suficiente para robar el token con un
+    `curl` y con el exportar todas las claves de API en claro.
+
+    Ahora se sirven SOLO a quien esta autenticado, y quien no, va a la puerta
+    de entrada.
+    """
+    seccion("4. La puerta de entrada: abierta; las demas, no")
     import main
 
     middleware = main._token_en_las_api
-    for ruta in ("/health", "/", "/live", "/ui", "/board", "/config", "/setup"):
+    for ruta in ("/health", "/healthz", "/entrar", "/"):
         _salida, paso = _ejecutar(middleware, PeticionFalsa("", "GET", ruta))
         comprobar(paso == 1, f"{ruta} sigue abierta (si no, JARVIS no arranca)")
+
+    # Estas ya no se sirven sin sesion.
+    for ruta in ("/live", "/ui", "/board", "/config", "/setup", "/modo"):
+        _salida, paso = _ejecutar(middleware, PeticionFalsa("", "GET", ruta))
+        comprobar(paso == 0,
+                  f"{ruta} pide sesion (antes se servia a cualquiera)")
+
+    # Y con sesion, pasan.
+    import auth
+    bueno = auth.token()
+    for ruta in ("/live", "/ui", "/board", "/config", "/setup"):
+        _salida, paso = _ejecutar(middleware, PeticionFalsa(bueno, "GET", ruta))
+        comprobar(paso == 1, f"{ruta} con sesion se sirve")
 
 
 def probar_options() -> None:
@@ -179,33 +202,56 @@ def probar_no_roto() -> None:
 
 
 def probar_paginas_siguen_sirviendo() -> None:
-    """Las paginas han de llevar el token y el envoltorio de fetch.
+    """Las paginas NO llevan el token, y siguen pudiendo hablar con su API.
 
-    Sin esto, al proteger /api/* la pagina de configuracion se quedaria sin
-    poder guardar ajustes ni importar claves, y la de modo sin poder cambiar
-    de version. Aqui se comprueba que el HTML que sale de verdad lleva lo que
-    su JS necesita.
+    El token dentro del HTML era el agujero: un `curl` en la LAN se lo
+    llevaba. Ahora el token viaja en una cookie `HttpOnly` (que el JavaScript
+    no puede leer) y el navegador la manda solo en cada peticion.
+
+    Aqui se comprueba que el HTML que sale de verdad NO lleva el token, y que
+    si lleva lo que su JS necesita para que las peticiones funcionen.
     """
-    seccion("7. Las paginas siguen pudiendo hablar con su propia API")
+    seccion("7. Las paginas no publican el token, y siguen hablando con su API")
     import main
+    import auth
 
-    # Se llaman directamente a los handlers de pagina: es lo que hace falta
-    # para comprobar el HTML, sin levantar un servidor.
+    token = auth.token()
+
     for ruta, funcion in (("/config", "config_page"), ("/setup", "setup_page"),
-                          ("/modo", "modo_page"), ("/board", "board_page")):
+                          ("/modo", "modo_page"), ("/board", "board_page"),
+                          ("/ui", "ui_page")):
         fn = getattr(main, funcion, None)
         if fn is None:
             comprobar(False, f"{ruta}: no encuentro su handler")
             continue
         try:
-            salida = asyncio.run(fn())
+            args = ()
+            import inspect
+            if len(inspect.signature(fn).parameters) > 0:
+                # Las que reciben la peticion (para poder mirar la sesion).
+                args = (PeticionFalsa(token, "GET", ruta),)
+            salida = asyncio.run(fn(*args))
             html = bytes(salida.body).decode("utf-8", "replace")
         except Exception as exc:  # noqa: BLE001
             comprobar(False, f"{ruta} se sirve ({type(exc).__name__}: {exc})")
             continue
-        comprobar("JARVIS_TOKEN" in html, f"{ruta} lleva el token en la pagina")
-        comprobar("window.fetch" in html and "X-Jarvis-Token" in html,
-                  f"{ruta} añade la cabecera a sus fetch")
+        # Lo que hay que comprobar es que el VALOR del token no este en la
+        # pagina. El nombre de la variable puede quedar en un comentario o en
+        # una referencia que ya no lleva ningun token.
+        comprobar(token not in html,
+                  f"{ruta} NO lleva el token de sesion en la pagina")
+        comprobar("window.fetch" in html,
+                  f"{ruta} envuelve sus fetch para que lleven la sesion")
+
+    # /live lo sirve otro modulo (live_dashboard), y su HTML lleva el token.
+    try:
+        import live_dashboard
+        salida = asyncio.run(live_dashboard.live_page(
+            PeticionFalsa(token, "GET", "/live")))
+        html = bytes(salida.body).decode("utf-8", "replace")
+        comprobar(token not in html, "/live NO lleva el token de sesion")
+    except Exception as exc:  # noqa: BLE001
+        comprobar(False, f"/live se sirve ({type(exc).__name__}: {exc})")
 
 
 def probar_token_no_se_rota() -> None:
@@ -261,6 +307,87 @@ def probar_token_no_se_rota() -> None:
     auth._TOKEN_CACHE.clear()
 
 
+# --------------------------------------------------------------------------- #
+# El flujo completo, como lo vive un navegador
+# --------------------------------------------------------------------------- #
+def probar_flujo_de_sesion() -> None:
+    """La puerta de entrada, de verdad: sin sesion no hay panel, y con sesion
+    si, y el token no aparece por ningun lado del HTML.
+
+    Esto es lo que arreglaba un agujero concreto: las paginas se servian a
+    cualquiera y llevaban el token DENTRO. Con el puerto publicado en la LAN,
+    un `curl http://IP:8000/config` bastaba para quedarse con el token, y con
+    el para pedir `POST /api/config/exportar-claves`, que devuelve todas las
+    claves de API en claro.
+    """
+    seccion("8. El flujo de sesion, como lo vive un navegador")
+    from fastapi.testclient import TestClient
+    import auth
+    import main
+
+    token = auth.token()
+    cliente = TestClient(main.app, follow_redirects=False)
+
+    # --- 1. Sin sesion, el panel no se sirve ----------------------------
+    r = cliente.get("/live")
+    comprobar(r.status_code in (303, 307, 302),
+              f"sin sesion, /live no se sirve (dio {r.status_code})")
+    comprobar("/entrar" in str(r.headers.get("location", "")),
+              f"y te mandan a la puerta de entrada: {r.headers.get('location')}")
+
+    # --- 2. La puerta de entrada es publica ----------------------------
+    r = cliente.get("/entrar")
+    comprobar(r.status_code == 200, "la puerta de entrada se sirve sin sesion")
+    html = r.text
+    comprobar("JARVIS_TOKEN" not in html or token not in html,
+              "y no publica ningun token")
+
+    # --- 3. Con un token MAL, no entra ----------------------------------
+    r = cliente.post("/entrar", json={"token": "este-no-es-el-token"})
+    comprobar(r.status_code == 401, f"con un token falso, no entra (dio {r.status_code})")
+
+    # --- 4. Con el token bueno, cookie y panel --------------------------
+    r = cliente.post("/entrar", json={"token": token})
+    comprobar(r.status_code == 200, f"con el token bueno, entra (dio {r.status_code})")
+    cookie = r.headers.get("set-cookie", "")
+    comprobar("jarvis_sesion=" in cookie, "y deja la cookie de sesion")
+    comprobar("HttpOnly" in cookie,
+              "que es HttpOnly: el JavaScript de la pagina no puede leerla")
+    comprobar("samesite=strict" in cookie.lower(),
+              "y SameSite=Strict (para que no viaje a otros sitios)")
+
+    # Con la cookie puesta, el panel se sirve.
+    r = cliente.get("/live")
+    comprobar(r.status_code == 200, f"con sesion, /live se sirve (dio {r.status_code})")
+    comprobar(token not in r.text,
+              "y su HTML NO lleva el token de sesion dentro")
+
+    # --- 5. Y la API contesta con la cookie ----------------------------
+    r = cliente.get("/api/cmd/estado")
+    comprobar(r.status_code == 200, f"con sesion, la API contesta (dio {r.status_code})")
+
+    # --- 6. /wa y /mic_audio PIDE token --------------------------------
+    # Dan control del cerebro entero (133 herramientas), asi que sin
+    # credencial no pueden funcionar.
+    # Con un cliente NUEVO, sin la cookie de antes: esto es lo que se
+    # encuentra quien llega al puerto sin saber nada.
+    for ruta in ("/wa", "/mic_audio"):
+        limpio = TestClient(main.app, follow_redirects=False)
+        r = limpio.post(ruta, json={"sender": "x", "message": "hola"})
+        comprobar(r.status_code == 401,
+                  f"{ruta} pide token (dio {r.status_code})")
+        r = limpio.post(ruta, json={"sender": "x", "message": "hola"},
+                        headers={"X-Jarvis-Token": token})
+        comprobar(r.status_code != 401,
+                  f"y con token, {ruta} si funciona (dio {r.status_code})")
+
+    # --- 7. Y el token NO se puede sacar de la pagina -------------------
+    r = cliente.get("/config")
+    if r.status_code == 200:
+        comprobar(token not in r.text,
+                  "la pagina de configuracion tampoco lleva el token dentro")
+
+
 def main_() -> int:
     print("SEGURIDAD DE LA API · que no se pueda entrar sin token")
     probar_todas_las_rutas()
@@ -270,6 +397,7 @@ def main_() -> int:
     probar_options()
     probar_no_roto()
     probar_paginas_siguen_sirviendo()
+    probar_flujo_de_sesion()
     probar_token_no_se_rota()
     print()
     if _fallos:

@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from collections import deque
 from typing import Optional
 from uuid import uuid4
@@ -4674,12 +4675,24 @@ def _speak_both(text: str) -> None:
 # raro. Lo que se cierra con esto es el ataque de "tengo una pestana abierta".
 def _ws_autorizado(ws: WebSocket) -> bool:
     """Token + origen. Ambos, y en ese orden: el origen solo se mira si el
-    cliente lo manda, y un cliente que no lo manda puede ser Electron."""
+    cliente lo manda, y un cliente que no lo manda puede ser Electron.
+
+    El token puede llegar de tres maneras: la query, la cabecera o la COOKIE
+    DE SESION. La cookie es la que usa el navegador (y el Electron) cuando
+    ha entrado por la puerta de entrada, asi que sin esto el panel se
+    quedaria sin WebSocket despues de entrar.
+    """
     import auth as _auth
     origen = ws.headers.get("origin") if ws.headers else None
     if not _auth.origen_permitido(origen):
         return False
     candidato = ws.query_params.get("token") or _auth.token_por_cabecera(ws.headers)
+    if not candidato:
+        # La cookie viaja sola en el handshake del WebSocket.
+        try:
+            candidato = ws.cookies.get(_auth.COOKIE_SESION) or ""
+        except Exception:  # noqa: BLE001
+            candidato = ""
     return _auth.coincide(candidato)
 
 
@@ -4726,12 +4739,29 @@ def _exige_token_o_url(req) -> bool:
 #   - assets estaticos.
 # Todo lo demas que empieza por /api/ o /automatizaciones/ PIDE token.
 RUTAS_SIN_TOKEN = {
-    "/", "/health", "/healthz", "/live", "/ui", "/board", "/config", "/setup",
-    "/modo", "/mic", "/mic_audio", "/wa", "/docs", "/redoc", "/openapi.json",
-    "/favicon.ico",
+    # La puerta de entrada y las paginas que no tocan el cerebro.
+    "/", "/health", "/healthz", "/entrar", "/mic",
+    # Los documentos de la API: describen las rutas, no dan acceso a nada.
+    "/docs", "/redoc", "/openapi.json", "/favicon.ico",
 }
-PREFIJOS_SIN_TOKEN = ("/live/", "/ui/", "/board/", "/assets", "/static",
-                      "/favicon")
+PREFIJOS_SIN_TOKEN = ("/assets", "/static", "/favicon")
+
+# Lo que antes estaba abierto y ahora pide sesion. El motivo de cada uno:
+#
+#   /live  /ui  /board  Las tres pantallas principales. Se servian a
+#                      cualquiera y llevaba dentro el token de sesion, con lo
+#                      que un `curl` en la LAN se llevaba TODAS las claves.
+#   /config          Guarda ajustes, importa y exporta claves.
+#   /setup           Importa claves.
+#   /modo            Cambia el modo de funcionamiento.
+#
+# Y estas dos dan control del CEREBRO (133 herramientas), sin credencial:
+#
+#   /wa              El puente de WhatsApp.
+#   /mic_audio       La entrada por microfono.
+#
+# Para entrar hay una pagina: /entrar. Y si vienes con el token en la query
+# (`?token=...`), se guarda la cookie y a partir de ahi ya no hace falta.
 
 
 @app.middleware("http")
@@ -4754,46 +4784,90 @@ async def _token_en_las_api(request: Request, call_next):
         return await call_next(request)
     if ruta in RUTAS_SIN_TOKEN or any(ruta.startswith(p) for p in PREFIJOS_SIN_TOKEN):
         return await call_next(request)
+    # Las paginas que se sirven a un humano: si no hay sesion, se le manda a
+    # la puerta de entrada en vez de darle un 401 que no entiende.
     if not (ruta.startswith("/api/") or ruta.startswith("/automatizaciones/")):
-        return await call_next(request)
-    if _exige_token(request) or _exige_token_o_url(request):
+        if _exige_token(request) or _exige_token_o_url(request) \
+                or _sesion_valida(request):
+            return await call_next(request)
+        # Un GET redirige a la puerta de entrada: es una pagina y el senor
+        # puede entrar con el token. Pero un POST (`/wa`, `/mic_audio`) NO:
+        # su cliente es un programa, no una persona, y un 303 con HTML no le
+        # sirve de nada. Esos reciben un 401 con un error claro.
+        if request.method != "GET":
+            return JSONResponse(
+                {"ok": False, "error": "Falta el token de sesion."},
+                status_code=401)
+        from fastapi.responses import RedirectResponse
+        destino = "/entrar"
+        if ruta not in ("/",):
+            destino += "?destino=" + urllib.parse.quote(ruta, safe="")
+        return RedirectResponse(destino, status_code=303)
+    if _exige_token(request) or _exige_token_o_url(request) \
+            or _sesion_valida(request):
         return await call_next(request)
     return JSONResponse({"ok": False, "error": "Falta el token de sesion."},
                         status_code=401)
 
 
-def _inyecta_token(html: str) -> str:
-    """Mete el token en la pagina para que sus fetch y sus WebSocket lo lleven.
-
-    Va en una variable de window y no en el HTML visible, y solo se sirve a
-    quien ya puede ver la pagina.
-
-    Ademas envuelve `window.fetch` para anadir la cabecera SOLO en lo que va a
-    las rutas propias del cerebro (/api/, /automatizaciones/). Estas paginas
-    tienen el JS escrito en linea y llamaban a la API sin cabeceras; cuando
-    paso a pedir token, sin esto se rompian el guardado de ajustes, la
-    importacion de claves y el cambio de modo. Ponerlo aqui y no en cada
-    llamada es lo que evita que la proxima pagina nueva vuelva a olvidarlo.
-    """
+def _sesion_valida(request) -> bool:
+    """¿La peticion viene con una sesion buena (cookie, cabecera o query)?"""
     import auth as _auth
-    try:
-        t = _auth.token()
-    except Exception:
-        return html
+    return _auth.autenticado(request)
+
+
+@app.get("/entrar")
+async def entrar_page():
+    """La puerta de entrada. Pide el token una vez y guarda la cookie."""
+    from fastapi.responses import HTMLResponse
+    from login_page import PAGINA
+    return HTMLResponse(PAGINA)
+
+
+@app.post("/entrar")
+async def entrar(cuerpo: dict):
+    """Comprueba el token y, si es bueno, deja la cookie de sesion."""
+    import auth as _auth
+    t = str((cuerpo or {}).get("token") or "").strip()
+    if not _auth.coincide(t):
+        return JSONResponse({"ok": False, "error": "Ese token no es valido."},
+                            status_code=401)
+    destino = str((cuerpo or {}).get("destino") or "/live")
+    if not destino.startswith("/"):
+        destino = "/live"
+    respuesta = JSONResponse({"ok": True, "destino": destino})
+    respuesta.set_cookie(_auth.COOKIE_SESION, t, path="/", httponly=True,
+                         samesite="strict")
+    return respuesta
+
+
+def _inyecta_token(html: str) -> str:
+    """Prepara la pagina para que sus peticiones lleven la sesion.
+
+    ANTES: aqui se metia el token de sesion dentro del HTML, en
+    `window.JARVIS_TOKEN`. Eso, en paginas que se servian SIN autenticar,
+    era un agujero: un `curl` en la LAN se llevaba el token, y con el se
+    podia pedir `POST /api/config/exportar-claves`, que devuelve todas las
+    claves de API en claro.
+
+    AHORA: el token NO va en el HTML. Va en una cookie `HttpOnly` (que el
+    JavaScript no puede leer) y el navegador la manda solo en cada peticion.
+    Aqui solo se envuelve `window.fetch` para ensurear `credentials:
+    'same-origin'` y para que las descargas y el WebSocket lleven la sesion.
+
+    Se mantiene el envoltorio de fetch porque estas paginas tienen el JS
+    escrito en linea y llamaban a la API sin cabeceras; cuando paso a pedir
+    token, sin esto se rompian el guardado de ajustes, la importacion de
+    claves y el cambio de modo. Ponerlo aqui y no en cada llamada es lo que
+    evita que la proxima pagina nueva vuelva a olvidarlo.
+    """
     envuelve = (
         "(function(f){if(!f)return;window.fetch=function(u,o){try{"
-        "var s=(typeof u==='string')?u:(u&&u.url)||'';"
-        "if(s.indexOf('/api/')>=0||s.indexOf('/automatizaciones/')>=0){"
-        "o=o||{};o.headers=new Headers(o.headers||{});"
-        "if(!o.headers.has('X-Jarvis-Token')){"
-        "o.headers.set('X-Jarvis-Token',window.JARVIS_TOKEN||'');}}"
-        "catch(e){}return f.call(window,u,o);};})(window.fetch);"
+        "o=o||{};o.credentials=o.credentials||'same-origin';"
+        "o.headers=new Headers(o.headers||{});"
+        "}catch(e){}return f.call(window,u,o);};})(window.fetch);"
     )
-    frag = ('<script>window.JARVIS_TOKEN=%s;window.JARVIS_TOKEN_URL=%s;%s</script>' % (
-        json.dumps(t),
-        json.dumps("?token=" + t),
-        envuelve,
-    ))
+    frag = "<script>%s</script>" % envuelve
     # Justo despues de <head>, para que este disponible antes que el resto.
     for ancla in ("</head>", "<body"):
         i = html.find(ancla)
@@ -5371,14 +5445,24 @@ async def health():
 
 
 @app.post("/wa")
-async def wa_endpoint(payload: dict):
+async def wa_endpoint(request: Request, payload: dict):
     """Puente de WhatsApp (self-chat): procesa un mensaje y devuelve la reply
-    en la respuesta HTTP, SIN difundirla al HUD/orbe. Solo localhost.
+    en la respuesta HTTP, SIN difundirla al HUD/orbe.
 
     Entrada: {message?, sender, audio_b64? (ogg/opus nota de voz),
               image_b64? (foto), voice_reply? bool}
     Salida: {ok, reply, audio_b64? (ogg/opus o None)}
+
+    PIDE TOKEN. Antes decia «Solo localhost» y no lo comprobaba: con el
+    puerto publicado en la LAN, cualquiera que llegara al puerto le podia
+    pedir a JARVIS que ejecutara herramientas (que son 133, y algunas escriben
+    en disco y ejecutan cosas). Ahora se pide la credencial de verdad, que el
+    puente de WhatsApp y el movil ya mandan.
     """
+    if not (_exige_token(request) or _exige_token_o_url(request)
+            or _sesion_valida(request)):
+        return JSONResponse({"ok": False, "error": "Falta el token de sesion."},
+                            status_code=401)
     import base64 as _b64
     text = str(payload.get("message", "") or "").strip()
     sender = str(payload.get("sender", "") or "").strip()
@@ -5496,9 +5580,17 @@ async def mic_page():
 
 
 @app.post("/mic_audio")
-async def mic_audio(payload: dict):
+async def mic_audio(request: Request, payload: dict):
     """Audio del navegador (webm/opus base64) -> texto -> respuesta.
-    Entrada: {audio_b64}. Salida: {ok, text, reply}."""
+    Entrada: {audio_b64}. Salida: {ok, text, reply}.
+
+    PIDE TOKEN, igual que `/wa`: transcribe y contesta, o sea que da control
+    del cerebro sin credencial no deberia poder.
+    """
+    if not (_exige_token(request) or _exige_token_o_url(request)
+            or _sesion_valida(request)):
+        return JSONResponse({"ok": False, "error": "Falta el token de sesion."},
+                            status_code=401)
     import base64 as _b64
     raw = str(payload.get("audio_b64", "") or "")
     if not raw:
