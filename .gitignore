@@ -25,6 +25,12 @@ JARVIS/brain/.auditoria/
 __pycache__/
 *.pyc
 
+# Una copia de seguridad del .env. El patron de arriba es `.env` EXACTO, asi
+# que `.env.bak` se colaba. Y un .env en el repo es un .env con claves.
+*.env.bak
+*.env.local
+*.env.*.bak
+
 node_modules/
 
 # El numero de WhatsApp del propietario. Es un dato personal y no va al repo:
@@ -41,6 +47,10 @@ JARVIS/wa-bridge/owner.json
 **/db/*.json
 **/db/*.db
 **/db/qdrant/
+**/db/*.sqlite
+**/db/*.sqlite3
+**/db/*.db-wal
+**/db/*.db-shm
 
 # Carpetas de trabajo local, no forman parte del proyecto
 _respaldo-ficheros-buenos/
