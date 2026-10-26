@@ -9,8 +9,11 @@ def resolve_within(path, roots, *, must_exist=False):
     raw = os.fspath(path)
     if not isinstance(raw, str) or not raw or "\x00" in raw:
         return None
-    candidate = os.path.realpath(
-        os.path.expandvars(os.path.expanduser(raw)))
+    try:
+        candidate = os.path.realpath(
+            os.path.expandvars(os.path.expanduser(raw)), strict=must_exist)
+    except OSError:
+        return None
     for root in roots:
         trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
         try:
@@ -18,8 +21,6 @@ def resolve_within(path, roots, *, must_exist=False):
         except (OSError, ValueError):
             continue
         if os.path.normcase(common) == os.path.normcase(trusted):
-            if must_exist and not os.path.exists(candidate):
-                return None
             return candidate
     return None
 

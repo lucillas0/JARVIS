@@ -176,7 +176,9 @@ def texto_de(path: str) -> str:
         dentro = os.path.normcase(os.path.commonpath((home, path))) == os.path.normcase(home)
     except ValueError:
         dentro = False
-    if not dentro or not os.path.isfile(path):
+    if not dentro:
+        return ""
+    if not os.path.isfile(path):
         return ""
     k = _clave(path)
     c = _cargar_cache()

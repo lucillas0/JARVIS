@@ -313,7 +313,9 @@ def preview(path: str) -> dict:
                       == os.path.normcase(home))
         except ValueError:
             dentro = False
-        if not dentro or not os.path.isfile(path):
+        if not dentro:
+            return {"ok": False, "reason": "El archivo no existe"}
+        if not os.path.isfile(path):
             return {"ok": False, "reason": "El archivo no existe"}
         ext = os.path.splitext(path)[1].lower()
         html_content: str | None = None

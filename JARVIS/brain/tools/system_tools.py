@@ -410,11 +410,12 @@ def _launch_native(target: str) -> subprocess.CompletedProcess:
     if _is_url(target):
         if not target.lower().startswith(("http://", "https://")):
             return subprocess.CompletedProcess(["startfile", target], 1)
-        t = target
-        name_only = False
+        import webbrowser
+        ok = webbrowser.open(target)
+        return subprocess.CompletedProcess(["webbrowser", target], 0 if ok else 1)
     elif target in APPCMDS:
-        t = target
-        name_only = False
+        os.startfile("shell:appsFolder")
+        return subprocess.CompletedProcess(["startfile", "shell:appsFolder"], 0)
     else:
         t = _safe_open_path(target)
         if t is None:
@@ -468,35 +469,34 @@ def _launch_native(target: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(["startfile", target], 1)
 
     candidate = os.path.realpath(t)
-    if not _is_url(t) and t not in APPCMDS:
-        trusted_roots = [Path.home()]
-        for variable in (
-                "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
-                "APPDATA", "PROGRAMDATA", "LOCALAPPDATA"):
-            root = os.environ.get(variable)
-            if root:
-                trusted_roots.append(root)
-        dentro = False
-        for root in trusted_roots:
-            trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
+    trusted_roots = [Path.home()]
+    for variable in (
+            "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
+            "APPDATA", "PROGRAMDATA", "LOCALAPPDATA"):
+        root = os.environ.get(variable)
+        if root:
+            trusted_roots.append(root)
+    dentro = False
+    for root in trusted_roots:
+        trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
+        try:
+            common = os.path.commonpath((trusted, candidate))
+        except (OSError, ValueError):
+            continue
+        if os.path.normcase(common) == os.path.normcase(trusted):
+            dentro = True
+            break
+    if not dentro:
+        for indexed in _APP_INDEX.values():
             try:
-                common = os.path.commonpath((trusted, candidate))
-            except (OSError, ValueError):
+                if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(candidate):
+                    dentro = True
+                    break
+            except (OSError, TypeError, ValueError):
                 continue
-            if os.path.normcase(common) == os.path.normcase(trusted):
-                dentro = True
-                break
-        if not dentro:
-            for indexed in _APP_INDEX.values():
-                try:
-                    if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(candidate):
-                        dentro = True
-                        break
-                except (OSError, TypeError, ValueError):
-                    continue
-        if not dentro:
-            return subprocess.CompletedProcess(["startfile", t], 1)
-        t = candidate
+    if not dentro:
+        return subprocess.CompletedProcess(["startfile", t], 1)
+    t = candidate
 
     try:
         os.startfile(t)
