@@ -496,13 +496,12 @@ def _launch_native(target: str) -> subprocess.CompletedProcess:
                 continue
     if not dentro:
         return subprocess.CompletedProcess(["startfile", t], 1)
-    t = candidate
 
     try:
-        os.startfile(t)
-        return subprocess.CompletedProcess(["startfile", t], 0)
+        os.startfile(candidate)
+        return subprocess.CompletedProcess(["startfile", candidate], 0)
     except Exception as e:
-        return subprocess.CompletedProcess(["startfile", t], 1,
+        return subprocess.CompletedProcess(["startfile", candidate], 1,
                                            stderr=str(e).encode())
 
 

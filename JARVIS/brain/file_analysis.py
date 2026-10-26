@@ -178,8 +178,6 @@ def texto_de(path: str) -> str:
         dentro = False
     if not dentro:
         return ""
-    if not os.path.isfile(path):
-        return ""
     k = _clave(path)
     c = _cargar_cache()
     hit = c.get(k)
