@@ -39,7 +39,8 @@ def _cfg():
 def _ssh_client(cfg):
     import paramiko
     c = paramiko.SSHClient()
-    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.load_system_host_keys()
+    c.set_missing_host_key_policy(paramiko.RejectPolicy())
     c.connect(hostname=cfg["host"], port=cfg["port"],
               username=cfg["user"], password=cfg["password"],
               timeout=15, banner_timeout=15, auth_timeout=15)

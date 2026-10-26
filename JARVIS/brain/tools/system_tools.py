@@ -7,6 +7,7 @@ Cada herramienta lleva su nivel de riesgo; las sensibles pasan por el doble
 canal del Risk Engine.
 """
 import ctypes
+import glob
 import json
 import logging
 import os
@@ -15,6 +16,8 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+
+from path_security import resolve_user_path, resolve_within
 
 log = logging.getLogger("tools.system")
 
@@ -399,40 +402,111 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 def _launch_native(target: str) -> subprocess.CompletedProcess:
     """Abre target (app/archivo/URL) SIN abrir consolas y SIN bloquear.
-    Usa os.startfile (API nativa de Windows) y, si no resuelve,
-    cmd /c start con CREATE_NO_WINDOW y pipes DEVNULL (fire-and-forget).
-    OJO: NO usar subprocess.run(capture_output=True) con 'cmd /c start':
-    la app GUI hereda los pipes de cmd y run() se queda esperando a que cierre."""
-    t = os.path.abspath(target) if isinstance(target, str) and os.path.exists(target) else target
-    name_only = isinstance(target, str) and not os.path.exists(target) and not _is_url(target)
+    Solo acepta archivos dentro de ubicaciones confiables, apps indexadas y URLs
+    web. No se entrega una ruta sin validar a la shell de Windows."""
+    target = str(target or "").strip()
+    if not target:
+        return subprocess.CompletedProcess(["startfile", ""], 1)
+    if _is_url(target):
+        if not target.lower().startswith(("http://", "https://")):
+            return subprocess.CompletedProcess(["startfile", target], 1)
+        import webbrowser
+        ok = webbrowser.open(target)
+        return subprocess.CompletedProcess(["webbrowser", target], 0 if ok else 1)
+    elif target in APPCMDS:
+        os.startfile("shell:appsFolder")
+        return subprocess.CompletedProcess(["startfile", "shell:appsFolder"], 0)
+    else:
+        t = _safe_open_path(target)
+        if t is None:
+            if "/" in target or "\\" in target:
+                return subprocess.CompletedProcess(["startfile", target], 1)
+            name_only = True
+        else:
+            name_only = False
 
     # Preferir ruta absoluta del ejecutable (evita cmd y sus pipes).
     if name_only:
         resolved = _command_path(target)
         if resolved:
-            resolved = os.path.abspath(resolved)
-            os.startfile(resolved)
-            return subprocess.CompletedProcess(["startfile", resolved], 0)
+            resolved = _safe_open_path(resolved)
+            if resolved:
+                candidate = os.path.realpath(resolved)
+                trusted_roots = [Path.home()]
+                for variable in (
+                        "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
+                        "APPDATA", "PROGRAMDATA", "LOCALAPPDATA"):
+                    root = os.environ.get(variable)
+                    if root:
+                        trusted_roots.append(root)
+                dentro = False
+                for root in trusted_roots:
+                    trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
+                    try:
+                        common = os.path.commonpath((trusted, candidate))
+                    except (OSError, ValueError):
+                        continue
+                    if os.path.normcase(common) == os.path.normcase(trusted):
+                        dentro = True
+                        break
+                if not dentro:
+                    for indexed in _APP_INDEX.values():
+                        try:
+                            if (os.path.normcase(os.path.realpath(indexed))
+                                    == os.path.normcase(candidate)):
+                                dentro = True
+                                break
+                        except (OSError, TypeError, ValueError):
+                            continue
+                if not dentro:
+                    return subprocess.CompletedProcess(["startfile", resolved], 1)
+                resolved = candidate
+                try:
+                    os.startfile(resolved)
+                    return subprocess.CompletedProcess(["startfile", resolved], 0)
+                except Exception:
+                    return subprocess.CompletedProcess(["startfile", resolved], 1)
+        return subprocess.CompletedProcess(["startfile", target], 1)
+
+    candidate = os.path.realpath(t)
+    safe_candidate = _safe_open_path(candidate)
+    if not safe_candidate:
+        return subprocess.CompletedProcess(["startfile", candidate], 1)
+
+    trusted_roots = [Path.home()]
+    for variable in (
+            "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
+            "APPDATA", "PROGRAMDATA", "LOCALAPPDATA"):
+        root = os.environ.get(variable)
+        if root:
+            trusted_roots.append(root)
+    dentro = False
+    for root in trusted_roots:
+        trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
+        try:
+            common = os.path.commonpath((trusted, safe_candidate))
+        except (OSError, ValueError):
+            continue
+        if os.path.normcase(common) == os.path.normcase(trusted):
+            dentro = True
+            break
+    if not dentro:
+        for indexed in _APP_INDEX.values():
+            try:
+                if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(safe_candidate):
+                    dentro = True
+                    break
+            except (OSError, TypeError, ValueError):
+                continue
+    if not dentro:
+        return subprocess.CompletedProcess(["startfile", safe_candidate], 1)
 
     try:
-        if os.path.exists(t):
-            os.startfile(t)
-            return subprocess.CompletedProcess(["startfile", t], 0)
-    except Exception:
-        pass
-
-    # Fire-and-forget: no esperamos, no capturamos nada.
-    try:
-        p = subprocess.Popen(
-            ["cmd", "/c", "start", "", t],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=_NO_WINDOW,
-        )
-        return subprocess.CompletedProcess(["cmd", "/c", "start", t], 0)
+        os.startfile(safe_candidate)
+        return subprocess.CompletedProcess(["startfile", safe_candidate], 0)
     except Exception as e:
-        return subprocess.CompletedProcess(["cmd", "/c", "start", t], 1, stderr=str(e).encode())
+        return subprocess.CompletedProcess(["startfile", safe_candidate], 1,
+                                           stderr=str(e).encode())
 
 
 def _is_url(s: str) -> bool:
@@ -450,6 +524,29 @@ def _command_path(cmd: str) -> str | None:
             return r.stdout.strip().splitlines()[0]
     except Exception:
         pass
+    return None
+
+
+def _safe_open_path(path: str) -> str | None:
+    """Canonicalize a local target and confine it to user/app directories."""
+    roots = [Path.home()]
+    for variable in (
+            "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
+            "APPDATA", "PROGRAMDATA", "LOCALAPPDATA"):
+        root = os.environ.get(variable)
+        if root:
+            roots.append(root)
+    resolved = resolve_within(path, roots, must_exist=True)
+    if resolved:
+        return resolved
+
+    candidate = os.path.realpath(os.path.expanduser(path))
+    for indexed in _APP_INDEX.values():
+        try:
+            if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(candidate):
+                return candidate
+        except (OSError, TypeError, ValueError):
+            continue
     return None
 
 
@@ -471,21 +568,29 @@ def _resolve_open_target(name: str) -> str:
     low = name.lower()
     memo = _RESOLVED.get(low)
     if memo:
-        return memo
+        safe_memo = _safe_open_path(memo)
+        if safe_memo:
+            return safe_memo
+        _RESOLVED.pop(low, None)
 
-    # 1) Ruta existente literal: lo más rápido y lo más exacto.
+    # 1) Ruta existente y permitida: lo más rápido y lo más exacto.
     try:
-        if os.path.exists(name):
-            return os.path.abspath(name)
+        literal = _safe_open_path(name)
+        if literal:
+            return literal
     except Exception:
         pass
+    if "/" in name or "\\" in name:
+        return ""
 
     # 2) El índice: una consulta de diccionario, sin subprocesos ni disco.
     _ensure_index()
     hit = _index_lookup(name)
     if hit:
-        _RESOLVED[low] = hit
-        return hit
+        safe_hit = _safe_open_path(hit)
+        if safe_hit:
+            _RESOLVED[low] = safe_hit
+            return safe_hit
 
     # 3) Comando directo (npm, calc, etc.) que no esté en el índice.
     if _command_exists(name) or _command_exists(f"{name}.exe"):
@@ -501,17 +606,23 @@ def _resolve_open_target(name: str) -> str:
     for base in paths:
         if not base.exists():
             continue
-        candidates = list(base.rglob(f"*{name}*.lnk")) + list(base.rglob(f"*{name}*.exe"))
-        if candidates:
-            _RESOLVED[low] = str(candidates[0])
-            return str(candidates[0])
+        pattern = glob.escape(name)
+        candidates = (list(base.rglob(f"*{pattern}*.lnk"))
+                      + list(base.rglob(f"*{pattern}*.exe")))
+        for candidate in candidates:
+            safe_candidate = _safe_open_path(str(candidate))
+            if safe_candidate:
+                _RESOLVED[low] = safe_candidate
+                return safe_candidate
 
     # 5) Barrido del disco: lento, pero solo la primera vez. Se memoriza igual.
     for drive in _fixed_drives():
         hits = _search_disk(drive, name)
-        if hits:
-            _RESOLVED[low] = hits[0]
-            return hits[0]
+        for hit in hits:
+            safe_hit = _safe_open_path(hit)
+            if safe_hit:
+                _RESOLVED[low] = safe_hit
+                return safe_hit
 
     return name
 
@@ -573,13 +684,15 @@ def open_file_handler(params: dict) -> dict:
     path = params.get("path") or params.get("file")
     if not path:
         raise ValueError("Falta la ruta del archivo")
-    path = os.path.expandvars(path)
-    if not os.path.exists(path):
-        hit = _search_disk(os.path.splitdrive(path)[0] + "\\" if os.path.splitdrive(path)[0] else "C:\\",
-                           os.path.basename(path))
+    path = resolve_user_path(path, must_exist=True)
+    if not path:
+        original = params.get("path") or params.get("file") or ""
+        hit = _search_disk(str(Path.home()), os.path.basename(original))
+        hit = [candidate for candidate in hit
+               if resolve_user_path(candidate, must_exist=True)]
         if not hit:
-            raise FileNotFoundError(f"No encuentro el archivo: {path}")
-        path = hit[0]
+            raise FileNotFoundError("No encuentro el archivo en tu carpeta de usuario")
+        path = resolve_user_path(hit[0], must_exist=True)
     r = _os_start(path)
     return {"opened": path, "rc": r.returncode}
 

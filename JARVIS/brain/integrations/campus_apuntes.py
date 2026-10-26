@@ -27,6 +27,8 @@ import threading
 import time
 import unicodedata
 
+from integrations.html_utils import html_text_and_markers
+
 log = logging.getLogger("integrations.campus_apuntes")
 
 _LOCK = threading.Lock()
@@ -116,26 +118,8 @@ _CORTES = (
     "Ayuda de Moodle",
 )
 
-# Por orden: el primero que exista gana. 'activity-description' es donde
-# Moodle mete el enunciado de la tarea; antes se cogía el menú de la izquierda.
-_MARCAS = (
-    r'class="[^"]*activity-description[^"]*"',
-    r'class="[^"]*text_to_print[^"]*"',
-    r'itemprop="description"',
-    r'id="intro"',
-    r'data-region="content"',
-    r'role="main"',
-    r'id="region-main"',
-)
-
-
 def _a_texto(h: str) -> str:
-    h = re.sub(r"<br\s*/?>", "\n", h, flags=re.I)
-    h = re.sub(r"</(p|div|li|tr|h[1-6])>", "\n", h, flags=re.I)
-    h = re.sub(r"<li[^>]*>", "- ", h, flags=re.I)
-    h = re.sub(r"<[^>]+>", " ", h)
-    h = re.sub(r"&nbsp;?", " ", h)
-    h = re.sub(r"&[a-z]+;|&#\d+;", " ", h)
+    h = (h or "").replace("\xa0", " ")
     h = re.sub(r"[ \t]+", " ", h)
     h = re.sub(r"\n\s*\n\s*\n+", "\n\n", h).strip()
     corte = len(h)
@@ -153,17 +137,10 @@ def _html_a_texto(html: str) -> str:
     da. Cogía la primera que encontraba y eso, en las páginas de los ficheros,
     se quedaba con cuatro palabras.
     """
-    h = re.sub(r"<script.*?</script>", " ", html or "", flags=re.S | re.I)
-    h = re.sub(r"<style.*?</style>", " ", h, flags=re.S | re.I)
-    h = re.sub(r"<noscript.*?</noscript>", " ", h, flags=re.S | re.I)
-    mejor = _a_texto(h)
-    for marca in _MARCAS:
-        m = re.search(marca, h)
-        if not m:
-            continue
-        fin = h.find(">", m.start())
-        trozo = h[fin + 1:] if 0 <= fin < m.start() + 200 else h[m.end():]
-        t = _a_texto(trozo)
+    texto, marcas = html_text_and_markers(html)
+    mejor = _a_texto(texto)
+    for inicio in marcas:
+        t = _a_texto(texto[inicio:])
         if len(t) > len(mejor):
             mejor = t
     return mejor

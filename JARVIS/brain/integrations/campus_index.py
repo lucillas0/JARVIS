@@ -24,6 +24,8 @@ import re
 import threading
 import time
 
+from integrations.html_utils import html_text
+
 log = logging.getLogger("integrations.campus_index")
 
 # El Moodle no cambia de contenido cada segundo. Si el índice es younger que
@@ -112,16 +114,14 @@ def cursos() -> list[dict]:
 
 def _texto(html: str, desde_ruta: str | None = None) -> list[str]:
     """Texto útil de una página del Moodle, sin menú ni migas."""
-    sin = re.sub(r"<script.*?</script>", " ", html or "", flags=re.S | re.I)
-    sin = re.sub(r"<style.*?</style>", " ", sin, flags=re.S | re.I)
+    sin = html_text(html)
     if desde_ruta:
         m = re.search(desde_ruta, sin, re.S | re.I)
         if m:
             sin = sin[m.start():]
-    txt = re.sub(r"<[^>]+>", "\n", sin)
     out: list[str] = []
     vistos: set = set()
-    for x in txt.split("\n"):
+    for x in sin.split("\n"):
         x = re.sub(r"&[a-zA-Z#0-9]+;", " ", x).strip()
         x = re.sub(r"\s+", " ", x)
         if len(x) < 4 or len(x) > 300 or _RUIDO.match(x) or _RUIDO.search(x):

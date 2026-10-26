@@ -304,7 +304,16 @@ def _read_pdf_html(path: str) -> str:
 def preview(path: str) -> dict:
     """Devuelve {ok, text?, html?, reason?, truncated?}."""
     try:
-        if not path or not os.path.exists(path):
+        if not path:
+            return {"ok": False, "reason": "El archivo no existe"}
+        path = os.path.realpath(os.path.expandvars(os.path.expanduser(path)))
+        home = os.path.realpath(os.path.expanduser("~"))
+        try:
+            dentro = (os.path.normcase(os.path.commonpath((home, path)))
+                      == os.path.normcase(home))
+        except ValueError:
+            dentro = False
+        if not dentro:
             return {"ok": False, "reason": "El archivo no existe"}
         ext = os.path.splitext(path)[1].lower()
         html_content: str | None = None
