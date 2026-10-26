@@ -171,7 +171,9 @@ def list_dir(directorio: str | None) -> dict:
     """Listado de una carpeta, con la misma forma que usa la pizarra."""
     if not directorio:
         return {"path": None, "name": "Recientes", "parent": None,
-                "homes": home_dirs(), "drives": fixed_drives(),
+                "homes": home_dirs(),
+                "drives": [drive for drive in fixed_drives()
+                           if resolve_user_path(drive, must_exist=True)],
                 "folders": [], "entries": recent_files()}
     try:
         safe_path = resolve_user_path(directorio, must_exist=True)
