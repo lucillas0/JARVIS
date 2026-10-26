@@ -469,6 +469,10 @@ def _launch_native(target: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(["startfile", target], 1)
 
     candidate = os.path.realpath(t)
+    safe_candidate = _safe_open_path(candidate)
+    if not safe_candidate:
+        return subprocess.CompletedProcess(["startfile", candidate], 1)
+
     trusted_roots = [Path.home()]
     for variable in (
             "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
@@ -480,7 +484,7 @@ def _launch_native(target: str) -> subprocess.CompletedProcess:
     for root in trusted_roots:
         trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
         try:
-            common = os.path.commonpath((trusted, candidate))
+            common = os.path.commonpath((trusted, safe_candidate))
         except (OSError, ValueError):
             continue
         if os.path.normcase(common) == os.path.normcase(trusted):
@@ -489,19 +493,19 @@ def _launch_native(target: str) -> subprocess.CompletedProcess:
     if not dentro:
         for indexed in _APP_INDEX.values():
             try:
-                if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(candidate):
+                if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(safe_candidate):
                     dentro = True
                     break
             except (OSError, TypeError, ValueError):
                 continue
     if not dentro:
-        return subprocess.CompletedProcess(["startfile", t], 1)
+        return subprocess.CompletedProcess(["startfile", safe_candidate], 1)
 
     try:
-        os.startfile(candidate)
-        return subprocess.CompletedProcess(["startfile", candidate], 0)
+        os.startfile(safe_candidate)
+        return subprocess.CompletedProcess(["startfile", safe_candidate], 0)
     except Exception as e:
-        return subprocess.CompletedProcess(["startfile", candidate], 1,
+        return subprocess.CompletedProcess(["startfile", safe_candidate], 1,
                                            stderr=str(e).encode())
 
 
