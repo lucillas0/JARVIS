@@ -430,12 +430,73 @@ def _launch_native(target: str) -> subprocess.CompletedProcess:
         if resolved:
             resolved = _safe_open_path(resolved)
             if resolved:
+                candidate = os.path.realpath(resolved)
+                trusted_roots = [Path.home()]
+                for variable in (
+                        "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
+                        "APPDATA", "PROGRAMDATA", "LOCALAPPDATA"):
+                    root = os.environ.get(variable)
+                    if root:
+                        trusted_roots.append(root)
+                dentro = False
+                for root in trusted_roots:
+                    trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
+                    try:
+                        common = os.path.commonpath((trusted, candidate))
+                    except (OSError, ValueError):
+                        continue
+                    if os.path.normcase(common) == os.path.normcase(trusted):
+                        dentro = True
+                        break
+                if not dentro:
+                    for indexed in _APP_INDEX.values():
+                        try:
+                            if (os.path.normcase(os.path.realpath(indexed))
+                                    == os.path.normcase(candidate)):
+                                dentro = True
+                                break
+                        except (OSError, TypeError, ValueError):
+                            continue
+                if not dentro:
+                    return subprocess.CompletedProcess(["startfile", resolved], 1)
+                resolved = candidate
                 try:
                     os.startfile(resolved)
                     return subprocess.CompletedProcess(["startfile", resolved], 0)
                 except Exception:
                     return subprocess.CompletedProcess(["startfile", resolved], 1)
         return subprocess.CompletedProcess(["startfile", target], 1)
+
+    candidate = os.path.realpath(t)
+    if not _is_url(t) and t not in APPCMDS:
+        trusted_roots = [Path.home()]
+        for variable in (
+                "ProgramFiles", "ProgramFiles(x86)", "WINDIR",
+                "APPDATA", "PROGRAMDATA", "LOCALAPPDATA"):
+            root = os.environ.get(variable)
+            if root:
+                trusted_roots.append(root)
+        dentro = False
+        for root in trusted_roots:
+            trusted = os.path.realpath(os.path.expanduser(os.fspath(root)))
+            try:
+                common = os.path.commonpath((trusted, candidate))
+            except (OSError, ValueError):
+                continue
+            if os.path.normcase(common) == os.path.normcase(trusted):
+                dentro = True
+                break
+        if not dentro:
+            for indexed in _APP_INDEX.values():
+                try:
+                    if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(candidate):
+                        dentro = True
+                        break
+                except (OSError, TypeError, ValueError):
+                    continue
+        if not dentro:
+            return subprocess.CompletedProcess(["startfile", t], 1)
+        t = candidate
 
     try:
         os.startfile(t)
@@ -477,8 +538,6 @@ def _safe_open_path(path: str) -> str | None:
         return resolved
 
     candidate = os.path.realpath(os.path.expanduser(path))
-    if not os.path.isfile(candidate):
-        return None
     for indexed in _APP_INDEX.values():
         try:
             if os.path.normcase(os.path.realpath(indexed)) == os.path.normcase(candidate):

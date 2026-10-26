@@ -168,8 +168,15 @@ def _clave(path: str) -> str:
 
 def texto_de(path: str) -> str:
     """El texto del archivo, cacheado por fecha y tamaño."""
-    path = resolve_user_path(path, must_exist=True)
-    if not path or not os.path.isfile(path):
+    if not path:
+        return ""
+    path = os.path.realpath(os.path.expandvars(os.path.expanduser(path)))
+    home = os.path.realpath(os.path.expanduser("~"))
+    try:
+        dentro = os.path.normcase(os.path.commonpath((home, path))) == os.path.normcase(home)
+    except ValueError:
+        dentro = False
+    if not dentro or not os.path.isfile(path):
         return ""
     k = _clave(path)
     c = _cargar_cache()

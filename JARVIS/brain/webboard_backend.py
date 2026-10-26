@@ -366,8 +366,7 @@ def abrir(item: dict) -> dict:
             )
             safe_path = _safe_open_path(ruta)
             if safe_path:
-                ruta = safe_path
-                os.startfile(ruta)
+                _launch_native(safe_path)
             else:
                 target = _resolve_open_target(ruta)
                 if not target or target == ruta:
