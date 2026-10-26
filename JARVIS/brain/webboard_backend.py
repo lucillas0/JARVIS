@@ -19,6 +19,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from path_security import resolve_user_path
+
 log = logging.getLogger("webboard")
 
 _SKIP_EXT = {".lnk", ".dll", ".sys", ".tmp", ".ini", ".reg"}
@@ -172,7 +174,10 @@ def list_dir(directorio: str | None) -> dict:
                 "homes": home_dirs(), "drives": fixed_drives(),
                 "folders": [], "entries": recent_files()}
     try:
-        base = Path(directorio).expanduser().resolve()
+        safe_path = resolve_user_path(directorio, must_exist=True)
+        if not safe_path:
+            return list_dir(None)
+        base = Path(safe_path)
     except Exception:
         return list_dir(None)
     if not base.is_dir():
@@ -356,12 +361,22 @@ def abrir(item: dict) -> dict:
         return {"ok": False, "error": "no hay nada que abrir"}
     try:
         if os.name == "nt":
-            if os.path.exists(ruta):
-                os.startfile(ruta)  # noqa: S606
+            from tools.system_tools import (
+                _launch_native, _resolve_open_target, _safe_open_path,
+            )
+            safe_path = _safe_open_path(ruta)
+            if safe_path:
+                ruta = safe_path
+                os.startfile(ruta)
             else:
-                from tools.system_tools import _resolve_open_target, _launch_native
-                _launch_native(_resolve_open_target(ruta))
+                target = _resolve_open_target(ruta)
+                if not target or target == ruta:
+                    return {"ok": False, "error": "ruta fuera de ubicaciones permitidas"}
+                _launch_native(target)
         else:
+            ruta = resolve_user_path(ruta, must_exist=True)
+            if not ruta:
+                return {"ok": False, "error": "ruta fuera de la carpeta de usuario"}
             subprocess.Popen(["xdg-open", ruta],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"ok": True, "opened": ruta}

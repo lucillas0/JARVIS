@@ -13,6 +13,8 @@ import zipfile
 import logging
 import html as _htmllib
 
+from path_security import resolve_user_path
+
 log = logging.getLogger("brain.file_reader")
 
 MAX_CHARS = 60000
@@ -304,7 +306,8 @@ def _read_pdf_html(path: str) -> str:
 def preview(path: str) -> dict:
     """Devuelve {ok, text?, html?, reason?, truncated?}."""
     try:
-        if not path or not os.path.exists(path):
+        path = resolve_user_path(path, must_exist=True)
+        if not path or not os.path.isfile(path):
             return {"ok": False, "reason": "El archivo no existe"}
         ext = os.path.splitext(path)[1].lower()
         html_content: str | None = None

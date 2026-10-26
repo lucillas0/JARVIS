@@ -23,6 +23,8 @@ import threading
 import time
 import unicodedata
 
+from path_security import resolve_user_path
+
 log = logging.getLogger("brain.file_analysis")
 
 _LOCK = threading.Lock()
@@ -166,7 +168,8 @@ def _clave(path: str) -> str:
 
 def texto_de(path: str) -> str:
     """El texto del archivo, cacheado por fecha y tamaño."""
-    if not path or not os.path.exists(path):
+    path = resolve_user_path(path, must_exist=True)
+    if not path or not os.path.isfile(path):
         return ""
     k = _clave(path)
     c = _cargar_cache()
@@ -287,7 +290,7 @@ def _truncado(path: str) -> bool:
 
 def analizar(path: str) -> dict:
     """Todo lo que se puede decir del archivo sin preguntar a nadie."""
-    path = os.path.expanduser(os.path.expandvars((path or "").strip().strip('"')))
+    path = resolve_user_path((path or "").strip().strip('"'), must_exist=True)
     if not path or not os.path.exists(path):
         return {"ok": False, "razon": "Ese archivo no existe, señor."}
     if os.path.isdir(path):

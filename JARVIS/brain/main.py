@@ -4364,7 +4364,12 @@ async def ui_static(ruta: str):
     base = os.path.realpath(_ui_dir())
     destino = os.path.realpath(os.path.join(base, ruta))
     # Nada fuera de la carpeta: evita el ../../ clasico.
-    if not destino.startswith(base + os.sep) and destino != base:
+    try:
+        dentro = (os.path.normcase(os.path.commonpath((base, destino)))
+                  == os.path.normcase(base))
+    except ValueError:
+        dentro = False
+    if not dentro:
         raise HTTPException(status_code=403, detail="fuera de la interfaz")
     if not os.path.isfile(destino):
         raise HTTPException(status_code=404, detail="no encontrado")
@@ -5807,4 +5812,3 @@ $('#ir').onclick=async()=>{
   setTimeout(()=>{location.href='/setup';},700);
 };
 </script></body></html>"""
-
